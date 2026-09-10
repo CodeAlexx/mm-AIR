@@ -1,0 +1,1112 @@
+// Direct in-process MiniMax-H3 generation worker for MM-Air. The worker owns
+// its GPU context and calls the linked pure-AIR H3 session; there is no model
+// process, HTTP boundary, Python runtime, or C++ model adapter.
+module app.mm_air.generate
+
+import std.channel as channel
+import std.compute_offload as offload
+import std.draw as draw
+import std.files as files
+import std.gpu as agpu
+import std.math as math
+import std.media as media_io
+import std.media_input as media_input
+import std.path as path
+import std.process as proc
+import std.text as text
+import ".air/deps/qwen/tokenizer.ai" as tokenizer
+import ".air/deps/h3/audio_encode.ai" as audio_encode
+import ".air/deps/h3/checkpoint.ai" as checkpoint
+import ".air/deps/h3/conditioning.ai" as conditioning
+import ".air/deps/h3/image_input.ai" as image_input
+import ".air/deps/h3/media.ai" as h3_media
+import ".air/deps/h3/packing.ai" as packing
+import ".air/deps/h3/presentation.ai" as presentation
+import ".air/deps/h3/session.ai" as session
+import ".air/deps/h3/vae.ai" as vae
+
+pub type Job = struct {
+  checkpoint_root: string,
+  reference_checkpoint_root: string,
+  donor_root: string,
+  manifest_root: string,
+  scratch_root: string,
+  prompt: string,
+  model: session.Model,
+  task: session.Task,
+  geometry: h3_media.Geometry,
+  references: array<string>,
+  audio_references: array<string>,
+  output: string,
+  seed: u64,
+  evaluations: u64,
+  conditioner_projection: session.Projection,
+  transformer_projection: session.Projection,
+  attention: session.Attention,
+  progress: channel.Ticket
+}
+
+pub type Outcome = struct {
+  succeeded: bool,
+  output: string,
+  message: string
+}
+
+pub type Configuration = struct {
+  checkpoint_root: string,
+  reference_checkpoint_root: string,
+  donor_root: string,
+  manifest_root: string,
+  scratch_root: string
+}
+
+fn required_environment(name: str) -> result<string,string> effects {alloc,env} {
+  match env.get(name) {
+    some(value) => {
+      if str.len(str.view(value)) == 0 {
+        return result.err(text.concat(name, " is empty"))
+      }
+      result.ok(value)
+    },
+    none => result.err(text.concat("Set ", name)),
+  }
+}
+
+// Model locations are application configuration, never compiled-in personal
+// paths. This also lets a moved checkpoint set be selected without rebuilding.
+pub fn configuration() -> result<Configuration,string> effects {alloc,env} {
+  let checkpoint_root: string = try required_environment(
+    "MM_AIR_H3_CHECKPOINT_ROOT")
+  let reference_checkpoint_root: string = match env.get(
+      "MM_AIR_H3_REFERENCE_ROOT") {
+    some(value) => value,
+    none => string.new(),
+  }
+  let donor_root: string = try required_environment("MM_AIR_H3_DONOR_ROOT")
+  let manifest_root: string = try required_environment("MM_AIR_H3_MANIFEST_ROOT")
+  let scratch_root: string = match env.get("TMPDIR") {
+    some(value) => value,
+    none => text.copy("/tmp"),
+  }
+  result.ok(Configuration {checkpoint_root: checkpoint_root,
+    reference_checkpoint_root: reference_checkpoint_root,
+    donor_root: donor_root, manifest_root: manifest_root,
+    scratch_root: scratch_root})
+}
+
+pub fn job(configuration: ref<Configuration>, prompt: str,
+           model: session.Model, task: session.Task,
+           geometry: h3_media.Geometry, references: array<string> own,
+           audio_references: array<string> own, output: str, seed: u64,
+           evaluations: u64,
+           conditioner_projection: session.Projection,
+           transformer_projection: session.Projection,
+           attention: session.Attention, progress: channel.Ticket own) -> Job
+    effects {alloc} {
+  var owned_references: array<string> = references
+  var owned_audio_references: array<string> = audio_references
+  Job {
+    checkpoint_root: text.copy(str.view(struct.borrow(configuration,
+      field=checkpoint_root))),
+    reference_checkpoint_root: text.copy(str.view(struct.borrow(configuration,
+      field=reference_checkpoint_root))),
+    donor_root: text.copy(str.view(struct.borrow(configuration,
+      field=donor_root))),
+    manifest_root: text.copy(str.view(struct.borrow(configuration,
+      field=manifest_root))),
+    scratch_root: text.copy(str.view(struct.borrow(configuration,
+      field=scratch_root))),
+    prompt: text.copy(prompt), model: model, task: task, geometry: geometry,
+    references: owned_references, audio_references: owned_audio_references,
+    output: text.copy(output), seed: seed, evaluations: evaluations,
+    conditioner_projection: conditioner_projection,
+    transformer_projection: transformer_projection, attention: attention,
+    progress: progress}
+}
+
+fn joined(root: str, suffix: str) -> string effects {alloc} {
+  path.join(root, suffix)
+}
+
+fn outcome(succeeded: bool, output: str, message: str) -> Outcome effects {alloc} {
+  Outcome {succeeded: succeeded, output: text.copy(output),
+    message: text.copy(message)}
+}
+
+fn no_progress() -> channel.Ticket effects {alloc} {
+  channel.Ticket {port: 0, token: string.new(), capacity: 0, max_message: 0}
+}
+
+fn report(sender: ref<channel.Sender>, message: str) -> unit effects {alloc,net,time} {
+  let _ = channel.offer(sender, 1, str.bytes(message))
+  ()
+}
+
+fn rgb_pixels(surface: ref<draw.Surface>) -> array<byte> effects {alloc} {
+  let width: u64 = cast.wrap(surface.width)
+  let height: u64 = cast.wrap(surface.height)
+  if width == 0 or height == 0 or
+     array.len(struct.borrow(surface, field=pixels)) != width * height * 4 {
+    panic "MM-Air reference surface is not RGBA8"
+  }
+  var output: array<byte> = array.new()
+  var pixel: u64 = 0
+  loop {
+    if pixel >= width * height { break }
+    array.push(output, array.get(struct.borrow(surface, field=pixels), pixel * 4))
+    array.push(output, array.get(struct.borrow(surface, field=pixels), pixel * 4 + 1))
+    array.push(output, array.get(struct.borrow(surface, field=pixels), pixel * 4 + 2))
+    pixel = pixel + 1
+  }
+  output
+}
+
+fn round_half_even_positive(value: f64) -> u64 effects {} {
+  let lower: f64 = math.floor(value)
+  let fraction: f64 = value - lower
+  let integer: u64 = cast.sat(lower)
+  if fraction > 0.5 or (fraction == 0.5 and rem(integer, 2) != 0) {
+    integer + 1
+  } else { integer }
+}
+
+pub type CreatorCanvas = struct { width: u64, height: u64 }
+
+// packing_ref2va.py resolve_canvas_size: short edge 768, area cap 768*1344,
+// nearest-even multiple-of-32 rounding. Pixel resampling is the separate
+// parity-gated `image_input.resize` operation.
+fn creator_canvas(width: u64, height: u64) -> result<CreatorCanvas,string>
+    effects {alloc} {
+  if width == 0 or height == 0 {
+    return result.err("H3 Ref2VA reference dimensions must be positive")
+  }
+  let ratio: f64 = cast.float(width) / cast.float(height)
+  if ratio < 0.25 or ratio > 4.0 {
+    return result.err("H3 Ref2VA reference aspect ratio must be within 1:4..4:1")
+  }
+  var resolved_width: f64 = 768.0
+  var resolved_height: f64 = 768.0
+  if ratio >= 1.0 {
+    resolved_width = 768.0 * ratio
+  } else {
+    resolved_height = 768.0 / ratio
+  }
+  let area: f64 = resolved_width * resolved_height
+  let maximum: f64 = 768.0 * 1344.0
+  if area > maximum {
+    let scale: f64 = math.sqrt(maximum / area)
+    resolved_width = resolved_width * scale
+    resolved_height = resolved_height * scale
+  }
+  let rounded_width: u64 = round_half_even_positive(resolved_width / 32.0) * 32
+  let rounded_height: u64 = round_half_even_positive(resolved_height / 32.0) * 32
+  result.ok(CreatorCanvas {width: rounded_width, height: rounded_height})
+}
+
+// The shipped Serenity Ref2VA product profile sets H3_REF_IMAGE_SHORT_EDGE=768,
+// but otherwise keeps the creator's image-specific law: independently scale
+// both axes from the short edge, half-even round to 32, and apply NO video
+// canvas area cap. This is deliberately separate from creator_canvas().
+pub fn reference_image_canvas(width: u64, height: u64)
+    -> result<CreatorCanvas,string> effects {alloc} {
+  if width == 0 or height == 0 {
+    return result.err("H3 Ref2VA image dimensions must be positive")
+  }
+  if width > 4 * height or height > 4 * width {
+    return result.err("H3 Ref2VA image aspect ratio must be within 1:4..4:1")
+  }
+  let short_edge: u64 = if width < height { width } else { height }
+  let scale: f64 = 768.0 / cast.float(short_edge)
+  var rounded_width: u64 = round_half_even_positive(
+    cast.float(width) * scale / 32.0) * 32
+  var rounded_height: u64 = round_half_even_positive(
+    cast.float(height) * scale / 32.0) * 32
+  if rounded_width < 32 { rounded_width = 32 }
+  if rounded_height < 32 { rounded_height = 32 }
+  result.ok(CreatorCanvas {width: rounded_width, height: rounded_height})
+}
+
+// Only the video VAE sees this 17n+5 prefix. Qwen vision continues to sample
+// the complete target-truncated 24 FPS reference, exactly like the Mojo product
+// and creator encoder. Fewer than 22 frames cannot supply the first VAE chunk.
+pub fn reference_video_encode_frames(frames: u64) -> result<u64,string>
+    effects {alloc} {
+  if frames < 22 {
+    return result.err(
+      "H3 Ref2VA video needs at least 22 frames on the 24 FPS grid")
+  }
+  result.ok(((frames - 5) / 17) * 17 + 5)
+}
+
+// Geometry record consumed by the existing T1 video-VAE encoder. Ref2VA
+// images keep their own creator canvas instead of being resized to the target.
+fn image_reference_geometry(surface: ref<draw.Surface>)
+    -> result<h3_media.Geometry,string> effects {alloc} {
+  let width: u64 = cast.wrap(surface.width)
+  let height: u64 = cast.wrap(surface.height)
+  if width == 0 or height == 0 or rem(width, 32) != 0 or
+     rem(height, 32) != 0 {
+    return result.err("H3 Ref2VA reference canvas is not 32-aligned")
+  }
+  result.ok(h3_media.Geometry {frames: 1, width: width, height: height,
+    latent_frames: 1, latent_width: width / 16, latent_height: height / 16,
+    audio_latents: 0, audio_samples: 0})
+}
+
+type VideoFrames = struct {
+  pixels: bytes,
+  frames: u64,
+  width: u64,
+  height: u64
+}
+
+fn resize_video_frames(source: view<byte>, frames: u64, width: u64,
+                       height: u64, canvas: CreatorCanvas)
+    -> result<bytes,string> effects {alloc} {
+  if frames == 0 or view.len(source) != frames * width * height * 3 {
+    return result.err("H3 Ref2VA video resize received incomplete RGB24 frames")
+  }
+  if width == canvas.width and height == canvas.height {
+    return result.ok(bytes.copy(source))
+  }
+  var output: array<byte> = array.new()
+  let frame_pixels: u64 = width * height
+  var frame: u64 = 0
+  loop {
+    if frame >= frames { break }
+    var rgba: draw.Surface = match draw.surface(cast.sat(width), cast.sat(height)) {
+      some(value) => value,
+      none => { return result.err("Cannot allocate a Ref2VA video frame") },
+    }
+    var pixel: u64 = 0
+    loop {
+      if pixel >= frame_pixels { break }
+      let source_offset: u64 = frame * frame_pixels * 3 + pixel * 3
+      let target_offset: u64 = pixel * 4
+      array.set(struct.borrow(rgba, field=pixels), target_offset,
+        view.get(source, source_offset))
+      array.set(struct.borrow(rgba, field=pixels), target_offset + 1,
+        view.get(source, source_offset + 1))
+      array.set(struct.borrow(rgba, field=pixels), target_offset + 2,
+        view.get(source, source_offset + 2))
+      let opaque: u8 = 255
+      array.set(struct.borrow(rgba, field=pixels), target_offset + 3,
+        cast.bits(opaque))
+      pixel = pixel + 1
+    }
+    var resized: draw.Surface = try image_input.resize(rgba, canvas.width,
+      canvas.height)
+    var rgb: array<byte> = rgb_pixels(resized)
+    var index: u64 = 0
+    loop {
+      if index >= array.len(rgb) { break }
+      array.push(output, array.get(rgb, index))
+      index = index + 1
+    }
+    frame = frame + 1
+  }
+  result.ok(bytes.copy(array.view(output)))
+}
+
+fn decode_video_reference(source: str, scratch: str, ordinal: u64,
+                          target_frames: u64) -> result<VideoFrames,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process} {
+  var first: draw.Surface = match media_io.frame(source, scratch, 0, 0) {
+    ok(value) => value,
+    err(problem) => { return result.err(problem) },
+  }
+  let width: u64 = cast.wrap(first.width)
+  let height: u64 = cast.wrap(first.height)
+  let canvas: CreatorCanvas = try creator_canvas(width, height)
+  var stem: string = text.concat("reference-video-",
+    str.view(string.from_int(ordinal)))
+  var raw_path: string = path.join(scratch,
+    text.concat(str.view(stem), ".rgb"))
+  match proc.check(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i",
+      text.copy(source), "-map", "0:v:0", "-vf", "fps=24", "-frames:v",
+      string.from_int(target_frames), "-pix_fmt", "rgb24", "-f", "rawvideo",
+      text.copy(str.view(raw_path))]) {
+    ok(_) => {},
+    err(_) => { let _ = files.remove(str.view(raw_path))
+      return result.err("FFmpeg could not decode the Ref2VA video at 24 FPS") },
+  }
+  let frame_bytes: u64 = width * height * 3
+  let maximum: u64 = frame_bytes * target_frames
+  var pixels: bytes = match files.read_limited(str.view(raw_path), maximum) {
+    ok(value) => value,
+    err(_) => { let _ = files.remove(str.view(raw_path))
+      return result.err("H3 Ref2VA decoded video exceeds its request frame cap") },
+  }
+  let _ = files.remove(str.view(raw_path))
+  let size: u64 = view.len(bytes.view(pixels))
+  if size == 0 or rem(size, frame_bytes) != 0 {
+    return result.err("H3 Ref2VA video produced incomplete RGB24 frames")
+  }
+  let frame_count: u64 = size / frame_bytes
+  var resized: bytes = try resize_video_frames(bytes.view(pixels), frame_count,
+    width, height, canvas)
+  result.ok(VideoFrames {pixels: resized, frames: frame_count,
+    width: canvas.width, height: canvas.height})
+}
+
+fn clean_probe(root: str) -> unit effects {alloc,fs.write} {
+  let _ = files.remove(proc.pid_path(root))
+  let _ = files.remove(proc.out_path(root))
+  let _ = files.remove(proc.err_path(root))
+  let _ = files.remove(proc.launch_path(root))
+  let _ = files.remove(root)
+  ()
+}
+
+// Ref2VA video references may carry their own soundtrack. Probe the first
+// audio stream separately so an absent stream is normal, while a malformed
+// container or failed probe remains a visible intake error.
+fn video_has_audio(source: str, scratch: str, ordinal: u64)
+    -> result<bool,string> effects {alloc,fs.meta,fs.read,fs.write,process} {
+  let root: string = path.join(scratch, text.concat("reference-audio-probe-",
+    str.view(string.from_int(ordinal))))
+  var exit: proc.Exit = proc.start(proc.plan([
+    "ffprobe", "-v", "error", "-select_streams", "a:0",
+    "-show_entries", "stream=codec_type", "-of",
+    "default=noprint_wrappers=1:nokey=1", text.copy(source)], str.view(root)))
+  if not proc.finished(exit) {
+    var message: string = proc.describe(exit)
+    let detail: string = proc.failure_context(str.view(root), 4096)
+    if str.len(detail) != 0 {
+      string.append(message, ": ")
+      string.append(message, text.trim(str.view(detail)))
+    }
+    clean_probe(str.view(root))
+    return result.err(message)
+  }
+  var output: bytes = match files.read_limited(proc.out_path(str.view(root)), 64) {
+    ok(value) => value,
+    err(_) => { clean_probe(str.view(root))
+      return result.err("Cannot read the Ref2VA video audio probe") },
+  }
+  let present: bool = view.len(bytes.view(output)) != 0
+  clean_probe(str.view(root))
+  result.ok(present)
+}
+
+fn video_soundtrack(source: str, scratch: str, ordinal: u64,
+    max_samples: u64)
+    -> result<option<audio_encode.Waveform>,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process} {
+  if not (try video_has_audio(source, scratch, ordinal)) {
+    return result.ok(option.none())
+  }
+  let stem: string = text.concat("reference-video-audio-",
+    str.view(string.from_int(ordinal)))
+  let wav_path: string = path.join(scratch, text.concat(str.view(stem), ".wav"))
+  var waveform: audio_encode.Waveform = match audio_encode.decode_reference(
+      source, str.view(wav_path), max_samples) {
+    ok(value) => value,
+    err(problem) => { let _ = files.remove(str.view(wav_path))
+      var owned: audio_encode.Error = problem
+      return result.err(audio_encode.error_message(owned)) },
+  }
+  let _ = files.remove(str.view(wav_path))
+  result.ok(option.some(waveform))
+}
+
+// Creator `prepare_reference_waveform` truncates every standalone reference
+// and embedded soundtrack to the generated video's duration. The encoder's
+// own 15-second bound remains the outer safety cap.
+fn reference_audio_sample_cap(target_frames: u64) -> u64 effects {} {
+  let duration_cap: u64 = target_frames * 32000 / 24
+  let encoder_cap: u64 = audio_encode.max_reference_samples()
+  if duration_cap < encoder_cap { duration_cap } else { encoder_cap }
+}
+
+fn append_video_vision(
+    presentations: ref<array<presentation.Reference>>,
+    patches: ref<array<presentation.VisionPatches>>,
+    frames: ref<VideoFrames>, has_audio: bool) -> unit effects {alloc} {
+  let frame_bytes: u64 = frames.width * frames.height * 3
+  let sampled: u64 = (frames.frames + 11) / 12
+  var grids: array<presentation.VisionGrid> = array.new()
+  var timestamps: array<f64> = array.new()
+  var sample: u64 = 0
+  loop {
+    if sample >= sampled { break }
+    let first_index: u64 = sample * 12
+    let second_sample: u64 = if sample + 1 < sampled { sample + 1 } else { sample }
+    let second_index: u64 = second_sample * 12
+    var pair: array<byte> = array.new()
+    var byte_index: u64 = 0
+    loop {
+      if byte_index >= frame_bytes { break }
+      array.push(pair, view.get(bytes.view(struct.borrow(frames, field=pixels)),
+        first_index * frame_bytes + byte_index))
+      byte_index = byte_index + 1
+    }
+    byte_index = 0
+    loop {
+      if byte_index >= frame_bytes { break }
+      array.push(pair, view.get(bytes.view(struct.borrow(frames, field=pixels)),
+        second_index * frame_bytes + byte_index))
+      byte_index = byte_index + 1
+    }
+    var patch: presentation.VisionPatches = presentation.vision_patch_rows(
+      array.view(pair), frames.width, frames.height, 2, true)
+    array.push(grids, patch.grid)
+    array.push(patches, patch)
+    // Sample timestamps are ordinal/2 seconds; Qwen merges each pair and uses
+    // its mean, repeat-padding an odd tail.
+    array.push(timestamps,
+      (cast.float(sample) / 2.0 + cast.float(second_sample) / 2.0) / 2.0)
+    sample = sample + 2
+  }
+  array.push(presentations, presentation.Reference {
+    kind: presentation.ReferenceKind.Video, has_audio: has_audio,
+    block_timestamps: timestamps, grids: grids})
+  ()
+}
+
+type ReferenceInputs = struct {
+  rows: array<session.ReferenceRows>,
+  presentations: array<presentation.Reference>,
+  patches: array<presentation.VisionPatches>,
+  has_audio: bool
+}
+
+fn intake_failure(phase: str, source: str, detail: str) -> string
+    effects {alloc} {
+  var message: string = text.copy("Ref2VA intake ")
+  string.append(message, phase)
+  if str.len(source) != 0 {
+    string.append(message, " [")
+    string.append(message, source)
+    string.append(message, "]")
+  }
+  string.append(message, ": ")
+  string.append(message, detail)
+  message
+}
+
+fn intake_report(sender: ref<channel.Sender>, rail: str, index: u64,
+                 count: u64, source: str, phase: str) -> unit
+    effects {alloc,net,time} {
+  var message: string = text.copy("Ref2VA ")
+  string.append(message, rail)
+  string.append(message, " ")
+  string.append(message, str.view(string.from_int(index + 1)))
+  string.append(message, "/")
+  string.append(message, str.view(string.from_int(count)))
+  string.append(message, " ")
+  var name: string = path.basename(source)
+  string.append(message, str.view(name))
+  string.append(message, ": ")
+  string.append(message, phase)
+  report(sender, str.view(message))
+}
+
+fn prepare_ref2va_inputs(
+    context: ref<GpuContext>, stream: ref<GpuStream>, job: ref<Job>,
+    sources: ref<session.Sources>, checkpoint_root: str, manifests: str,
+    scratch: str, sender: ref<channel.Sender>) -> result<ReferenceInputs,string>
+    effects {alloc,fs.meta,fs.read,fs.write,gpu,net,process,time} {
+  var rows: array<session.ReferenceRows> = array.new()
+  var presentations: array<presentation.Reference> = array.new()
+  var patches: array<presentation.VisionPatches> = array.new()
+  // Video soundtracks are encoded after the video VAE lease is released, but
+  // their destination row stays attached to the corresponding video block.
+  var audio_waveforms: array<audio_encode.Waveform> = array.new()
+  var audio_sources: array<string> = array.new()
+  var embedded_audio_rows: array<u64> = array.new()
+  let visual_count: u64 = array.len(struct.borrow(job, field=references))
+
+  if visual_count != 0 {
+    var options: offload.Options = offload.Options {
+      mode: offload.Mode.Streaming, fp8_pinned: false, stage_threads: 1}
+    var encoder: offload.Offloader = match offload.open(context,
+        str.view(struct.borrow(sources, field=video_vae_checkpoint)),
+        str.view(struct.borrow(sources, field=video_encoder_manifest)), options) {
+      ok(value) => value,
+      err(problem) => { return result.err(intake_failure(
+        "video encoder open", "", problem.message)) },
+    }
+    var held: offload.Block = match offload.acquire(encoder, stream, 0) {
+      ok(value) => value,
+      err(problem) => { let _ = offload.close(encoder)
+        return result.err(intake_failure(
+          "video encoder acquire", "", problem.message)) },
+    }
+    var visual: u64 = 0
+    loop {
+      if visual >= visual_count { break }
+      let source_path: str = str.view(array.borrow(
+        struct.borrow(job, field=references), visual))
+      let kind: media_input.Kind = media_input.classify_path(source_path)
+      match kind {
+        Image => {
+          intake_report(sender, "visual", visual, visual_count, source_path,
+            "decoding image")
+          var surface: draw.Surface = match media_io.frame(source_path, scratch,
+              0, 0) {
+            ok(value) => value,
+            err(problem) => { let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "image decode", source_path, str.view(problem))) },
+          }
+          let canvas: CreatorCanvas = match reference_image_canvas(
+              cast.wrap(surface.width), cast.wrap(surface.height)) {
+            ok(value) => value,
+            err(problem) => { let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "image canvas", source_path, str.view(problem))) },
+          }
+          intake_report(sender, "visual", visual, visual_count, source_path,
+            "resizing image to Serenity 768-short-edge reference profile")
+          surface = match image_input.resize(surface, canvas.width,
+              canvas.height) {
+            ok(value) => value,
+            err(problem) => { let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "image resize", source_path, str.view(problem))) },
+          }
+          let reference_geometry: h3_media.Geometry = match image_reference_geometry(
+              surface) {
+            ok(value) => value,
+            err(problem) => { let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "image geometry", source_path, str.view(problem))) },
+          }
+          var rgb: array<byte> = rgb_pixels(surface)
+          var patch: presentation.VisionPatches = presentation.vision_patch_rows(
+            array.view(rgb), reference_geometry.width, reference_geometry.height,
+            1, false)
+          let grid: presentation.VisionGrid = patch.grid
+          var pixels: array<f32> = match vae.preprocess_keyframe_geometry(
+              surface, reference_geometry) {
+            ok(value) => value,
+            err(problem) => { var owned: vae.Error = problem
+              var message: string = vae.error_message(owned)
+              let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "image preprocess", source_path, str.view(message))) },
+          }
+          intake_report(sender, "visual", visual, visual_count, source_path,
+            "encoding image")
+          var video_rows: array<f32> = match vae.encode_keyframe_geometry(
+              context, stream, held, array.view(pixels), 42,
+              reference_geometry) {
+            ok(value) => value,
+            err(problem) => { let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "image encode", source_path, problem.message)) },
+          }
+          array.push(rows, session.ReferenceRows {
+            geometry: packing.ReferenceGeometry {
+              kind: packing.ReferenceKind.Image, latent_frames: 1,
+              latent_height: reference_geometry.latent_height,
+              latent_width: reference_geometry.latent_width, audio_latents: 0},
+            video: video_rows, audio: []})
+          var grids: array<presentation.VisionGrid> = [grid]
+          array.push(presentations, presentation.Reference {
+            kind: presentation.ReferenceKind.Image, has_audio: false,
+            block_timestamps: [], grids: grids})
+          array.push(patches, patch)
+        },
+        Video => {
+          intake_report(sender, "visual", visual, visual_count, source_path,
+            "decoding video")
+          var frames: VideoFrames = match decode_video_reference(source_path,
+              scratch, visual, job.geometry.frames) {
+            ok(value) => value,
+            err(problem) => { let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "video decode", source_path, str.view(problem))) },
+          }
+          intake_report(sender, "visual", visual, visual_count, source_path,
+            "decoding soundtrack")
+          var soundtrack: option<audio_encode.Waveform> = match video_soundtrack(
+              source_path, scratch, visual,
+              reference_audio_sample_cap(job.geometry.frames)) {
+            ok(value) => value,
+            err(problem) => { let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "video soundtrack", source_path, str.view(problem))) },
+          }
+          var has_audio: bool = false
+          var soundtrack_latents: u64 = 0
+          match soundtrack {
+            some(waveform) => {
+              has_audio = true
+              soundtrack_latents = audio_encode.latent_frames_for(
+                waveform.samples)
+              array.push(embedded_audio_rows, array.len(rows))
+              array.push(audio_waveforms, waveform)
+              array.push(audio_sources, text.copy(source_path))
+            },
+            none => {},
+          }
+          let encode_frames: u64 = match reference_video_encode_frames(
+              frames.frames) {
+            ok(value) => value,
+            err(problem) => { let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "video VAE frame trim", source_path, str.view(problem))) },
+          }
+          let latent_frames: u64 = vae.video_reference_latent_frames(
+            encode_frames)
+          let reference_geometry: h3_media.Geometry = h3_media.Geometry {
+            frames: encode_frames, width: frames.width, height: frames.height,
+            latent_frames: latent_frames, latent_width: frames.width / 16,
+            latent_height: frames.height / 16, audio_latents: 0,
+            audio_samples: 0}
+          let encode_bytes: u64 = encode_frames * frames.width * frames.height * 3
+          var pixels: array<f32> = match vae.preprocess_video_geometry(
+              view.slice(bytes.view(struct.borrow(frames, field=pixels)),
+                0, encode_bytes), encode_frames,
+              reference_geometry) {
+            ok(value) => value,
+            err(problem) => { var owned: vae.Error = problem
+              var message: string = vae.error_message(owned)
+              let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "video preprocess", source_path, str.view(message))) },
+          }
+          intake_report(sender, "visual", visual, visual_count, source_path,
+            "encoding video")
+          var video_rows: array<f32> = match vae.encode_video_geometry(
+              context, stream, held, array.view(pixels), encode_frames, 42,
+              reference_geometry) {
+            ok(value) => value,
+            err(problem) => { let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "video encode", source_path, problem.message)) },
+          }
+          append_video_vision(presentations, patches, frames, has_audio)
+          array.push(rows, session.ReferenceRows {
+            geometry: packing.ReferenceGeometry {
+              kind: packing.ReferenceKind.Video, latent_frames: latent_frames,
+              latent_height: reference_geometry.latent_height,
+              latent_width: reference_geometry.latent_width,
+              audio_latents: soundtrack_latents},
+            video: video_rows, audio: []})
+        },
+        Audio => {
+          let _ = offload.release(held)
+          let _ = offload.close(encoder)
+          return result.err(intake_failure("visual classification", source_path,
+            "audio files belong in the Ref2VA audio rail"))
+        },
+        Unknown => {
+          let _ = offload.release(held)
+          let _ = offload.close(encoder)
+          return result.err(intake_failure("visual classification", source_path,
+            "file type is not recognized"))
+        },
+      }
+      visual = visual + 1
+    }
+    let released: unit = match offload.release(held) {
+      ok(value) => value,
+      err(problem) => { let _ = offload.close(encoder)
+        return result.err(text.copy(problem.message)) },
+    }
+    match offload.close(encoder) {
+      ok(_) => {},
+      err(problem) => { return result.err(text.copy(problem.message)) },
+    }
+  }
+
+  let explicit_audio_count: u64 = array.len(
+    struct.borrow(job, field=audio_references))
+  let embedded_audio_count: u64 = array.len(embedded_audio_rows)
+  var explicit_audio_index: u64 = 0
+  loop {
+    if explicit_audio_index >= explicit_audio_count { break }
+    let source_path: str = str.view(array.borrow(
+      struct.borrow(job, field=audio_references), explicit_audio_index))
+    let temporary: string = path.join(scratch, text.concat(
+      "reference-audio-", str.view(string.from_int(explicit_audio_index))))
+    var wav_path: string = text.concat(str.view(temporary), ".wav")
+    intake_report(sender, "audio", embedded_audio_count + explicit_audio_index,
+      embedded_audio_count + explicit_audio_count, source_path,
+      "decoding audio")
+    var waveform: audio_encode.Waveform = match audio_encode.decode_reference(
+        source_path, str.view(wav_path),
+        reference_audio_sample_cap(job.geometry.frames)) {
+      ok(value) => value,
+      err(problem) => { let _ = files.remove(str.view(wav_path))
+        var owned: audio_encode.Error = problem
+        var message: string = audio_encode.error_message(owned)
+        return result.err(intake_failure(
+          "audio decode", source_path, str.view(message))) },
+    }
+    let _ = files.remove(str.view(wav_path))
+    array.push(audio_waveforms, waveform)
+    array.push(audio_sources, text.copy(source_path))
+    explicit_audio_index = explicit_audio_index + 1
+  }
+
+  let audio_count: u64 = array.len(audio_waveforms)
+  if audio_count != 0 {
+    var options: offload.Options = offload.Options {
+      mode: offload.Mode.Resident, fp8_pinned: false, stage_threads: 1}
+    var encoder: offload.Offloader = match offload.open(context,
+        str.view(joined(checkpoint_root, "audio_vae/model.safetensors")),
+        str.view(joined(manifests, "h3-audio-encoder.json")), options) {
+      ok(value) => value,
+      err(problem) => { return result.err(text.copy(problem.message)) },
+    }
+    var held: offload.Block = match offload.acquire(encoder, stream, 0) {
+      ok(value) => value,
+      err(problem) => { let _ = offload.close(encoder)
+        return result.err(text.copy(problem.message)) },
+    }
+    var prepared: audio_encode.Prepared = match audio_encode.prepare(
+        context, stream, held) {
+      ok(value) => value,
+      err(problem) => { let _ = offload.release(held)
+        let _ = offload.close(encoder)
+        return result.err(text.copy(problem.message)) },
+    }
+    var audio_index: u64 = 0
+    loop {
+      if audio_index >= audio_count { break }
+      let waveform: ref<audio_encode.Waveform> = array.borrow(audio_waveforms,
+        audio_index)
+      let source_path: str = str.view(array.borrow(audio_sources, audio_index))
+      intake_report(sender, "audio", audio_index, audio_count, source_path,
+        "encoding audio")
+      let latent_frames: u64 = audio_encode.latent_frames_for(waveform.samples)
+      var audio_rows: array<f32> = match audio_encode.encode_rows(context,
+          stream, held, prepared, waveform) {
+        ok(value) => value,
+        err(problem) => { let _ = audio_encode.close(prepared)
+          let _ = offload.release(held)
+          let _ = offload.close(encoder)
+          return result.err(intake_failure(
+            "audio encode", source_path, problem.message)) },
+      }
+      if audio_index < embedded_audio_count {
+        let destination: u64 = array.get(embedded_audio_rows, audio_index)
+        let video_row: ref<session.ReferenceRows> = array.borrow(rows,
+          destination)
+        let _ = ref.swap(struct.borrow(video_row, field=audio), audio_rows)
+      } else {
+        array.push(rows, session.ReferenceRows {
+          geometry: packing.ReferenceGeometry {
+            kind: packing.ReferenceKind.Audio, latent_frames: 0,
+            latent_height: 0, latent_width: 0, audio_latents: latent_frames},
+          video: [], audio: audio_rows})
+        array.push(presentations, presentation.Reference {
+          kind: presentation.ReferenceKind.Audio, has_audio: true,
+          block_timestamps: [], grids: []})
+      }
+      audio_index = audio_index + 1
+    }
+    match audio_encode.close(prepared) {
+      ok(_) => {},
+      err(problem) => { let _ = offload.release(held)
+        let _ = offload.close(encoder)
+        return result.err(text.copy(problem.message)) },
+    }
+    let released: unit = match offload.release(held) {
+      ok(value) => value,
+      err(problem) => { let _ = offload.close(encoder)
+        return result.err(text.copy(problem.message)) },
+    }
+    match offload.close(encoder) {
+      ok(_) => {},
+      err(problem) => { return result.err(text.copy(problem.message)) },
+    }
+  }
+  result.ok(ReferenceInputs {rows: rows, presentations: presentations,
+    patches: patches, has_audio: audio_count != 0})
+}
+
+fn clean_scratch(scratch: str) -> unit effects {alloc,fs.write} {
+  let _ = files.remove(path.join(scratch, "frames.rgb"))
+  let _ = files.remove(path.join(scratch, "audio.wav"))
+  let _ = files.remove(scratch)
+  ()
+}
+
+fn execute(job: ref<Job>, sender: ref<channel.Sender>) -> Outcome
+    effects {alloc,fs.meta,fs.read,fs.write,gpu,net,process,time} {
+  let checkpoint_root: string = match job.model {
+    Base => text.copy(str.view(struct.borrow(job, field=checkpoint_root))),
+    Reference => {
+      let selected: string = text.copy(str.view(struct.borrow(job,
+        field=reference_checkpoint_root)))
+      if str.len(str.view(selected)) == 0 {
+        return outcome(false, str.view(struct.borrow(job, field=output)),
+          "Set MM_AIR_H3_REFERENCE_ROOT for the Ref2VA checkpoint")
+      }
+      selected
+    },
+  }
+  let donor_root: string = text.copy(
+    str.view(struct.borrow(job, field=donor_root)))
+  let manifests: string = text.copy(
+    str.view(struct.borrow(job, field=manifest_root)))
+  let output_path: string = text.copy(str.view(struct.borrow(job, field=output)))
+  if (job.model == session.Model.Reference) !=
+     (job.task == session.Task.Ref2VA) {
+    return outcome(false, str.view(output_path),
+      "MiniMax-H3 Reference and Ref2VA must be selected together")
+  }
+  if job.model == session.Model.Base and
+     array.len(struct.borrow(job, field=audio_references)) != 0 {
+    return outcome(false, str.view(output_path),
+      "MiniMax-H3 Base tasks do not accept audio references")
+  }
+  if job.model == session.Model.Reference and
+     array.len(struct.borrow(job, field=references)) == 0 {
+    return outcome(false, str.view(output_path),
+      "MiniMax-H3 Ref2VA needs at least one image or video reference; audio references cannot stand alone")
+  }
+  if job.evaluations != 7 and job.evaluations != 19 {
+    return outcome(false, str.view(output_path),
+      "MiniMax-H3 needs the seven- or nineteen-evaluation schedule")
+  }
+  let scratch_name: string = text.concat("mm-air-h3-",
+    str.view(string.from_int(time.monotonic_ns())))
+  let scratch: string = path.join(
+    str.view(struct.borrow(job, field=scratch_root)), str.view(scratch_name))
+  match files.mkdirs(str.view(scratch)) {
+    ok(_) => {},
+    err(_) => { return outcome(false, str.view(output_path),
+      "Cannot create MM-Air H3 scratch directory") },
+  }
+
+  report(sender, "Loading the linked AIR H3 session")
+  var state: tokenizer.Tokenizer = match tokenizer.load(
+      str.view(joined(str.view(checkpoint_root), "text_encoder"))) {
+    ok(value) => value,
+    err(_) => { clean_scratch(str.view(scratch))
+      return outcome(false, str.view(output_path),
+        "Cannot load the MiniMax-H3 tokenizer") },
+  }
+  var reference_surfaces: array<draw.Surface> = array.new()
+  if job.model == session.Model.Base {
+    var reference_index: u64 = 0
+    loop {
+      if reference_index >= array.len(struct.borrow(job, field=references)) { break }
+      let reference_path: str = str.view(array.borrow(
+        struct.borrow(job, field=references), reference_index))
+      if media_input.classify_path(reference_path) != media_input.Kind.Image {
+        clean_scratch(str.view(scratch))
+        return outcome(false, str.view(output_path),
+          "MiniMax-H3 Base keyframes must be images")
+      }
+      var surface: draw.Surface = match media_io.frame(reference_path,
+          str.view(scratch), 0, 0) {
+        ok(value) => value,
+        err(problem) => { clean_scratch(str.view(scratch))
+          return outcome(false, str.view(output_path), str.view(problem)) },
+      }
+      // The creator stretches the first keyframe directly onto the requested
+      // canvas and cover-crops the last keyframe through the same PIL-exact
+      // Lanczos kernel.
+      var prepared: draw.Surface = match image_input.prepare_keyframe(surface,
+          job.geometry.width, job.geometry.height, reference_index == 0) {
+        ok(value) => value,
+        err(problem) => { clean_scratch(str.view(scratch))
+          return outcome(false, str.view(output_path), str.view(problem)) },
+      }
+      array.push(reference_surfaces, prepared)
+      reference_index = reference_index + 1
+    }
+  }
+
+  let transformer_index: string = joined(str.view(checkpoint_root),
+    "transformer/model.safetensors.index.json")
+  let transformer_convrot: string = if job.model == session.Model.Reference {
+    joined(str.view(checkpoint_root),
+      "serenity_runtime_cache_v1/native_convrot_h256_ref2va_blocks_50.safetensors")
+  } else { joined(str.view(checkpoint_root),
+    "serenity_runtime_cache_v1/native_convrot_h256_official_blocks_50.safetensors") }
+  let modulation_name: str = if job.model == session.Model.Reference and
+      job.evaluations == 7 {
+    "serenity_runtime_cache_v1/native-modcache-ref2va-steps8-blocks50.safetensors"
+  } else if job.model == session.Model.Reference {
+    "serenity_runtime_cache_v1/native-modcache-ref2va-steps20-blocks50.safetensors"
+  } else if job.task == session.Task.T2VA and job.evaluations == 7 {
+    "serenity_runtime_cache_v1/native-modcache-t2va-steps8-blocks50.safetensors"
+  } else if job.task == session.Task.T2VA {
+    "serenity_runtime_cache_v1/native-modcache-t2va-steps20-blocks50.safetensors"
+  } else if job.evaluations == 7 {
+    "serenity_runtime_cache_v1/native_modcache_keyframe_steps8_blocks50.safetensors"
+  } else {
+    "serenity_runtime_cache_v1/native_modcache_local_keyframe_steps_20_blocks_50.safetensors"
+  }
+  var sources: session.Sources = session.Sources {
+    conditioning: conditioning.Sources {
+      checkpoint_index: joined(str.view(checkpoint_root),
+        "text_encoder/model.safetensors.index.json"),
+      text_static_manifest: joined(str.view(manifests), "h3-qwen-static.json"),
+      text_layers_manifest: joined(str.view(manifests), "h3-qwen-layers-bf16.json"),
+      text_norms_manifest: joined(str.view(manifests), "h3-qwen-norms-bf16.json"),
+      text_convrot_checkpoint: joined(str.view(donor_root),
+        "fl2va-t37-native/cache/qwen3vl50-convrot-h256-s1256-v780.safetensors"),
+      text_convrot_manifest: joined(str.view(manifests), "h3-qwen-convrot-i8.json"),
+      vision_static_manifest: joined(str.view(manifests), "h3-vision-static.json"),
+      vision_layers_manifest: joined(str.view(manifests), "h3-vision-layers.json")},
+    transformer: checkpoint.TransformerSources {
+      transformer_checkpoint: transformer_index,
+      refiner_manifest: joined(str.view(manifests),
+        "h3-token-refiner-bf16.json"),
+      denoiser_static_manifest: joined(str.view(manifests),
+        "h3-transformer-denoiser-static.json"),
+      exact_blocks_manifest: joined(str.view(manifests), "h3-blocks-bf16.json"),
+      convrot_checkpoint: transformer_convrot,
+      convrot_blocks_manifest: joined(str.view(manifests), "h3-blocks-convrot.json"),
+      modulation_checkpoint: joined(str.view(checkpoint_root), modulation_name),
+      modulation_manifest: joined(str.view(manifests), "h3-modulation-cache.json")},
+    video_vae_checkpoint: joined(str.view(checkpoint_root),
+      "video_vae/source/model.safetensors"),
+    video_decoder_aux_checkpoint: joined(str.view(donor_root),
+      "shared/video-vae/derived-fp16.safetensors"),
+    video_encoder_manifest: joined(str.view(manifests), "h3-video-vae-encoder.json"),
+    video_decoder_aux_manifest: joined(str.view(manifests), "h3-video-vae-decoder-aux.json"),
+    video_decoder_convrot_checkpoint: joined(str.view(donor_root),
+      "fl2va-t37-native/video-vae-convrot-f16/video-vae-convrot-f16.safetensors"),
+    video_decoder_convrot_manifest: joined(str.view(manifests),
+      "h3-video-vae-decoder-convrot.json"),
+    audio_vae_checkpoint: joined(str.view(donor_root),
+      "shared/audio-vae-t207/t207-derived.safetensors"),
+    audio_decoder_manifest: joined(str.view(manifests), "h3-audio-vae.json")}
+
+  var context: GpuContext = match agpu.open(0) {
+    ok(value) => value,
+    err(problem) => { clean_scratch(str.view(scratch))
+      return outcome(false, str.view(output_path), problem.message) },
+  }
+  var stream: GpuStream = match agpu.compute_stream(context) {
+    ok(value) => value,
+    err(problem) => { let _ = agpu.close(context)
+      clean_scratch(str.view(scratch))
+      return outcome(false, str.view(output_path), problem.message) },
+  }
+  if job.model == session.Model.Base {
+    report(sender, "Denoising MiniMax-H3 in AIR")
+  } else {
+    report(sender, "Preparing MiniMax-H3 references")
+  }
+  var result: result<unit,session.Error> = if job.model == session.Model.Base {
+    session.run_to_mp4_geometry(
+      context, stream, sources, state,
+      str.view(struct.borrow(job, field=prompt)), job.model, job.task,
+      reference_surfaces, job.geometry, job.seed, job.conditioner_projection,
+      job.transformer_projection, job.attention, job.evaluations,
+      str.view(scratch), str.view(output_path))
+  } else {
+    var inputs: ReferenceInputs = match prepare_ref2va_inputs(context, stream,
+        job, sources, str.view(checkpoint_root), str.view(manifests),
+        str.view(scratch), sender) {
+      ok(value) => value,
+      err(problem) => {
+        let gpu_message: string = agpu.message(context)
+        var gpu_facts: agpu.Properties = agpu.properties(context)
+        let _ = agpu.close_stream(stream)
+        let _ = agpu.close(context)
+        clean_scratch(str.view(scratch))
+        var message: string = problem
+        if str.len(gpu_message) != 0 {
+          string.append(message, "; GPU: ")
+          string.append(message, str.view(gpu_message))
+        }
+        string.append(message, "; allocated=")
+        string.append(message, str.view(string.from_int(
+          gpu_facts.allocated_bytes / 1048576)))
+        string.append(message, " MiB peak=")
+        string.append(message, str.view(string.from_int(
+          gpu_facts.peak_allocated_bytes / 1048576)))
+        string.append(message, " MiB free=")
+        string.append(message, str.view(string.from_int(
+          gpu_facts.free_memory / 1048576)))
+        string.append(message, " MiB")
+        return outcome(false, str.view(output_path), str.view(message))
+      },
+    }
+    // Ref2VA always has visual conditioning. The donor has separate
+    // sorted-local modulation tables for visual-only (three slots) and mixed
+    // visual/audio (four slots). Select only after media intake has established
+    // whether a video carries a soundtrack.
+    if inputs.has_audio {
+      let audio_modulation: str = if job.evaluations == 7 {
+        "serenity_runtime_cache_v1/native-modcache-ref2va-audio-steps8-blocks50.safetensors"
+      } else {
+        "serenity_runtime_cache_v1/native-modcache-ref2va-audio-steps20-blocks50.safetensors"
+      }
+      let _ = ref.swap(struct.borrow(struct.borrow(sources, field=transformer),
+        field=modulation_checkpoint),
+        joined(str.view(checkpoint_root), audio_modulation))
+    }
+    report(sender, "Denoising MiniMax-H3 in AIR")
+    session.run_ref2va_to_mp4_geometry(context, stream, sources, state,
+      str.view(struct.borrow(job, field=prompt)),
+      struct.borrow(inputs, field=rows),
+      struct.borrow(inputs, field=presentations),
+      struct.borrow(inputs, field=patches), job.geometry, job.seed,
+      job.conditioner_projection, job.transformer_projection, job.attention,
+      job.evaluations, str.view(scratch), str.view(output_path))
+  }
+  // Provider diagnostics and counters belong to the live context. Snapshot
+  // them before teardown so a UI failure reports the real allocation boundary.
+  let gpu_message: string = agpu.message(context)
+  var gpu_facts: agpu.Properties = agpu.properties(context)
+  let _ = agpu.close_stream(stream)
+  let _ = agpu.close(context)
+  clean_scratch(str.view(scratch))
+  match result {
+    ok(_) => {
+      outcome(true, str.view(output_path), "MiniMax-H3 MP4 saved")
+    },
+    err(problem) => { var owned: session.Error = problem
+      var message: string = session.error_message(owned)
+      if str.len(gpu_message) != 0 {
+        string.append(message, "; GPU: ")
+        string.append(message, str.view(gpu_message))
+      }
+      string.append(message, "; allocated=")
+      string.append(message, str.view(string.from_int(
+        gpu_facts.allocated_bytes / 1048576)))
+      string.append(message, " MiB peak=")
+      string.append(message, str.view(string.from_int(
+        gpu_facts.peak_allocated_bytes / 1048576)))
+      string.append(message, " MiB free=")
+      string.append(message, str.view(string.from_int(
+        gpu_facts.free_memory / 1048576)))
+      string.append(message, " MiB")
+      outcome(false, str.view(output_path), str.view(message)) },
+  }
+}
+
+// Static task body used by task.spawn. The Job contains only plain owned data;
+// GPU and channel handles are opened inside the worker.
+pub fn run(source: Job own) -> Outcome
+    effects {alloc,fs.meta,fs.read,fs.write,gpu,net,process,time} {
+  var job: Job = source
+  var ticket: channel.Ticket = ref.swap(
+    struct.borrow(job, field=progress), no_progress())
+  var sender: channel.Sender = match channel.connect(ticket,
+      time.monotonic_ns() + 30000000000) {
+    ok(value) => value,
+    err(_) => { return outcome(false, str.view(struct.borrow(job, field=output)),
+      "Cannot connect the MM-Air H3 progress channel") },
+  }
+  var finished: Outcome = execute(job, sender)
+  let _ = channel.finish(sender, if finished.succeeded { 2 } else { 3 },
+    str.bytes(str.view(struct.borrow(finished, field=message))),
+    time.monotonic_ns() + 30000000000)
+  let _ = channel.hang_up(sender)
+  finished
+}

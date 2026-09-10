@@ -1,0 +1,313 @@
+// Persistent Generate media/history backing for the native MM-Air desktop.
+// Media files remain user-owned; clearing history only replaces this catalog.
+module app.mm_air.library
+
+import std.codec as codec
+import std.draw as draw
+import std.files as files
+import std.image as image
+import std.json as json
+import std.media as media
+import std.media_input as input
+import std.path as path
+import std.process as proc
+import std.text as text
+
+pub type Item = struct {
+  path: string,
+  thumbnail: string,
+  parameters: string
+}
+
+pub fn item(source: str, thumbnail: str, parameters: str) -> Item effects {alloc} {
+  Item {path: text.copy(source), thumbnail: text.copy(thumbnail),
+    parameters: text.copy(parameters)}
+}
+
+fn filesystem_error(prefix: str, problem: fs.error) -> string effects {alloc} {
+  text.concat(prefix, fs.error.message(problem))
+}
+
+pub fn data_directory() -> result<string,string> effects {alloc,env} {
+  match env.get("XDG_DATA_HOME") {
+    some(root) => result.ok(path.join(str.view(root), "mm-air")),
+    none => match env.get("HOME") {
+      some(home) => result.ok(path.join(str.view(path.join(str.view(home),
+        ".local/share")), "mm-air")),
+      none => result.err("MM-Air history needs XDG_DATA_HOME or HOME"),
+    },
+  }
+}
+
+pub fn history_path() -> result<string,string> effects {alloc,env} {
+  result.ok(path.join(str.view(try data_directory()), "generate-history.json"))
+}
+
+fn ensure_directories() -> result<string,string> effects {alloc,env,fs.write} {
+  let root: string = try data_directory()
+  match files.mkdirs(str.view(path.join(str.view(root), "thumbnails"))) {
+    ok(_) => {},
+    err(problem) => { return result.err(filesystem_error(
+      "create MM-Air thumbnail directory: ", problem)) },
+  }
+  match files.mkdirs(str.view(path.join(str.view(root), "work"))) {
+    ok(_) => {},
+    err(problem) => { return result.err(filesystem_error(
+      "create MM-Air work directory: ", problem)) },
+  }
+  result.ok(root)
+}
+
+fn absolute(source: str) -> result<string,string> effects {alloc,fs.read} {
+  if source == "" { return result.err("media path must not be empty") }
+  if path.is_absolute(source) { return result.ok(path.normalize(source)) }
+  let current: string = match files.cwd() {
+    ok(value) => value,
+    err(problem) => { return result.err(filesystem_error(
+      "resolve media path: ", problem)) },
+  }
+  result.ok(path.join(str.view(current), source))
+}
+
+fn digest(source: str) -> result<string,string> effects {alloc,fs.meta} {
+  let metadata: fs.meta = match files.metadata(source) {
+    ok(value) => value,
+    err(problem) => { return result.err(filesystem_error(
+      "inspect media for thumbnail: ", problem)) },
+  }
+  // Cache identity follows the file revision without rereading a potentially
+  // multi-gigabyte generated MP4 merely to name its thumbnail.
+  var key: string = text.copy(source)
+  string.append(key, ":")
+  string.append(key, str.view(string.from_int(metadata.size)))
+  string.append(key, ":")
+  string.append(key, str.view(string.from_int(metadata.mtime_ns)))
+  let hashed: bytes = hash.sha256(str.bytes(str.view(key)))
+  result.ok(bytes.hex(bytes.view(hashed)))
+}
+
+fn publish_png(surface: ref<draw.Surface>, destination: str)
+    -> result<unit,string> effects {alloc,fs.write} {
+  let encoded: bytes = image.encode_png(surface)
+  let temporary: string = text.concat(destination, ".tmp")
+  match files.write_atomic_bytes(destination, str.view(temporary),
+                                 bytes.view(encoded)) {
+    ok(_) => result.ok(()),
+    err(problem) => result.err(filesystem_error("write thumbnail: ", problem)),
+  }
+}
+
+fn video_thumbnail(source: str, root: str, name: str)
+    -> result<string,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process} {
+  let destination: string = path.join(
+    str.view(path.join(root, "thumbnails")), text.concat(name, ".png"))
+  if match files.exists(str.view(destination)) {
+    ok(value) => value,
+    err(problem) => { return result.err(filesystem_error(
+      "inspect video thumbnail: ", problem)) },
+  } { return result.ok(destination) }
+  let work: string = path.join(str.view(path.join(root, "work")), name)
+  match files.mkdirs(str.view(work)) {
+    ok(_) => {},
+    err(problem) => { return result.err(filesystem_error(
+      "create video thumbnail work directory: ", problem)) },
+  }
+  var surface: draw.Surface = try media.frame(source, str.view(work), 0, 384)
+  let written: unit = try publish_png(surface, str.view(destination))
+  result.ok(destination)
+}
+
+fn audio_thumbnail(source: str, root: str, name: str)
+    -> result<string,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process} {
+  let destination: string = path.join(
+    str.view(path.join(root, "thumbnails")), text.concat(name, ".png"))
+  if match files.exists(str.view(destination)) {
+    ok(value) => value,
+    err(problem) => { return result.err(filesystem_error(
+      "inspect audio thumbnail: ", problem)) },
+  } { return result.ok(destination) }
+  let work: string = path.join(str.view(path.join(root, "work")), name)
+  match files.mkdirs(str.view(work)) {
+    ok(_) => {},
+    err(problem) => { return result.err(filesystem_error(
+      "create audio thumbnail work directory: ", problem)) },
+  }
+  let staged: string = path.join(str.view(work), "waveform.png")
+  match proc.check(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i",
+      text.copy(source), "-filter_complex",
+      "aformat=channel_layouts=mono,showwavespic=s=384x216:colors=0x2dd4bf",
+      "-frames:v", "1", text.copy(str.view(staged))]) {
+    ok(_) => {},
+    err(_) => { return result.err("ffmpeg could not render the audio waveform") },
+  }
+  var payload: bytes = match files.read_limited(str.view(staged), 8388608) {
+    ok(value) => value,
+    err(_) => { return result.err("audio waveform PNG exceeds 8 MiB or is unreadable") },
+  }
+  let temporary: string = text.concat(str.view(destination), ".tmp")
+  match files.write_atomic_bytes(str.view(destination), str.view(temporary),
+                                 bytes.view(payload)) {
+    ok(_) => {},
+    err(problem) => { return result.err(filesystem_error(
+      "write audio thumbnail: ", problem)) },
+  }
+  let _ = files.remove(str.view(staged))
+  result.ok(destination)
+}
+
+fn prepare(source: str, parameters: str, output_only: bool)
+    -> result<Item,string>
+    effects {alloc,env,fs.meta,fs.read,fs.write,process} {
+  let resolved: string = try absolute(source)
+  var inspected: input.Info = match input.inspect(str.view(resolved), 68719476736) {
+    ok(value) => value,
+    err(_) => { return result.err("media must be a readable regular file under 64 GiB") },
+  }
+  let kind: input.Kind = inspected.kind
+  if output_only and kind != input.Kind.Video {
+    return result.err("Generate history output must be a video")
+  }
+  if kind == input.Kind.Unknown {
+    return result.err("MM-Air does not recognize this media type")
+  }
+  if kind == input.Kind.Image {
+    return result.ok(item(str.view(resolved), str.view(resolved), parameters))
+  }
+  let root: string = try ensure_directories()
+  let name: string = try digest(str.view(resolved))
+  let thumbnail: string = if kind == input.Kind.Video {
+    try video_thumbnail(str.view(resolved), str.view(root), str.view(name))
+  } else {
+    try audio_thumbnail(str.view(resolved), str.view(root), str.view(name))
+  }
+  result.ok(item(str.view(resolved), str.view(thumbnail), parameters))
+}
+
+pub fn prep_reference(source: str, parameters: str) -> result<Item,string>
+    effects {alloc,env,fs.meta,fs.read,fs.write,process} {
+  prepare(source, parameters, false)
+}
+
+pub fn prep_output(source: str, parameters: str) -> result<Item,string>
+    effects {alloc,env,fs.meta,fs.read,fs.write,process} {
+  prepare(source, parameters, true)
+}
+
+fn encode_history(items: ref<array<Item>>) -> result<string,string> effects {alloc} {
+  var writer: codec.Writer = codec.writer()
+  codec.begin_object(writer)
+  codec.field_text(writer, "schema", "mm-air.generate.history")
+  codec.field_u64(writer, "version", 1)
+  codec.key(writer, "items")
+  codec.begin_array(writer)
+  var index: u64 = 0
+  loop {
+    if index >= array.len(items) { break }
+    let entry: ref<Item> = array.borrow(items, index)
+    codec.begin_object(writer)
+    codec.field_text(writer, "path", struct.borrow(entry, field=path))
+    codec.field_text(writer, "thumbnail", struct.borrow(entry, field=thumbnail))
+    codec.field_text(writer, "parameters", struct.borrow(entry, field=parameters))
+    codec.end_object(writer)
+    index = index + 1
+  }
+  codec.end_array(writer)
+  codec.end_object(writer)
+  match codec.finish(writer) {
+    ok(value) => result.ok(value),
+    err(problem) => result.err(codec.describe(problem)),
+  }
+}
+
+pub fn save_history(items: ref<array<Item>>) -> result<unit,string>
+    effects {alloc,env,fs.write} {
+  let root: string = try ensure_directories()
+  let destination: string = path.join(str.view(root), "generate-history.json")
+  let temporary: string = path.join(str.view(root), "generate-history.tmp")
+  let encoded: string = try encode_history(items)
+  match files.write_atomic(str.view(destination), str.view(temporary),
+                           str.view(encoded)) {
+    ok(_) => result.ok(()),
+    err(problem) => result.err(filesystem_error("save Generate history: ", problem)),
+  }
+}
+
+pub fn load_history() -> result<array<Item>,string>
+    effects {alloc,env,fs.meta,fs.read} {
+  let destination: string = try history_path()
+  let present: bool = match files.exists(str.view(destination)) {
+    ok(value) => value,
+    err(problem) => { return result.err(filesystem_error(
+      "inspect Generate history: ", problem)) },
+  }
+  if not present { return result.ok(array.new()) }
+  var payload: bytes = match files.read_limited(str.view(destination), 16777216) {
+    ok(value) => value,
+    err(_) => { return result.err("Generate history exceeds 16 MiB or is unreadable") },
+  }
+  let source: string = match str.from_bytes(bytes.view(payload)) {
+    some(value) => string.copy(value),
+    none => { return result.err("Generate history is not UTF-8") },
+  }
+  var document: json.Document = match json.parse_owned(source) {
+    ok(value) => value,
+    err(problem) => { return result.err(json.error_message(problem)) },
+  }
+  var reader: codec.Reader = codec.root_reader(codec.strict())
+  let schema: string = match codec.text_field(document, reader, "schema") {
+    ok(value) => value,
+    err(problem) => { return result.err(codec.describe(problem)) },
+  }
+  let version: u64 = match codec.u64_field(document, reader, "version") {
+    ok(value) => value,
+    err(problem) => { return result.err(codec.describe(problem)) },
+  }
+  if schema != "mm-air.generate.history" or version != 1 {
+    return result.err("Not a supported MM-Air Generate history")
+  }
+  var entries: codec.Items = match codec.items_field(document, reader, "items",
+                                                       codec.strict()) {
+    ok(value) => value,
+    err(problem) => { return result.err(codec.describe(problem)) },
+  }
+  var output: array<Item> = array.new()
+  loop {
+    var item_reader: codec.Reader = match codec.next_object(document, entries) {
+      ok(value) => match value { some(found) => found, none => { break } },
+      err(problem) => { return result.err(codec.describe(problem)) },
+    }
+    let source_path: string = match codec.text_field(document, item_reader, "path") {
+      ok(value) => value, err(problem) => { return result.err(codec.describe(problem)) },
+    }
+    let thumbnail: string = match codec.text_field(document, item_reader, "thumbnail") {
+      ok(value) => value, err(problem) => { return result.err(codec.describe(problem)) },
+    }
+    let parameters: string = match codec.text_field(document, item_reader, "parameters") {
+      ok(value) => value, err(problem) => { return result.err(codec.describe(problem)) },
+    }
+    match codec.reader_finish(document, item_reader) {
+      ok(_) => {}, err(problem) => { return result.err(codec.describe(problem)) },
+    }
+    array.push(output, Item {path: source_path, thumbnail: thumbnail,
+      parameters: parameters})
+  }
+  match codec.reader_finish(document, reader) {
+    ok(_) => result.ok(output),
+    err(problem) => result.err(codec.describe(problem)),
+  }
+}
+
+pub fn append_history(entry: Item own) -> result<array<Item>,string>
+    effects {alloc,env,fs.meta,fs.read,fs.write} {
+  var items: array<Item> = try load_history()
+  array.push(items, entry)
+  let saved: unit = try save_history(items)
+  result.ok(items)
+}
+
+pub fn clear_history() -> result<unit,string> effects {alloc,env,fs.write} {
+  var empty: array<Item> = array.new()
+  save_history(empty)
+}

@@ -1,0 +1,137 @@
+// Generate parameter files are reusable user data, not a second runtime configuration.
+module app.mm_air.parameters
+import std.codec as codec
+import std.json as json
+import std.text as text
+import "./.air/deps/h3/request.ai" as h3
+
+pub fn encode(request: ref<h3.Request>) -> result<string,string> effects {alloc} {
+  var out: codec.Writer = codec.writer()
+  codec.begin_object(out)
+  codec.field_text(out, "schema", "mm-air.generate.parameters")
+  codec.field_u64(out, "version", 1)
+  codec.field_text(out, "prompt", struct.borrow(request, field=prompt))
+  codec.field_u64(out, "model", cast.wrap(request.model))
+  codec.field_u64(out, "task", cast.wrap(request.task))
+  codec.field_u64(out, "profile", cast.wrap(request.profile))
+  codec.field_u64(out, "conditioner_projection", cast.wrap(request.conditioner_projection))
+  codec.field_u64(out, "transformer_projection", cast.wrap(request.transformer_projection))
+  codec.field_u64(out, "attention", cast.wrap(request.attention))
+  codec.field_i64(out, "seed", request.seed)
+  codec.field_u64(out, "resolution", cast.wrap(request.resolution))
+  let geometry = request.geometry
+  codec.field_u64(out, "width", geometry.width)
+  codec.field_u64(out, "height", geometry.height)
+  codec.field_f64(out, "seconds", request.seconds)
+  codec.field_text_array(out, "references", struct.borrow(request, field=references))
+  codec.field_text_array(out, "audio_references", struct.borrow(request, field=audio_references))
+  codec.field_text(out, "output", struct.borrow(request, field=output))
+  codec.end_object(out)
+  match codec.finish(out) {
+    ok(value) => result.ok(value),
+    err(error) => result.err(codec.describe(error)),
+  }
+}
+
+fn field(document: ref<json.Document>, name: str) -> result<u64,string> effects {alloc} {
+  match json.get(document, json.root(), name) {
+    some(value) => result.ok(value),
+    none => result.err(text.concat("Missing Generate parameter: ", name)),
+  }
+}
+
+fn string_field(document: ref<json.Document>, name: str) -> result<string,string> effects {alloc} {
+  let index = try field(document, name)
+  match json.as_string(document, index) {
+    some(value) => result.ok(value),
+    none => result.err(text.concat("Expected string: ", name)),
+  }
+}
+
+fn count(document: ref<json.Document>, name: str) -> result<u64,string> effects {alloc} {
+  let index = try field(document, name)
+  match json.as_u64(document, index) {
+    some(value) => result.ok(value),
+    none => result.err(text.concat("Expected unsigned integer: ", name)),
+  }
+}
+
+fn selection(document: ref<json.Document>, name: str) -> result<u32,string> effects {alloc} {
+  let value = try count(document, name)
+  if value > 4294967295 { return result.err(text.concat("Selection out of range: ", name)) }
+  result.ok(cast.sat(value))
+}
+
+fn strings(document: ref<json.Document>, name: str, limit: u64)
+    -> result<array<string>,string> effects {alloc} {
+  let index = try field(document, name)
+  match json.kind(document, index) {
+    some(kind) => { if kind != json.Kind.Array {
+      return result.err(text.concat("Expected reference array: ", name))
+    } },
+    none => { return result.err(text.concat("Expected reference array: ", name)) },
+  }
+  let size = match json.len(document, index) {
+    some(value) => value,
+    none => { return result.err(text.concat("Expected reference array: ", name)) },
+  }
+  if size > limit { return result.err(text.concat("Too many references: ", name)) }
+  var out: array<string> = []
+  var i: u64 = 0
+  loop {
+    if i == size { break }
+    let element = match json.at(document, index, i) {
+      some(value) => value,
+      none => { return result.err(text.concat("Expected reference array: ", name)) },
+    }
+    let value = match json.as_string(document, element) {
+      some(value) => value,
+      none => { return result.err(text.concat("Expected reference path: ", name)) },
+    }
+    array.push(out, value)
+    i = i + 1
+  }
+  result.ok(out)
+}
+
+pub fn decode(source: str) -> result<h3.Request,string> effects {alloc} {
+  var document: json.Document = match json.parse(source) {
+    ok(value) => value,
+    err(error) => { return result.err(json.error_message(error)) },
+  }
+  let schema = try string_field(document, "schema")
+  let version = try count(document, "version")
+  if schema != "mm-air.generate.parameters" or version != 1 {
+    return result.err("Not a supported MM-Air Generate parameter file")
+  }
+  let prompt = try string_field(document, "prompt")
+  let model = try selection(document, "model")
+  let task = try selection(document, "task")
+  let profile = try selection(document, "profile")
+  let conditioner = try selection(document, "conditioner_projection")
+  let transformer = try selection(document, "transformer_projection")
+  let attention = try selection(document, "attention")
+  let resolution = try selection(document, "resolution")
+  let seed = match json.as_i64(document, try field(document, "seed")) {
+    some(value) => value,
+    none => { return result.err("Expected signed integer seed") },
+  }
+  let width = try count(document, "width")
+  let height = try count(document, "height")
+  let seconds = match json.as_f64(document, try field(document, "seconds")) {
+    some(value) => value,
+    none => { return result.err("Expected duration in seconds") },
+  }
+  let references = try strings(document, "references", 9)
+  var audio = try strings(document, "audio_references", 3)
+  let output = try string_field(document, "output")
+  var request = h3.request(prompt, model, task, profile, conditioner, transformer,
+    attention, seed, resolution, references, output)
+  match h3.set_geometry(request, width, height, seconds) {
+    ok(_) => {},
+    err(error) => { var held: h3.Problem = error
+      return result.err(h3.describe(held)) },
+  }
+  let _ = ref.swap(struct.borrow(request, field=audio_references), audio)
+  result.ok(request)
+}

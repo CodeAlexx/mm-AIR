@@ -1,0 +1,27 @@
+// This is deliberately an import/ABI gate, not an inference surrogate. It
+// proves MM-Air resolves the shared H3 package and consumes its public session
+// policy without copying model code into this repository.
+module app.mm_air.tests.h3_library_import
+
+import "../.air/deps/h3/session.ai" as session
+
+pub fn main(args: view<str>) -> i32 effects {alloc, io.write} {
+  match session.attention_for_evaluation(
+      session.Attention.HybridExact3DenseInt8, 2) {
+    ok(value) => match value {
+      Exact => {},
+      DenseInt8 => { return 1 },
+    },
+    err(_) => { return 1 },
+  }
+  match session.attention_for_evaluation(
+      session.Attention.HybridExact3DenseInt8, 3) {
+    ok(value) => match value {
+      Exact => { return 1 },
+      DenseInt8 => {},
+    },
+    err(_) => { return 1 },
+  }
+  io.write("MM-Air imported models.h3.session: PASS\n")
+  0
+}

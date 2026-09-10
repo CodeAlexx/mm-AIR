@@ -1,0 +1,472 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <requires lib="gtk" version="4.10"/>
+
+  <object class="GtkAdjustment" id="movie_duration_adjustment">
+    <property name="lower">5</property><property name="upper">15</property><property name="step-increment">1</property><property name="value">8</property>
+  </object>
+  <object class="GtkAdjustment" id="gen_duration_adjustment">
+    <property name="lower">0.1666666666666667</property><property name="upper">120</property><property name="step-increment">0.01</property><property name="value">5.1667</property>
+  </object>
+  <object class="GtkAdjustment" id="gen_width_adjustment">
+    <property name="lower">256</property><property name="upper">4096</property><property name="step-increment">32</property><property name="value">832</property>
+  </object>
+  <object class="GtkAdjustment" id="gen_height_adjustment">
+    <property name="lower">256</property><property name="upper">4096</property><property name="step-increment">32</property><property name="value">480</property>
+  </object>
+  <object class="GtkAdjustment" id="control_strength_adjustment">
+    <property name="lower">-4</property><property name="upper">4</property><property name="step-increment">0.05</property><property name="value">1</property>
+  </object>
+  <object class="GtkAdjustment" id="control_start_adjustment">
+    <property name="lower">0</property><property name="upper">1</property><property name="step-increment">0.05</property><property name="value">0</property>
+  </object>
+  <object class="GtkAdjustment" id="control_end_adjustment">
+    <property name="lower">0</property><property name="upper">1</property><property name="step-increment">0.05</property><property name="value">1</property>
+  </object>
+
+  <object class="GtkTextBuffer" id="gen_prompt_buffer">
+    <property name="text">A cinematic wide shot with natural motion, detailed atmosphere, and synchronized environmental audio.</property>
+  </object>
+  <object class="GtkTextBuffer" id="director_bible_buffer">
+    <property name="text">Describe the story, visual language, performances, camera grammar, and sound direction for this movie.</property>
+  </object>
+  <object class="GtkTextBuffer" id="director_input_buffer">
+    <property name="text">Build a short film from this idea, preserving subject identity and screen direction across every shot.</property>
+  </object>
+  <object class="GtkTextBuffer" id="control_prompt_buffer">
+    <property name="text">A cinematic shot following the prepared motion map, with coherent subject movement, camera motion, ambience, and synchronized audio.</property>
+  </object>
+
+  <object class="GtkStringList" id="gen_model_list">
+    <items><item>MiniMax H3 Base</item><item>MiniMax H3 Reference</item></items>
+  </object>
+  <object class="GtkStringList" id="gen_task_list">
+    <items><item>Text to video + audio</item><item>First frame to video</item><item>First + last frame</item><item>Reference to video</item></items>
+  </object>
+  <object class="GtkStringList" id="h3_resolution_list">
+    <items><item>16:9 · 1344×768</item><item>21:9 · 1536×672</item><item>4:3 · 1024×768</item><item>1:1 · 768×768</item><item>3:4 · 768×1024</item><item>9:16 · 768×1344</item><item>Donor · 832×480</item><item>Custom</item></items>
+  </object>
+  <object class="GtkStringList" id="h3_profile_list">
+    <items><item>Select schedule…</item><item>Donor RES · 7 evaluations</item><item>Euler · 19 evaluations</item></items>
+  </object>
+  <object class="GtkStringList" id="h3_projection_list">
+    <items><item>Select projection…</item><item>Exact BF16</item><item>ConvRot INT8</item></items>
+  </object>
+  <object class="GtkStringList" id="h3_attention_list">
+    <items><item>Select attention…</item><item>Exact attention</item><item>Donor hybrid · exact 0–2, dense INT8 ≥3</item></items>
+  </object>
+  <object class="GtkStringList" id="movie_format_list">
+    <items><item>Movie</item><item>Single clip</item><item>Brand commercial</item></items>
+  </object>
+  <object class="GtkStringList" id="control_model_list">
+    <items><item>MiniMax H3 Base · full embed</item></items>
+  </object>
+  <object class="GtkStringList" id="controlnet_list">
+    <items><item>MiniMax H3 Fun ControlNet Union</item></items>
+  </object>
+  <object class="GtkStringList" id="preprocessor_list">
+    <items><item>Prepared map</item><item>Native Canny</item></items>
+  </object>
+  <object class="GtkStringList" id="fit_list">
+    <items><item>Center crop</item><item>Fit + pad</item><item>Stretch</item></items>
+  </object>
+
+  <object class="GtkWindow" id="window">
+    <property name="title">MM-AIR · MiniMax H3 Studio</property>
+    <property name="default-width">1600</property>
+    <property name="default-height">1000</property>
+    <property name="width-request">1180</property>
+    <property name="height-request">760</property>
+    <style><class name="mm-air-window"/></style>
+
+    <child type="titlebar">
+      <object class="GtkHeaderBar">
+        <property name="show-title-buttons">true</property>
+        <property name="title-widget">
+          <object class="GtkBox">
+            <property name="spacing">11</property>
+            <child><object class="GtkLabel"><property name="label">MM</property><style><class name="brand-mark"/></style></object></child>
+            <child><object class="GtkBox"><property name="orientation">vertical</property><property name="valign">center</property>
+              <child><object class="GtkLabel"><property name="label">MM-AIR</property><property name="xalign">0</property><style><class name="app-title"/></style></object></child>
+              <child><object class="GtkLabel" id="active_mode"><property name="label">Generate</property><property name="xalign">0</property><style><class name="app-subtitle"/></style></object></child>
+            </object></child>
+          </object>
+        </property>
+        <child type="end"><object class="GtkBox"><property name="spacing">8</property>
+          <child><object class="GtkLabel"><property name="label">●</property><style><class name="ready-dot"/></style></object></child>
+          <child><object class="GtkLabel" id="gen_run_state"><property name="label">Ready</property><style><class name="muted"/></style></object></child>
+          <child><object class="GtkSeparator"><property name="orientation">vertical</property><property name="margin-start">6</property><property name="margin-end">6</property></object></child>
+          <child><object class="GtkLabel"><property name="label">AIR native desktop</property><style><class name="runtime-chip"/></style></object></child>
+        </object></child>
+      </object>
+    </child>
+
+    <child><object class="GtkBox"><property name="orientation">vertical</property>
+      <child><object class="GtkBox"><property name="vexpand">true</property>
+        <child><object class="GtkBox"><property name="orientation">vertical</property><property name="width-request">86</property><style><class name="mode-rail"/></style>
+          <child><object class="GtkBox"><property name="height-request">12</property></object></child>
+          <child><object class="GtkToggleButton" id="nav_generate"><property name="active">true</property><property name="tooltip-text">Generate · Ctrl+1</property><style><class name="mode-button"/></style>
+            <child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">5</property>
+              <child><object class="GtkLabel"><property name="label">✦</property><style><class name="mode-icon"/></style></object></child>
+              <child><object class="GtkLabel"><property name="label">Generate</property></object></child>
+            </object></child>
+          </object></child>
+          <child><object class="GtkToggleButton" id="nav_movie"><property name="group">nav_generate</property><property name="tooltip-text">Movie Maker · Ctrl+2</property><style><class name="mode-button"/></style>
+            <child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">5</property>
+              <child><object class="GtkLabel"><property name="label">▣</property><style><class name="mode-icon"/></style></object></child>
+              <child><object class="GtkLabel"><property name="label">Movie</property></object></child>
+            </object></child>
+          </object></child>
+          <child><object class="GtkToggleButton" id="nav_control"><property name="group">nav_generate</property><property name="tooltip-text">H3 ControlNet · Ctrl+3</property><style><class name="mode-button"/></style>
+            <child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">5</property>
+              <child><object class="GtkLabel"><property name="label">⌗</property><style><class name="mode-icon"/></style></object></child>
+              <child><object class="GtkLabel"><property name="label">Control</property></object></child>
+            </object></child>
+          </object></child>
+          <child><object class="GtkBox"><property name="vexpand">true</property></object></child>
+          <child><object class="GtkLabel"><property name="label">H3 only</property><property name="margin-bottom">16</property><style><class name="rail-note"/></style></object></child>
+        </object></child>
+
+        <child><object class="GtkStack" id="main_stack"><property name="hexpand">true</property><property name="vexpand">true</property><property name="transition-type">crossfade</property>
+
+          <!-- Generate: SerenityFlow controls | preview | current batch -->
+          <child><object class="GtkStackPage"><property name="name">generate</property><property name="child">
+            <object class="GtkGrid"><property name="column-spacing">0</property><property name="row-spacing">0</property><style><class name="generate-page"/></style>
+              <child><object class="GtkScrolledWindow"><property name="width-request">360</property><property name="vexpand">true</property><property name="hscrollbar-policy">never</property><style><class name="parameter-panel"/></style>
+                <child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">12</property><property name="margin-start">15</property><property name="margin-end">15</property><property name="margin-top">15</property><property name="margin-bottom">22</property>
+                  <child><object class="GtkBox"><property name="spacing">8</property>
+                    <child><object class="GtkLabel"><property name="label">Parameters</property><property name="hexpand">true</property><property name="xalign">0</property><style><class name="panel-title"/></style></object></child>
+                    <child><object class="GtkLabel"><property name="label">VIDEO</property><style><class name="video-badge"/></style></object></child>
+                    <child><object class="GtkButton" id="reset_generate"><property name="label">Reset</property><style><class name="quiet-button"/></style></object></child>
+                  </object></child>
+                  <child><object class="GtkSearchEntry" id="gen_parameter_filter"><property name="placeholder-text">Filter parameters…</property></object></child>
+
+                  <child><object class="GtkFrame" id="gen_model_group"><style><class name="parameter-group"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">9</property><property name="margin-start">12</property><property name="margin-end">12</property><property name="margin-top">11</property><property name="margin-bottom">12</property>
+                    <child><object class="GtkLabel"><property name="label">Model</property><property name="xalign">0</property><style><class name="section-title"/></style></object></child>
+                    <child><object class="GtkLabel"><property name="label">Model</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child>
+                    <child><object class="GtkDropDown" id="gen_model"><property name="model">gen_model_list</property><property name="selected">0</property></object></child>
+                    <child><object class="GtkLabel"><property name="label">MiniMax-H3 · native AIR target</property><property name="xalign">0</property><style><class name="capability-note"/></style></object></child>
+                  </object></child></object></child>
+
+                  <child><object class="GtkFrame" id="gen_core_group"><style><class name="parameter-group"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">9</property><property name="margin-start">12</property><property name="margin-end">12</property><property name="margin-top">11</property><property name="margin-bottom">12</property>
+                    <child><object class="GtkLabel"><property name="label">Core parameters</property><property name="xalign">0</property><style><class name="section-title"/></style></object></child>
+                    <child><object class="GtkLabel"><property name="label">Task</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child>
+                    <child><object class="GtkDropDown" id="gen_task"><property name="model">gen_task_list</property><property name="selected">2</property></object></child>
+                    <child><object class="GtkGrid"><property name="column-spacing">9</property><property name="row-spacing">5</property>
+                      <child><object class="GtkLabel"><property name="label">Seed</property><property name="xalign">0</property><style><class name="field-label"/></style><layout><property name="column">0</property><property name="row">0</property></layout></object></child>
+                      <child><object class="GtkLabel"><property name="label">H3 profile</property><property name="xalign">0</property><style><class name="field-label"/></style><layout><property name="column">1</property><property name="row">0</property></layout></object></child>
+                      <child><object class="GtkEntry" id="gen_seed"><property name="text">42</property><property name="input-purpose">number</property><layout><property name="column">0</property><property name="row">1</property></layout></object></child>
+                      <child><object class="GtkDropDown" id="gen_profile"><property name="model">h3_profile_list</property><layout><property name="column">1</property><property name="row">1</property></layout></object></child>
+                    </object></child>
+                  </object></child></object></child>
+
+                  <child><object class="GtkFrame" id="gen_geometry_group"><style><class name="parameter-group"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">9</property><property name="margin-start">12</property><property name="margin-end">12</property><property name="margin-top">11</property><property name="margin-bottom">12</property>
+                    <child><object class="GtkLabel"><property name="label">Resolution</property><property name="xalign">0</property><style><class name="section-title"/></style></object></child>
+                    <child><object class="GtkDropDown" id="gen_resolution"><property name="model">h3_resolution_list</property><property name="selected">6</property></object></child>
+                    <child><object class="GtkGrid"><property name="column-spacing">9</property><property name="row-spacing">5</property>
+                      <child><object class="GtkLabel"><property name="label">Width</property><property name="xalign">0</property><layout><property name="column">0</property><property name="row">0</property></layout></object></child>
+                      <child><object class="GtkLabel"><property name="label">Height</property><property name="xalign">0</property><layout><property name="column">1</property><property name="row">0</property></layout></object></child>
+                      <child><object class="GtkSpinButton" id="gen_width"><property name="adjustment">gen_width_adjustment</property><property name="numeric">true</property><layout><property name="column">0</property><property name="row">1</property></layout></object></child>
+                      <child><object class="GtkSpinButton" id="gen_height"><property name="adjustment">gen_height_adjustment</property><property name="numeric">true</property><layout><property name="column">1</property><property name="row">1</property></layout></object></child>
+                    </object></child>
+                    <child><object class="GtkBox"><property name="spacing">9</property><child><object class="GtkLabel"><property name="label">Duration (seconds)</property><property name="hexpand">true</property><property name="xalign">0</property></object></child><child><object class="GtkSpinButton" id="gen_duration"><property name="adjustment">gen_duration_adjustment</property><property name="digits">4</property><property name="numeric">true</property></object></child></object></child>
+                    <child><object class="GtkBox"><property name="spacing">8</property>
+                      <child><object class="GtkLabel" id="gen_dimension_readout"><property name="label">832 × 480</property><property name="hexpand">true</property><property name="xalign">0</property><style><class name="dimension-readout"/></style></object></child>
+                      <child><object class="GtkLabel"><property name="label">24 FPS</property><style><class name="contract-chip"/></style></object></child>
+                    </object></child>
+                  </object></child></object></child>
+
+                  <child><object class="GtkFrame" id="gen_sources_group"><style><class name="parameter-group"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">9</property><property name="margin-start">12</property><property name="margin-end">12</property><property name="margin-top">11</property><property name="margin-bottom">12</property>
+                    <child><object class="GtkLabel"><property name="label">Source / References</property><property name="xalign">0</property><style><class name="section-title"/></style></object></child>
+                    <child><object class="GtkButton" id="choose_reference"><style><class name="drop-target"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">4</property><property name="margin-top">10</property><property name="margin-bottom">10</property>
+                      <child><object class="GtkPicture" id="reference_preview"><property name="visible">false</property><property name="height-request">96</property><property name="can-shrink">true</property><property name="content-fit">cover</property></object></child>
+                      <child><object class="GtkLabel" id="reference_name"><property name="label">＋  Choose first frame</property><property name="ellipsize">end</property><style><class name="drop-title"/></style></object></child>
+                      <child><object class="GtkLabel" id="reference_detail"><property name="label">Required · Ctrl+O</property><property name="ellipsize">middle</property><property name="max-width-chars">34</property><style><class name="capability-note"/></style></object></child>
+                    </object></child></object></child>
+                    <child><object class="GtkButton" id="clear_reference"><property name="label">Clear first frame</property><property name="sensitive">false</property><style><class name="quiet-button"/></style></object></child>
+                    <child><object class="GtkButton" id="choose_last_reference"><style><class name="drop-target"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">4</property><property name="margin-top">10</property><property name="margin-bottom">10</property>
+                      <child><object class="GtkPicture" id="last_reference_preview"><property name="visible">false</property><property name="height-request">96</property><property name="can-shrink">true</property><property name="content-fit">cover</property></object></child>
+                      <child><object class="GtkLabel" id="last_reference_name"><property name="label">＋  Choose last frame</property><property name="ellipsize">end</property><style><class name="drop-title"/></style></object></child>
+                      <child><object class="GtkLabel" id="last_reference_detail"><property name="label">Required · Ctrl+L</property><property name="ellipsize">middle</property><property name="max-width-chars">34</property><style><class name="capability-note"/></style></object></child>
+                    </object></child></object></child>
+                    <child><object class="GtkButton" id="clear_last_reference"><property name="label">Clear last frame</property><property name="sensitive">false</property><style><class name="quiet-button"/></style></object></child>
+                    <child><object class="GtkLabel" id="gen_reference_note"><property name="label">Up to 9 images/videos + 3 audio · selection order is reference order</property><property name="wrap">true</property><property name="xalign">0</property><style><class name="capability-note"/></style></object></child>
+                    <child><object class="GtkGridView" id="gen_visual_refs"><property name="single-click-activate">true</property><property name="max-columns">3</property></object></child>
+                    <child><object class="GtkBox" id="gen_visual_actions"><property name="spacing">6</property><child><object class="GtkButton" id="gen_add_visual"><style><class name="quiet-button"/></style><property name="label">Add image / video</property></object></child><child><object class="GtkButton" id="gen_remove_visual"><style><class name="quiet-button"/></style><property name="label">Remove selected</property><property name="sensitive">false</property></object></child></object></child>
+                    <child><object class="GtkGridView" id="gen_audio_refs"><property name="single-click-activate">true</property><property name="max-columns">3</property></object></child>
+                    <child><object class="GtkBox" id="gen_audio_actions"><property name="spacing">6</property><child><object class="GtkButton" id="gen_add_audio"><style><class name="quiet-button"/></style><property name="label">Add audio</property></object></child><child><object class="GtkButton" id="gen_remove_audio"><style><class name="quiet-button"/></style><property name="label">Remove selected</property><property name="sensitive">false</property></object></child></object></child>
+                  </object></child></object></child>
+
+                  <child><object class="GtkFrame" id="gen_runtime_group"><style><class name="parameter-group"/></style><child><object class="GtkGrid"><property name="column-spacing">9</property><property name="row-spacing">6</property><property name="margin-start">12</property><property name="margin-end">12</property><property name="margin-top">11</property><property name="margin-bottom">12</property>
+                    <child><object class="GtkLabel"><property name="label">Runtime &amp; output</property><property name="xalign">0</property><style><class name="section-title"/></style><layout><property name="column">0</property><property name="row">0</property><property name="column-span">2</property></layout></object></child>
+                    <child><object class="GtkLabel"><property name="label">Conditioner projection</property><property name="xalign">0</property><style><class name="field-label"/></style><layout><property name="column">0</property><property name="row">1</property></layout></object></child>
+                    <child><object class="GtkLabel"><property name="label">Transformer projection</property><property name="xalign">0</property><style><class name="field-label"/></style><layout><property name="column">1</property><property name="row">1</property></layout></object></child>
+                    <child><object class="GtkDropDown" id="gen_conditioner_projection"><property name="model">h3_projection_list</property><layout><property name="column">0</property><property name="row">2</property></layout></object></child>
+                    <child><object class="GtkDropDown" id="gen_transformer_projection"><property name="model">h3_projection_list</property><layout><property name="column">1</property><property name="row">2</property></layout></object></child>
+                    <child><object class="GtkLabel"><property name="label">Attention</property><property name="xalign">0</property><style><class name="field-label"/></style><layout><property name="column">0</property><property name="row">3</property></layout></object></child>
+                    <child><object class="GtkDropDown" id="gen_attention"><property name="model">h3_attention_list</property><layout><property name="column">0</property><property name="row">4</property><property name="column-span">2</property></layout></object></child>
+                    <child><object class="GtkLabel"><property name="label">MP4 target · linked pure-AIR H3 session</property><property name="xalign">0</property><style><class name="capability-note"/></style><layout><property name="column">0</property><property name="row">5</property><property name="column-span">2</property></layout></object></child>
+                    <child><object class="GtkButton" id="choose_output"><style><class name="quiet-button"/></style><child><object class="GtkLabel" id="output_name"><property name="label">Choose MP4 destination…</property><property name="ellipsize">middle</property><property name="max-width-chars">34</property></object></child><layout><property name="column">0</property><property name="row">6</property><property name="column-span">2</property></layout></object></child>
+                    <child><object class="GtkBox"><property name="spacing">6</property><child><object class="GtkButton" id="gen_save_parameters"><style><class name="quiet-button"/></style><property name="label">Save parameters</property></object></child><child><object class="GtkButton" id="gen_load_parameters"><style><class name="quiet-button"/></style><property name="label">Load parameters</property></object></child><layout><property name="column">0</property><property name="row">7</property><property name="column-span">2</property></layout></object></child>
+                  </object></child></object></child>
+                </object></child>
+                <layout><property name="column">0</property><property name="row">0</property></layout>
+              </object></child>
+
+              <child><object class="GtkBox"><property name="orientation">vertical</property><property name="hexpand">true</property><property name="vexpand">true</property><style><class name="generate-stage"/></style>
+                <child><object class="GtkBox"><property name="height-request">42</property><property name="spacing">8</property><property name="margin-start">14</property><property name="margin-end">14</property>
+                  <child><object class="GtkLabel"><property name="label">H3</property><style><class name="model-badge"/></style></object></child>
+                  <child><object class="GtkLabel"><property name="label">MiniMax H3 · native AIR session</property><property name="hexpand">true</property><property name="xalign">0</property><style><class name="muted"/></style></object></child>
+                  <child><object class="GtkLabel"><property name="label">● Linked</property><style><class name="idle-state"/></style></object></child>
+                </object></child>
+                <child><object class="GtkFrame"><property name="margin-start">16</property><property name="margin-end">16</property><property name="margin-top">16</property><property name="margin-bottom">12</property><property name="vexpand">true</property><style><class name="monitor-frame"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="valign">center</property><property name="halign">center</property><property name="spacing">9</property>
+                  <child><object class="GtkVideo" id="result_video"><property name="visible">false</property><property name="autoplay">false</property><property name="loop">false</property><property name="hexpand">true</property><property name="vexpand">true</property></object></child>
+                  <child><object class="GtkPicture" id="result_picture"><property name="visible">false</property><property name="can-shrink">true</property><property name="content-fit">contain</property><property name="hexpand">true</property><property name="vexpand">true</property></object></child>
+                  <child><object class="GtkLabel" id="result_placeholder"><property name="label">▱</property><style><class name="monitor-glyph"/></style></object></child>
+                  <child><object class="GtkLabel" id="result_empty_title"><property name="label">Choose a task and sources, then Generate</property><style><class name="monitor-title"/></style></object></child>
+                  <child><object class="GtkLabel"><property name="label">Generation runs in this native AIR process</property><style><class name="muted"/></style></object></child>
+                  <child><object class="GtkLabel" id="gen_geometry_summary"><property name="label">832×480   ·   124 frames   ·   24 FPS</property><style><class name="timecode"/></style></object></child>
+                </object></child></object></child>
+                <child><object class="GtkFrame"><property name="margin-start">16</property><property name="margin-end">16</property><property name="margin-bottom">12</property><style><class name="prompt-dock"/></style><child><object class="GtkGrid"><property name="column-spacing">12</property><property name="row-spacing">7</property><property name="margin-start">13</property><property name="margin-end">13</property><property name="margin-top">11</property><property name="margin-bottom">11</property>
+                  <child><object class="GtkLabel"><property name="label">Prompt</property><property name="xalign">0</property><style><class name="field-label"/></style><layout><property name="column">0</property><property name="row">0</property></layout></object></child>
+                  <child><object class="GtkScrolledWindow"><property name="min-content-height">92</property><property name="hexpand">true</property><child><object class="GtkTextView" id="gen_prompt"><property name="buffer">gen_prompt_buffer</property><property name="wrap-mode">word-char</property><property name="top-margin">9</property><property name="bottom-margin">9</property><property name="left-margin">10</property><property name="right-margin">10</property></object></child><layout><property name="column">0</property><property name="row">1</property></layout></object></child>
+                  <child><object class="GtkButton" id="generate_action"><property name="label">Generate H3 MP4</property><property name="width-request">190</property><property name="height-request">58</property><style><class name="primary-action"/></style><layout><property name="column">1</property><property name="row">1</property></layout></object></child>
+                </object></child></object></child>
+                <child><object class="GtkBox"><property name="height-request">112</property><property name="orientation">vertical</property><property name="spacing">7</property><property name="margin-start">16</property><property name="margin-end">16</property><property name="margin-bottom">12</property>
+                  <child><object class="GtkBox"><property name="spacing">16</property>
+                    <child><object class="GtkLabel"><property name="label">Current Generations</property><style><class name="library-tab-active"/></style></object></child>
+                    <child><object class="GtkBox"><property name="hexpand">true</property></object></child>
+                  </object></child>
+                  <child><object class="GtkScrolledWindow" id="gen_current_scroll"><property name="vexpand">true</property><child><object class="GtkGridView" id="gen_current"><property name="single-click-activate">true</property><property name="enable-rubberband">false</property></object></child></object></child>
+                  <child><object class="GtkLabel" id="gen_current_empty"><property name="label">Current generations appear here</property><property name="visible">true</property><style><class name="muted"/></style></object></child>
+                </object></child>
+                <layout><property name="column">1</property><property name="row">0</property></layout>
+              </object></child>
+
+              <child><object class="GtkBox"><property name="orientation">vertical</property><property name="width-request">248</property><style><class name="batch-panel"/></style>
+                <child><object class="GtkBox"><property name="spacing">8</property><property name="margin-start">13</property><property name="margin-end">13</property><property name="margin-top">13</property><property name="margin-bottom">10</property>
+                  <child><object class="GtkLabel"><property name="label">History</property><property name="hexpand">true</property><property name="xalign">0</property><style><class name="panel-title"/></style></object></child>
+                  <child><object class="GtkLabel" id="gen_batch_status"><property name="label">Idle</property><property name="max-width-chars">14</property><style><class name="muted"/></style></object></child>
+                  <child><object class="GtkButton" id="clear_history"><property name="label">Clear history</property><style><class name="quiet-button"/></style></object></child>
+                </object></child>
+                <child><object class="GtkSeparator"/></child>
+                <child><object class="GtkBox"><property name="vexpand">true</property><property name="orientation">vertical</property><property name="spacing">6</property>
+                  <child><object class="GtkLabel" id="gen_history_empty"><property name="label">No saved generations</property><style><class name="muted"/></style></object></child>
+                  <child><object class="GtkLabel" id="gen_batch_detail"><property name="label">History results</property><property name="ellipsize">middle</property><property name="max-width-chars">28</property><style><class name="muted"/></style></object></child>
+                  <child><object class="GtkScrolledWindow" id="gen_history_scroll"><property name="vexpand">true</property><property name="hexpand">true</property><property name="hscrollbar-policy">never</property><child><object class="GtkGridView" id="gen_history"><property name="max-columns">1</property><property name="single-click-activate">true</property></object></child></object></child>
+                </object></child>
+                <child><object class="GtkFrame"><property name="margin-start">11</property><property name="margin-end">11</property><property name="margin-bottom">11</property><style><class name="metadata-card"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">4</property><property name="margin-start">10</property><property name="margin-end">10</property><property name="margin-top">9</property><property name="margin-bottom">9</property>
+                  <child><object class="GtkLabel"><property name="label">Selected result</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child>
+                  <child><object class="GtkLabel" id="gen_selected_result"><property name="label">No result selected</property><property name="xalign">0</property><property name="ellipsize">middle</property><property name="max-width-chars">28</property><style><class name="muted"/></style></object></child>
+                  <child><object class="GtkButton" id="gen_reuse_parameters"><style><class name="quiet-button"/></style><property name="label">Reuse parameters</property><property name="sensitive">false</property></object></child>
+                </object></child></object></child>
+                <layout><property name="column">2</property><property name="row">0</property></layout>
+              </object></child>
+            </object>
+          </property></object></child>
+
+          <!-- Movie Maker: Mojo Serenity H3 Studio structure -->
+          <child><object class="GtkStackPage"><property name="name">movie</property><property name="child">
+            <object class="GtkBox"><property name="orientation">vertical</property><style><class name="movie-page"/></style>
+              <child><object class="GtkBox"><property name="height-request">58</property><property name="spacing">11</property><property name="margin-start">14</property><property name="margin-end">14</property><style><class name="movie-header"/></style>
+                <child><object class="GtkLabel"><property name="label">H3</property><style><class name="movie-mark"/></style></object></child>
+                <child><object class="GtkBox"><property name="orientation">vertical</property><property name="hexpand">true</property><property name="valign">center</property>
+                  <child><object class="GtkLabel"><property name="label">MINIMAX FILMMAKER WORKSPACE</property><property name="xalign">0</property><style><class name="movie-eyebrow"/></style></object></child>
+                  <child><object class="GtkEntry" id="project_title"><property name="text">Untitled H3 Movie</property><style><class name="project-title"/></style></object></child>
+                </object></child>
+                <child><object class="GtkLabel"><property name="label">2 shots</property><style><class name="movie-chip"/></style></object></child>
+                <child><object class="GtkLabel"><property name="label">16.00s cut</property><style><class name="movie-chip"/></style></object></child>
+                <child><object class="GtkLabel"><property name="label">Runtime connection pending</property><style><class name="ready-chip"/></style></object></child>
+                <child><object class="GtkButton" id="new_project"><property name="label">New</property><style><class name="movie-button"/></style></object></child>
+                <child><object class="GtkButton" id="export_project"><property name="label">Export project</property><style><class name="movie-button"/></style></object></child>
+                <child><object class="GtkButton" id="export_edit"><property name="label">Export edit</property><style><class name="movie-button"/></style></object></child>
+              </object></child>
+
+              <child><object class="GtkGrid"><property name="vexpand">true</property><property name="column-spacing">0</property>
+                <child><object class="GtkScrolledWindow"><property name="width-request">270</property><property name="hscrollbar-policy">never</property><style><class name="movie-side"/></style><child><object class="GtkBox"><property name="orientation">vertical</property>
+                  <child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">8</property><property name="margin-start">12</property><property name="margin-end">12</property><property name="margin-top">12</property><property name="margin-bottom">12</property>
+                    <child><object class="GtkLabel"><property name="label">PROJECT DECK                                         24 FPS SOURCE</property><property name="xalign">0</property><style><class name="movie-kicker"/></style></object></child>
+                    <child><object class="GtkDropDown" id="movie_format"><property name="model">movie_format_list</property></object></child>
+                    <child><object class="GtkGrid"><property name="column-spacing">8</property><property name="row-spacing">5</property>
+                      <child><object class="GtkLabel"><property name="label">Target runtime</property><property name="xalign">0</property><style><class name="field-label"/></style><layout><property name="column">0</property><property name="row">0</property></layout></object></child>
+                      <child><object class="GtkLabel"><property name="label">Takes / shot</property><property name="xalign">0</property><style><class name="field-label"/></style><layout><property name="column">1</property><property name="row">0</property></layout></object></child>
+                      <child><object class="GtkEntry"><property name="text">120</property><layout><property name="column">0</property><property name="row">1</property></layout></object></child>
+                      <child><object class="GtkEntry"><property name="text">1</property><layout><property name="column">1</property><property name="row">1</property></layout></object></child>
+                    </object></child>
+                    <child><object class="GtkLabel"><property name="label">Director model · Qwen3-VL 8B</property><property name="xalign">0</property><style><class name="readonly-field"/></style></object></child>
+                  </object></child>
+                  <child><object class="GtkSeparator"/></child>
+                  <child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">8</property><property name="margin-start">12</property><property name="margin-end">12</property><property name="margin-top">12</property><property name="margin-bottom">12</property>
+                    <child><object class="GtkLabel"><property name="label">PROJECT BIBLES                                      AUTOSAVED</property><property name="xalign">0</property><style><class name="movie-kicker"/></style></object></child>
+                    <child><object class="GtkNotebook"><property name="show-border">false</property>
+                      <child><object class="GtkNotebookPage"><property name="tab"><object class="GtkLabel"><property name="label">Director</property></object></property><property name="child"><object class="GtkScrolledWindow"><property name="min-content-height">135</property><child><object class="GtkTextView"><property name="buffer">director_bible_buffer</property><property name="wrap-mode">word-char</property><property name="top-margin">8</property><property name="bottom-margin">8</property><property name="left-margin">8</property><property name="right-margin">8</property></object></child></object></property></object></child>
+                      <child><object class="GtkNotebookPage"><property name="tab"><object class="GtkLabel"><property name="label">Continuity</property></object></property><property name="child"><object class="GtkLabel"><property name="label">Identity, wardrobe, geography, eyelines, and motion seams.</property><property name="wrap">true</property><property name="margin-start">9</property><property name="margin-end">9</property><property name="margin-top">9</property><property name="margin-bottom">9</property></object></property></object></child>
+                      <child><object class="GtkNotebookPage"><property name="tab"><object class="GtkLabel"><property name="label">Brand</property></object></property><property name="child"><object class="GtkLabel"><property name="label">Brand voice, palette, products, and exclusions.</property><property name="wrap">true</property><property name="margin-start">9</property><property name="margin-end">9</property><property name="margin-top">9</property><property name="margin-bottom">9</property></object></property></object></child>
+                    </object></child>
+                  </object></child>
+                  <child><object class="GtkSeparator"/></child>
+                  <child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">7</property><property name="margin-start">12</property><property name="margin-end">12</property><property name="margin-top">12</property><property name="margin-bottom">12</property>
+                    <child><object class="GtkBox"><child><object class="GtkLabel"><property name="label">SHOT DECK</property><property name="hexpand">true</property><property name="xalign">0</property><style><class name="movie-kicker"/></style></object></child><child><object class="GtkLabel"><property name="label">2</property><style><class name="muted"/></style></object></child></object></child>
+                    <child><object class="GtkButton" id="shot_one"><style><class name="shot-active"/></style><child><object class="GtkBox"><property name="spacing">8</property>
+                      <child><object class="GtkLabel"><property name="label">01</property><style><class name="shot-number"/></style></object></child>
+                      <child><object class="GtkBox"><property name="orientation">vertical</property><property name="hexpand">true</property><child><object class="GtkLabel"><property name="label">Opening shot</property><property name="xalign">0</property></object></child><child><object class="GtkLabel"><property name="label">T2VA · 8.00s · Unrendered</property><property name="xalign">0</property><style><class name="muted"/></style></object></child></object></child>
+                    </object></child></object></child>
+                    <child><object class="GtkButton" id="shot_two"><style><class name="shot-card"/></style><child><object class="GtkBox"><property name="spacing">8</property>
+                      <child><object class="GtkLabel"><property name="label">02</property><style><class name="shot-number"/></style></object></child>
+                      <child><object class="GtkBox"><property name="orientation">vertical</property><property name="hexpand">true</property><child><object class="GtkLabel"><property name="label">Shot 2</property><property name="xalign">0</property></object></child><child><object class="GtkLabel"><property name="label">T2VA · 8.00s · Unrendered</property><property name="xalign">0</property><style><class name="muted"/></style></object></child></object></child>
+                    </object></child></object></child>
+                    <child><object class="GtkBox"><property name="spacing">6</property><child><object class="GtkButton" id="add_shot"><property name="label">Add shot</property><style><class name="movie-primary-small"/></style></object></child><child><object class="GtkButton" id="duplicate_shot"><property name="label">Duplicate</property><style><class name="movie-button"/></style></object></child><child><object class="GtkButton" id="delete_shot"><property name="label">Delete</property><style><class name="danger-button"/></style></object></child></object></child>
+                  </object></child>
+                </object></child><layout><property name="column">0</property><property name="row">0</property></layout></object></child>
+
+                <child><object class="GtkBox"><property name="orientation">vertical</property><property name="hexpand">true</property><property name="vexpand">true</property><style><class name="movie-center"/></style>
+                  <child><object class="GtkFrame"><property name="vexpand">true</property><property name="margin-start">14</property><property name="margin-end">14</property><property name="margin-top">14</property><property name="margin-bottom">10</property><style><class name="movie-monitor"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="valign">center</property><property name="halign">center</property><property name="spacing">7</property>
+                    <child><object class="GtkLabel"><property name="label">SHOT 01 · T2VA</property><style><class name="movie-eyebrow"/></style></object></child>
+                    <child><object class="GtkLabel"><property name="label">Opening shot</property><style><class name="movie-monitor-title"/></style></object></child>
+                    <child><object class="GtkLabel"><property name="label">Write the beat, stage references, then prepare or render this shot.</property><style><class name="muted"/></style></object></child>
+                    <child><object class="GtkLabel"><property name="label">1344×768   ·   8.00s                                       H3 NATIVE 24 FPS · SYNC AUDIO</property><style><class name="timecode"/></style></object></child>
+                  </object></child></object></child>
+                  <child><object class="GtkNotebook"><property name="vexpand">true</property><property name="margin-start">14</property><property name="margin-end">14</property><property name="margin-bottom">10</property>
+                    <child><object class="GtkNotebookPage"><property name="tab"><object class="GtkLabel"><property name="label">Brief</property></object></property><property name="child"><object class="GtkLabel"><property name="label">Write the story beat and performance intent for this shot.</property><property name="wrap">true</property><property name="margin-top">18</property></object></property></object></child>
+                    <child><object class="GtkNotebookPage"><property name="tab"><object class="GtkLabel"><property name="label">Shot plan</property></object></property><property name="child"><object class="GtkLabel"><property name="label">Time the camera, action, dialogue, ambience, and score.</property><property name="wrap">true</property><property name="margin-top">18</property></object></property></object></child>
+                    <child><object class="GtkNotebookPage"><property name="tab"><object class="GtkLabel"><property name="label">H3 prompt</property></object></property><property name="child"><object class="GtkLabel"><property name="label">The compiled source-faithful H3 prompt appears here.</property><property name="wrap">true</property><property name="margin-top">18</property></object></property></object></child>
+                    <child><object class="GtkNotebookPage"><property name="tab"><object class="GtkLabel"><property name="label">Director</property></object></property><property name="child"><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">9</property><property name="margin-top">10</property>
+                      <child><object class="GtkBox"><property name="spacing">9</property><child><object class="GtkLabel"><property name="label">CREATE · Dream project</property><property name="xalign">0</property><property name="hexpand">true</property><style><class name="readonly-field"/></style></object></child><child><object class="GtkLabel"><property name="label">Expand an outline into exact 5–15 second H3 shots.</property><property name="xalign">0</property><property name="hexpand">true</property><style><class name="director-note"/></style></object></child></object></child>
+                      <child><object class="GtkScrolledWindow"><property name="min-content-height">115</property><property name="vexpand">true</property><child><object class="GtkTextView"><property name="buffer">director_input_buffer</property><property name="wrap-mode">word-char</property><property name="top-margin">9</property><property name="bottom-margin">9</property><property name="left-margin">9</property><property name="right-margin">9</property></object></child></object></child>
+                      <child><object class="GtkBox"><property name="spacing">7</property><child><object class="GtkButton" id="prepare_director"><property name="label">Prepare Qwen Director pass</property><style><class name="movie-primary-small"/></style></object></child><child><object class="GtkButton" id="copy_request"><property name="label">Copy request</property><style><class name="movie-button"/></style></object></child></object></child>
+                    </object></property></object></child>
+                  </object></child>
+                  <child><object class="GtkBox"><property name="spacing">7</property><property name="margin-start">14</property><property name="margin-end">14</property><property name="margin-bottom">12</property><child><object class="GtkButton" id="queue_take"><property name="label">Queue H3 take</property><style><class name="movie-primary"/></style></object></child><child><object class="GtkButton" id="continue_take"><property name="label">Continue selected take</property><property name="sensitive">false</property><style><class name="movie-button"/></style></object></child></object></child>
+                <layout><property name="column">1</property><property name="row">0</property></layout></object></child>
+
+                <child><object class="GtkScrolledWindow"><property name="width-request">340</property><property name="hscrollbar-policy">never</property><style><class name="movie-side"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">10</property><property name="margin-start">12</property><property name="margin-end">12</property><property name="margin-top">12</property><property name="margin-bottom">12</property>
+                  <child><object class="GtkNotebook"><property name="show-border">false</property>
+                    <child><object class="GtkNotebookPage"><property name="tab"><object class="GtkLabel"><property name="label">Shot</property></object></property><property name="child"><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">8</property><property name="margin-top">10</property>
+                      <child><object class="GtkCheckButton"><property name="label">Lock approved shot</property></object></child>
+                      <child><object class="GtkLabel"><property name="label">Shot name</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child>
+                      <child><object class="GtkEntry"><property name="text">Opening shot</property></object></child>
+                      <child><object class="GtkGrid"><property name="column-spacing">8</property><property name="row-spacing">5</property>
+                        <child><object class="GtkLabel"><property name="label">Duration · 5–15s</property><property name="xalign">0</property><style><class name="field-label"/></style><layout><property name="column">0</property><property name="row">0</property></layout></object></child>
+                        <child><object class="GtkLabel"><property name="label">Resolution</property><property name="xalign">0</property><style><class name="field-label"/></style><layout><property name="column">1</property><property name="row">0</property></layout></object></child>
+                        <child><object class="GtkSpinButton"><property name="adjustment">movie_duration_adjustment</property><layout><property name="column">0</property><property name="row">1</property></layout></object></child>
+                        <child><object class="GtkDropDown"><property name="model">h3_resolution_list</property><layout><property name="column">1</property><property name="row">1</property></layout></object></child>
+                      </object></child>
+                      <child><object class="GtkLabel"><property name="label">Opening frame</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child>
+                      <child><object class="GtkButton" id="choose_opening"><property name="label">Choose opening frame…</property><style><class name="movie-button"/></style></object></child>
+                      <child><object class="GtkLabel"><property name="label">Ending frame</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child>
+                      <child><object class="GtkButton" id="choose_ending"><property name="label">Choose ending frame…</property><style><class name="movie-button"/></style></object></child>
+                      <child><object class="GtkLabel"><property name="label">Motion seam · Balanced · 22 frames</property><property name="xalign">0</property><style><class name="readonly-field"/></style></object></child>
+                      <child><object class="GtkGrid"><property name="column-spacing">8</property><property name="row-spacing">5</property>
+                        <child><object class="GtkLabel"><property name="label">Precision</property><property name="xalign">0</property><style><class name="field-label"/></style><layout><property name="column">0</property><property name="row">0</property></layout></object></child>
+                        <child><object class="GtkLabel"><property name="label">Attention</property><property name="xalign">0</property><style><class name="field-label"/></style><layout><property name="column">1</property><property name="row">0</property></layout></object></child>
+                        <child><object class="GtkLabel"><property name="label">INT8 Fast · target</property><property name="xalign">0</property><style><class name="readonly-field"/></style><layout><property name="column">0</property><property name="row">1</property></layout></object></child>
+                        <child><object class="GtkLabel"><property name="label">CK-INT8 · not linked</property><property name="xalign">0</property><style><class name="readonly-field"/></style><layout><property name="column">1</property><property name="row">1</property></layout></object></child>
+                      </object></child>
+                    </object></property></object></child>
+                    <child><object class="GtkNotebookPage"><property name="tab"><object class="GtkLabel"><property name="label">Sound</property></object></property><property name="child"><object class="GtkLabel"><property name="label">Dialogue, ambience, Foley, and non-diegetic music.</property><property name="wrap">true</property><property name="margin-top">14</property></object></property></object></child>
+                    <child><object class="GtkNotebookPage"><property name="tab"><object class="GtkLabel"><property name="label">References</property></object></property><property name="child"><object class="GtkLabel"><property name="label">Ordered image, video, and audio references.</property><property name="wrap">true</property><property name="margin-top">14</property></object></property></object></child>
+                    <child><object class="GtkNotebookPage"><property name="tab"><object class="GtkLabel"><property name="label">Assets</property></object></property><property name="child"><object class="GtkLabel"><property name="label">Reusable identities and project media.</property><property name="wrap">true</property><property name="margin-top">14</property></object></property></object></child>
+                  </object></child>
+                </object></child><layout><property name="column">2</property><property name="row">0</property></layout></object></child>
+              </object></child>
+
+              <child><object class="GtkBox"><property name="orientation">vertical</property><property name="height-request">150</property><property name="spacing">8</property><property name="margin-start">13</property><property name="margin-end">13</property><property name="margin-top">9</property><property name="margin-bottom">9</property><style><class name="timeline"/></style>
+                <child><object class="GtkBox"><child><object class="GtkLabel"><property name="label">Continuity spine</property><property name="hexpand">true</property><property name="xalign">0</property><style><class name="movie-kicker"/></style></object></child><child><object class="GtkLabel"><property name="label">00:00:16:00 · DELIVERY 24 FPS</property><style><class name="timecode-cyan"/></style></object></child></object></child>
+                <child><object class="GtkBox"><property name="spacing">20</property><property name="vexpand">true</property>
+                  <child><object class="GtkFrame"><property name="width-request">220</property><style><class name="timeline-shot-active"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="halign">center</property><property name="valign">center</property><child><object class="GtkLabel"><property name="label">Opening shot</property></object></child><child><object class="GtkLabel"><property name="label">00:00:00:00 → 00:00:08:00</property><style><class name="timecode"/></style></object></child></object></child></object></child>
+                  <child><object class="GtkLabel"><property name="label">→</property><style><class name="timecode-cyan"/></style></object></child>
+                  <child><object class="GtkFrame"><property name="width-request">220</property><style><class name="timeline-shot"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="halign">center</property><property name="valign">center</property><child><object class="GtkLabel"><property name="label">Shot 2</property></object></child><child><object class="GtkLabel"><property name="label">00:00:08:00 → 00:00:16:00</property><style><class name="timecode"/></style></object></child></object></child></object></child>
+                </object></child>
+              </object></child>
+            </object>
+          </property></object></child>
+
+          <!-- H3 ControlNet: SerenityFlow source layout -->
+          <child><object class="GtkStackPage"><property name="name">control</property><property name="child">
+            <object class="GtkBox"><property name="orientation">vertical</property><style><class name="control-page"/></style>
+              <child><object class="GtkBox"><property name="height-request">86</property><property name="spacing">18</property><property name="margin-start">23</property><property name="margin-end">23</property><style><class name="control-header"/></style>
+                <child><object class="GtkBox"><property name="orientation">vertical</property><property name="hexpand">true</property><property name="valign">center</property>
+                  <child><object class="GtkLabel"><property name="label">NATIVE AIR WORKFLOW</property><property name="xalign">0</property><style><class name="control-eyebrow"/></style></object></child>
+                  <child><object class="GtkLabel"><property name="label">MiniMax H3 Control</property><property name="xalign">0</property><style><class name="control-title"/></style></object></child>
+                  <child><object class="GtkLabel"><property name="label">Union ControlNet for prepared motion maps or native Canny video.</property><property name="xalign">0</property><style><class name="muted"/></style></object></child>
+                </object></child>
+                <child><object class="GtkLabel"><property name="label">24 FPS</property><style><class name="contract-chip"/></style></object></child>
+                <child><object class="GtkLabel"><property name="label">CK-INT8 target</property><style><class name="contract-chip"/></style></object></child>
+                <child><object class="GtkLabel"><property name="label">Guidance 1.0</property><style><class name="contract-chip"/></style></object></child>
+                <child><object class="GtkLabel"><property name="label">Euler / Normal</property><style><class name="contract-chip"/></style></object></child>
+                <child><object class="GtkLabel"><property name="label">Audio on</property><style><class name="contract-chip"/></style></object></child>
+              </object></child>
+
+              <child><object class="GtkGrid"><property name="vexpand">true</property>
+                <child><object class="GtkScrolledWindow"><property name="width-request">595</property><property name="hscrollbar-policy">never</property><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">12</property><property name="margin-start">20</property><property name="margin-end">18</property><property name="margin-top">17</property><property name="margin-bottom">24</property>
+                  <child><object class="GtkFrame"><style><class name="control-card"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">9</property><property name="margin-start">15</property><property name="margin-end">15</property><property name="margin-top">14</property><property name="margin-bottom">15</property>
+                    <child><object class="GtkBox"><property name="spacing">10</property><child><object class="GtkLabel"><property name="label">01</property><style><class name="control-step"/></style></object></child><child><object class="GtkBox"><property name="orientation">vertical</property><child><object class="GtkLabel"><property name="label">Model &amp; control</property><property name="xalign">0</property><style><class name="card-title"/></style></object></child><child><object class="GtkLabel"><property name="label">Official dense Union checkpoint for the current full-embed H3 base.</property><property name="xalign">0</property><style><class name="muted"/></style></object></child></object></child></object></child>
+                    <child><object class="GtkLabel"><property name="label">H3 base checkpoint</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child>
+                    <child><object class="GtkDropDown" id="control_model"><property name="model">control_model_list</property></object></child>
+                    <child><object class="GtkLabel"><property name="label">H3 Union ControlNet</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child>
+                    <child><object class="GtkDropDown" id="controlnet_model"><property name="model">controlnet_list</property></object></child>
+                    <child><object class="GtkLabel"><property name="label">Target: official dense ControlNet · AIR row-scale INT8 · execution not linked</property><property name="xalign">0</property><property name="wrap">true</property><style><class name="capability-note"/></style></object></child>
+                    <child><object class="GtkButton" id="choose_control"><style><class name="control-drop"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">4</property><property name="margin-top">12</property><property name="margin-bottom">12</property><child><object class="GtkPicture" id="control_preview"><property name="visible">false</property><property name="height-request">96</property><property name="can-shrink">true</property><property name="content-fit">cover</property></object></child><child><object class="GtkLabel" id="control_name"><property name="label">⌗  Add control video or prepared map</property><property name="ellipsize">end</property><style><class name="drop-title"/></style></object></child><child><object class="GtkLabel" id="control_detail"><property name="label">Required · selection order is control order</property><property name="ellipsize">middle</property><property name="max-width-chars">34</property><style><class name="muted"/></style></object></child></object></child></object></child>
+                    <child><object class="GtkGrid"><property name="column-spacing">9</property><property name="row-spacing">5</property>
+                      <child><object class="GtkLabel"><property name="label">Input handling</property><property name="xalign">0</property><style><class name="field-label"/></style><layout><property name="column">0</property><property name="row">0</property></layout></object></child>
+                      <child><object class="GtkLabel"><property name="label">Canvas fit</property><property name="xalign">0</property><style><class name="field-label"/></style><layout><property name="column">1</property><property name="row">0</property></layout></object></child>
+                      <child><object class="GtkDropDown"><property name="model">preprocessor_list</property><layout><property name="column">0</property><property name="row">1</property></layout></object></child>
+                      <child><object class="GtkDropDown"><property name="model">fit_list</property><layout><property name="column">1</property><property name="row">1</property></layout></object></child>
+                    </object></child>
+                    <child><object class="GtkGrid"><property name="column-spacing">9</property><property name="row-spacing">5</property>
+                      <child><object class="GtkLabel"><property name="label">Strength</property><property name="xalign">0</property><style><class name="field-label"/></style><layout><property name="column">0</property><property name="row">0</property></layout></object></child>
+                      <child><object class="GtkLabel"><property name="label">Start</property><property name="xalign">0</property><style><class name="field-label"/></style><layout><property name="column">1</property><property name="row">0</property></layout></object></child>
+                      <child><object class="GtkLabel"><property name="label">End</property><property name="xalign">0</property><style><class name="field-label"/></style><layout><property name="column">2</property><property name="row">0</property></layout></object></child>
+                      <child><object class="GtkSpinButton"><property name="adjustment">control_strength_adjustment</property><property name="digits">2</property><layout><property name="column">0</property><property name="row">1</property></layout></object></child>
+                      <child><object class="GtkSpinButton"><property name="adjustment">control_start_adjustment</property><property name="digits">2</property><layout><property name="column">1</property><property name="row">1</property></layout></object></child>
+                      <child><object class="GtkSpinButton"><property name="adjustment">control_end_adjustment</property><property name="digits">2</property><layout><property name="column">2</property><property name="row">1</property></layout></object></child>
+                    </object></child>
+                    <child><object class="GtkButton" id="add_control"><property name="label">＋  Add control track</property><style><class name="dashed-button"/></style></object></child>
+                    <child><object class="GtkFrame"><style><class name="control-subpanel"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">7</property><property name="margin-start">10</property><property name="margin-end">10</property><property name="margin-top">9</property><property name="margin-bottom">9</property><child><object class="GtkBox"><child><object class="GtkLabel"><property name="label">H3 LoRAs</property><property name="hexpand">true</property><property name="xalign">0</property></object></child><child><object class="GtkLabel"><property name="label">0</property><style><class name="control-count"/></style></object></child></object></child><child><object class="GtkLabel"><property name="label">Ordered overlays with independent strengths</property><property name="xalign">0</property><style><class name="muted"/></style></object></child></object></child></object></child>
+                  </object></child></object></child>
+
+                  <child><object class="GtkFrame"><style><class name="control-card"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">9</property><property name="margin-start">15</property><property name="margin-end">15</property><property name="margin-top">14</property><property name="margin-bottom">15</property>
+                    <child><object class="GtkBox"><property name="spacing">10</property><child><object class="GtkLabel"><property name="label">02</property><style><class name="control-step"/></style></object></child><child><object class="GtkBox"><property name="orientation">vertical</property><property name="hexpand">true</property><child><object class="GtkLabel"><property name="label">Optional inpaint</property><property name="xalign">0</property><style><class name="card-title"/></style></object></child><child><object class="GtkLabel"><property name="label">White mask repaints; black mask preserves the source.</property><property name="xalign">0</property><style><class name="muted"/></style></object></child></object></child><child><object class="GtkSwitch"/></child></object></child>
+                  </object></child></object></child>
+
+                  <child><object class="GtkFrame"><style><class name="control-card"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">9</property><property name="margin-start">15</property><property name="margin-end">15</property><property name="margin-top">14</property><property name="margin-bottom">15</property>
+                    <child><object class="GtkBox"><property name="spacing">10</property><child><object class="GtkLabel"><property name="label">03</property><style><class name="control-step"/></style></object></child><child><object class="GtkBox"><property name="orientation">vertical</property><child><object class="GtkLabel"><property name="label">Prompt</property><property name="xalign">0</property><style><class name="card-title"/></style></object></child><child><object class="GtkLabel"><property name="label">Describe final scene, subject, camera, motion, and audio.</property><property name="xalign">0</property><style><class name="muted"/></style></object></child></object></child></object></child>
+                    <child><object class="GtkScrolledWindow"><property name="min-content-height">115</property><child><object class="GtkTextView" id="control_prompt"><property name="buffer">control_prompt_buffer</property><property name="wrap-mode">word-char</property><property name="top-margin">9</property><property name="bottom-margin">9</property><property name="left-margin">9</property><property name="right-margin">9</property></object></child></object></child>
+                  </object></child></object></child>
+
+                  <child><object class="GtkFrame"><style><class name="control-card"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">9</property><property name="margin-start">15</property><property name="margin-end">15</property><property name="margin-top">14</property><property name="margin-bottom">15</property>
+                    <child><object class="GtkBox"><property name="spacing">10</property><child><object class="GtkLabel"><property name="label">04</property><style><class name="control-step"/></style></object></child><child><object class="GtkBox"><property name="orientation">vertical</property><child><object class="GtkLabel"><property name="label">Output</property><property name="xalign">0</property><style><class name="card-title"/></style></object></child><child><object class="GtkLabel"><property name="label">Whole seconds; frames and H3 padding are automatic.</property><property name="xalign">0</property><style><class name="muted"/></style></object></child></object></child></object></child>
+                    <child><object class="GtkDropDown"><property name="model">h3_resolution_list</property></object></child>
+                    <child><object class="GtkBox"><property name="spacing">8</property><child><object class="GtkLabel"><property name="label">Output 120 frames</property><property name="hexpand">true</property><style><class name="readonly-field"/></style></object></child><child><object class="GtkLabel"><property name="label">H3 internal 124 frames</property><property name="hexpand">true</property><style><class name="readonly-field"/></style></object></child></object></child>
+                    <child><object class="GtkLabel"><property name="label">Fast · 7 points · MP4 · H.264 8-bit 4:2:0</property><property name="xalign">0</property><style><class name="capability-note"/></style></object></child>
+                  </object></child></object></child>
+                </object></child><layout><property name="column">0</property><property name="row">0</property></layout></object></child>
+
+                <child><object class="GtkBox"><property name="orientation">vertical</property><property name="hexpand">true</property><property name="vexpand">true</property><property name="spacing">10</property><property name="margin-start">18</property><property name="margin-end">20</property><property name="margin-top">17</property><property name="margin-bottom">18</property><style><class name="control-stage"/></style>
+                  <child><object class="GtkBox"><child><object class="GtkBox"><property name="orientation">vertical</property><property name="hexpand">true</property><child><object class="GtkLabel"><property name="label">Control deck</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child><child><object class="GtkLabel"><property name="label">No control video</property><property name="xalign">0</property><style><class name="card-title"/></style></object></child></object></child><child><object class="GtkLabel"><property name="label">○</property><style><class name="control-empty-dot"/></style></object></child></object></child>
+                  <child><object class="GtkBox"><property name="spacing">7</property><child><object class="GtkLabel"><property name="label">Control #1</property><style><class name="control-tab-active"/></style></object></child><child><object class="GtkBox"><property name="hexpand">true</property></object></child><child><object class="GtkLabel"><property name="label">Single</property><style><class name="control-tab-active"/></style></object></child><child><object class="GtkLabel"><property name="label">Split</property><style><class name="muted"/></style></object></child></object></child>
+                  <child><object class="GtkFrame"><property name="vexpand">true</property><style><class name="control-monitor"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="valign">center</property><property name="halign">center</property><property name="spacing">7</property>
+                    <child><object class="GtkLabel"><property name="label">⌗</property><style><class name="monitor-glyph"/></style></object></child><child><object class="GtkLabel"><property name="label">Drop a control video</property><style><class name="monitor-title"/></style></object></child><child><object class="GtkLabel"><property name="label">The exact uploaded media appears here.</property><style><class name="muted"/></style></object></child></object></child></object></child>
+                  <child><object class="GtkBox"><property name="spacing">8</property><child><object class="GtkButton" id="frame_back"><property name="label">−1f</property><style><class name="quiet-button"/></style></object></child><child><object class="GtkButton" id="deck_play"><property name="label">▶</property><style><class name="quiet-button"/></style></object></child><child><object class="GtkButton" id="frame_forward"><property name="label">+1f</property><style><class name="quiet-button"/></style></object></child><child><object class="GtkScale"><property name="hexpand">true</property><property name="draw-value">false</property></object></child><child><object class="GtkLabel"><property name="label">00:00 / 00:00</property><style><class name="timecode"/></style></object></child></object></child>
+                  <child><object class="GtkBox"><property name="spacing">8</property><property name="halign">center</property><child><object class="GtkLabel"><property name="label">Control map</property><style><class name="route-chip"/></style></object></child><child><object class="GtkLabel"><property name="label">→</property><style><class name="muted"/></style></object></child><child><object class="GtkLabel"><property name="label">VAE align</property><style><class name="route-chip"/></style></object></child><child><object class="GtkLabel"><property name="label">→</property><style><class name="muted"/></style></object></child><child><object class="GtkLabel"><property name="label">Layers 0 · 10 · 20 · 30 · 40</property><style><class name="route-chip"/></style></object></child></object></child>
+                  <child><object class="GtkFrame"><style><class name="run-card"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">9</property><property name="margin-start">13</property><property name="margin-end">13</property><property name="margin-top">12</property><property name="margin-bottom">12</property>
+                    <child><object class="GtkBox"><property name="homogeneous">true</property><child><object class="GtkLabel"><property name="label">Prepare</property><style><class name="phase-active"/></style></object></child><child><object class="GtkLabel"><property name="label">Control</property><style><class name="phase"/></style></object></child><child><object class="GtkLabel"><property name="label">Sample</property><style><class name="phase"/></style></object></child><child><object class="GtkLabel"><property name="label">Decode</property><style><class name="phase"/></style></object></child><child><object class="GtkLabel"><property name="label">Save</property><style><class name="phase"/></style></object></child></object></child>
+                    <child><object class="GtkBox"><child><object class="GtkLabel"><property name="label">Ready</property><property name="hexpand">true</property><property name="xalign">0</property></object></child><child><object class="GtkLabel"><property name="label">0%</property><style><class name="timecode"/></style></object></child></object></child>
+                    <child><object class="GtkProgressBar"><property name="fraction">0</property></object></child>
+                    <child><object class="GtkBox"><child><object class="GtkLabel"><property name="label">No sampling step</property><property name="hexpand">true</property><property name="xalign">0</property><style><class name="muted"/></style></object></child><child><object class="GtkLabel"><property name="label">Elapsed 00:00      ETA —</property><style><class name="muted"/></style></object></child></object></child>
+                    <child><object class="GtkBox"><property name="spacing">8</property><child><object class="GtkButton" id="control_action"><property name="label">Stage H3 CT Request</property><style><class name="control-primary"/></style></object></child><child><object class="GtkButton" id="cancel_control"><property name="label">Cancel</property><property name="sensitive">false</property><style><class name="quiet-button"/></style></object></child></object></child>
+                  </object></child></object></child>
+                <layout><property name="column">1</property><property name="row">0</property></layout></object></child>
+              </object></child>
+            </object>
+          </property></object></child>
+        </object></child>
+      </object></child>
+
+      <child><object class="GtkBox"><property name="height-request">28</property><property name="spacing">10</property><property name="margin-start">12</property><property name="margin-end">12</property><style><class name="status-bar"/></style>
+        <child><object class="GtkLabel" id="status"><property name="label">Generate ready · H3 generation not connected to MM-AIR</property><property name="hexpand">true</property><property name="xalign">0</property><style><class name="status-text"/></style></object></child>
+        <child><object class="GtkLabel"><property name="label">MM-AIR · H3 ONLY · NO TRAINING</property><style><class name="status-contract"/></style></object></child>
+      </object></child>
+    </object></child>
+  </object>
+</interface>

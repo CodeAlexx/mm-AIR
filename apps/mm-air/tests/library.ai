@@ -1,0 +1,147 @@
+module app.mm_air.tests.library
+
+import "../library.ai" as library
+import std.draw as draw
+import std.files as files
+import std.image as image
+import std.path as path
+
+fn require(value: bool, message: str) -> unit effects {io.write} {
+  if not value {
+    io.ewrite("MM-Air library FAIL: ")
+    io.ewrite(message)
+    io.ewrite("\n")
+    panic "MM-Air library regression failed"
+  }
+}
+
+fn exists(filename: str) -> bool effects {fs.meta} {
+  match files.exists(filename) { ok(value) => value, err(_) => false }
+}
+
+fn valid_png(filename: str) -> bool effects {alloc,fs.read} {
+  var data: bytes = match files.read_limited(filename, 8388608) {
+    ok(value) => value, err(_) => { return false },
+  }
+  match image.decode_png(bytes.view(data)) {
+    ok(_) => true, err(_) => false,
+  }
+}
+
+fn fixture_png(filename: str) -> unit effects {alloc,fs.write} {
+  var surface: draw.Surface = match draw.surface(2, 2) {
+    some(value) => value,
+    none => { panic "could not allocate fixture surface" },
+  }
+  let pixels: ref<array<byte>> = struct.borrow(surface, field=pixels)
+  var index: u64 = 0
+  loop {
+    if index >= array.len(pixels) { break }
+    let lane: u8 = cast.wrap(index * 13)
+    let value: byte = cast.bits(lane)
+    array.set(pixels, index, value)
+    index = index + 1
+  }
+  let encoded: bytes = image.encode_png(surface)
+  match files.write_bytes(filename, bytes.view(encoded)) {
+    ok(_) => {}, err(_) => { panic "could not write fixture PNG" },
+  }
+}
+
+pub fn main(args: view<str>) -> i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process} {
+  if view.len(args) < 2 or view.len(args) > 4 {
+    io.ewrite("usage: library TEST_DIR [EXISTING_VIDEO.mp4] [EXISTING_AUDIO]\n")
+    return 2
+  }
+  let root: str = view.get(args, 1)
+  match files.mkdirs(root) { ok(_) => {}, err(_) => { return 2 }, }
+  let image_path: string = path.join(root, "reference.png")
+  fixture_png(str.view(image_path))
+
+  var prepared: library.Item = match library.prep_reference(
+      str.view(image_path), "{\"prompt\":\"reference\"}") {
+    ok(value) => value,
+    err(problem) => { io.ewrite(problem)
+      io.ewrite("\n")
+      return 1 },
+  }
+  require(prepared.path == image_path and prepared.thumbnail == image_path,
+    "image reference must use its original path as thumbnail")
+  require(prepared.parameters == "{\"prompt\":\"reference\"}",
+    "reference parameters must remain byte-for-byte reusable")
+
+  let keep_path: string = path.join(root, "keep-user-output.mp4")
+  match files.write_bytes(str.view(keep_path), b"user-owned") {
+    ok(_) => {}, err(_) => { return 2 },
+  }
+  var history: array<library.Item> = [prepared,
+    library.item(str.view(keep_path), str.view(image_path),
+      "{\"prompt\":\"history\",\"seconds\":5.0}")]
+  match library.save_history(history) {
+    ok(_) => {}, err(problem) => { io.ewrite(problem)
+      io.ewrite("\n")
+      return 1 },
+  }
+  var loaded: array<library.Item> = match library.load_history() {
+    ok(value) => value,
+    err(problem) => { io.ewrite(problem)
+      io.ewrite("\n")
+      return 1 },
+  }
+  require(array.len(loaded) == 2, "history item count")
+  require(array.borrow(loaded, 1).path == keep_path and
+    array.borrow(loaded, 1).parameters ==
+      "{\"prompt\":\"history\",\"seconds\":5.0}",
+    "history path and full parameter JSON round trip")
+
+  var appended: array<library.Item> = match library.append_history(
+      library.item("/tmp/third.mp4", str.view(image_path), "{\"seed\":42}")) {
+    ok(value) => value,
+    err(problem) => { io.ewrite(problem)
+      io.ewrite("\n")
+      return 1 },
+  }
+  require(array.len(appended) == 3, "append history")
+
+  if view.len(args) >= 3 {
+    var video: library.Item = match library.prep_output(view.get(args, 2),
+        "{\"kind\":\"video\"}") {
+      ok(value) => value,
+      err(problem) => { io.ewrite(problem)
+        io.ewrite("\n")
+        return 1 },
+    }
+    require(exists(str.view(struct.borrow(video, field=thumbnail))) and
+      valid_png(str.view(struct.borrow(video, field=thumbnail))),
+      "video frame thumbnail")
+  }
+  if view.len(args) >= 4 {
+    var audio: library.Item = match library.prep_reference(view.get(args, 3),
+        "{\"kind\":\"audio\"}") {
+      ok(value) => value,
+      err(problem) => { io.ewrite(problem)
+        io.ewrite("\n")
+        return 1 },
+    }
+    require(exists(str.view(struct.borrow(audio, field=thumbnail))) and
+      valid_png(str.view(struct.borrow(audio, field=thumbnail))),
+      "audio waveform thumbnail")
+  }
+
+  match library.clear_history() {
+    ok(_) => {}, err(problem) => { io.ewrite(problem)
+      io.ewrite("\n")
+      return 1 },
+  }
+  loaded = match library.load_history() {
+    ok(value) => value,
+    err(problem) => { io.ewrite(problem)
+      io.ewrite("\n")
+      return 1 },
+  }
+  require(array.len(loaded) == 0, "clear history records")
+  require(exists(str.view(keep_path)), "clear history must preserve user media")
+  io.write("MM-Air native Generate library/history PASS\n")
+  0
+}

@@ -1,0 +1,973 @@
+// MM-AIR is an AIR-owned native shell for the three MiniMax H3 editing surfaces.
+module app.mm_air.main
+import "../../toolkits/desktop/ui.ai" as desk
+import std.files as files
+import std.path as path
+import std.text as text
+import std.json as json
+import std.process as proc
+import std.channel as channel
+import std.math as math
+import std.codec as codec
+import std.media_input as media
+import ".air/deps/h3/request.ai" as h3
+import ".air/deps/h3/session.ai" as h3_session
+import ".air/deps/h3/media.ai" as h3_media
+import "generate.ai" as generation
+import "parameters.ai" as parameters
+import "library.ai" as library
+
+fn item_paths(source: ref<array<library.Item>>) -> array<string> effects {alloc} {
+  var out: array<string> = []
+  var i: u64 = 0
+  loop {
+    if i == array.len(source) { break }
+    array.push(out, string.copy(struct.borrow(array.borrow(source, i), field=path)))
+    i = i + 1
+  }
+  out
+}
+
+fn show_items(session: ref<desk.Session>, id: str, items: ref<array<library.Item>>)
+    -> unit effects {alloc,net,time} {
+  var command = desk.command("items", id)
+  codec.field_u64(command, "thumbnail_width", 144)
+  codec.field_u64(command, "thumbnail_height", 96)
+  codec.key(command, "items")
+  codec.begin_array(command)
+  var i: u64 = 0
+  loop {
+    if i == array.len(items) { break }
+    let item = array.borrow(items, i)
+    let filename: str = str.view(struct.borrow(item, field=path))
+    codec.begin_object(command)
+    codec.field_text(command, "key", string.from_int(i))
+    codec.field_text(command, "label", path.basename(filename))
+    codec.field_text(command, "path", struct.borrow(item, field=thumbnail))
+    codec.field_text(command, "icon", "video-x-generic-symbolic")
+    codec.end_object(command)
+    i = i + 1
+  }
+  codec.end_array(command)
+  let _ = desk.submit(session, command)
+}
+
+fn remove_item(items: ref<array<library.Item>>, selected: str) -> unit effects {alloc} {
+  var kept: array<library.Item> = []
+  var i: u64 = 0
+  loop {
+    if i == array.len(items) { break }
+    let old = array.borrow(items, i)
+    if string.from_int(i) != selected {
+      array.push(kept, library.item(struct.borrow(old, field=path),
+        struct.borrow(old, field=thumbnail), struct.borrow(old, field=parameters)))
+    }
+    i = i + 1
+  }
+  let _ = ref.swap(items, kept)
+}
+
+fn selected_parameters(items: ref<array<library.Item>>, key: str) -> option<string> effects {alloc} {
+  var i: u64 = 0
+  loop {
+    if i == array.len(items) { break }
+    let item = array.borrow(items, i)
+    if string.from_int(i) == key {
+      return option.some(string.copy(struct.borrow(item, field=parameters)))
+    }
+    i = i + 1
+  }
+  option.none()
+}
+
+fn selected_path(items: ref<array<library.Item>>, key: str) -> string effects {alloc} {
+  var i: u64 = 0
+  loop {
+    if i == array.len(items) { break }
+    if string.from_int(i) == key {
+      return string.copy(struct.borrow(array.borrow(items, i), field=path))
+    }
+    i = i + 1
+  }
+  string.new()
+}
+
+fn geometry_preset(selected: u32, width: u64, height: u64) -> u32 effects {} {
+  let size = h3.resolution(selected)
+  if size.width == width and size.height == height { selected }
+  else { h3.resolution_custom() }
+}
+
+fn filter_parameters(session: ref<desk.Session>, query: str) -> unit effects {alloc,net,time} {
+  let wanted = text.lower_ascii(query)
+  let _ = desk.set_bool(session, "gen_model_group", "visible", wanted == "" or
+    text.contains("model checkpoint base reference", wanted))
+  let _ = desk.set_bool(session, "gen_core_group", "visible", wanted == "" or
+    text.contains("core task seed profile schedule evaluations", wanted))
+  let _ = desk.set_bool(session, "gen_geometry_group", "visible", wanted == "" or
+    text.contains("resolution width height duration seconds frames fps size geometry custom", wanted))
+  let _ = desk.set_bool(session, "gen_sources_group", "visible", wanted == "" or
+    text.contains("source references image video audio first last frame", wanted))
+  let _ = desk.set_bool(session, "gen_runtime_group", "visible", wanted == "" or
+    text.contains("runtime output save load parameters projection conditioner transformer attention convrot int8 bf16", wanted))
+}
+
+fn apply_parameter_widgets(session: ref<desk.Session>, request: ref<h3.Request>) -> unit
+    effects {alloc,net,time} {
+  let _ = desk.set_text(session, "gen_parameter_filter", "")
+  filter_parameters(session, "")
+  let _ = desk.set_text(session, "gen_prompt_buffer", struct.borrow(request, field=prompt))
+  let _ = desk.set_number(session, "gen_model", "selected", cast.float(request.model))
+  let _ = desk.set_number(session, "gen_task", "selected", cast.float(request.task))
+  let _ = desk.set_number(session, "gen_profile", "selected", cast.float(request.profile))
+  let _ = desk.set_number(session, "gen_conditioner_projection", "selected", cast.float(request.conditioner_projection))
+  let _ = desk.set_number(session, "gen_transformer_projection", "selected", cast.float(request.transformer_projection))
+  let _ = desk.set_number(session, "gen_attention", "selected", cast.float(request.attention))
+  let _ = desk.set_number(session, "gen_resolution", "selected", cast.float(request.resolution))
+  let _ = desk.set_text(session, "gen_seed", string.from_int(request.seed))
+  let geometry = request.geometry
+  let _ = desk.set_number(session, "gen_width", "value", cast.float(geometry.width))
+  let _ = desk.set_number(session, "gen_height", "value", cast.float(geometry.height))
+  let _ = desk.set_number(session, "gen_duration", "value", request.seconds)
+  let _ = desk.set_text(session, "output_name", struct.borrow(request, field=output))
+  geometry_summary(session, geometry.width, geometry.height, request.seconds)
+  source_widgets(session, request.task)
+}
+
+fn source_widgets(session: ref<desk.Session>, task: u32) -> unit effects {alloc,net,time} {
+  let first = task == h3.task_i2va() or task == h3.task_fl2va()
+  let last = task == h3.task_fl2va()
+  let reference = task == h3.task_ref2va()
+  let _ = desk.set_bool(session, "choose_reference", "visible", first)
+  let _ = desk.set_bool(session, "clear_reference", "visible", first)
+  let _ = desk.set_bool(session, "choose_last_reference", "visible", last)
+  let _ = desk.set_bool(session, "clear_last_reference", "visible", last)
+  let _ = desk.set_bool(session, "gen_visual_refs", "visible", reference)
+  let _ = desk.set_bool(session, "gen_audio_refs", "visible", reference)
+  let _ = desk.set_bool(session, "gen_visual_actions", "visible", reference)
+  let _ = desk.set_bool(session, "gen_audio_actions", "visible", reference)
+  let _ = desk.set_bool(session, "gen_reference_note", "visible", reference)
+}
+
+fn copy_paths(source: ref<array<string>>) -> array<string> effects {alloc} {
+  var out: array<string> = []
+  var i: u64 = 0
+  loop {
+    if i == array.len(source) { break }
+    array.push(out, string.copy(array.borrow(source, i)))
+    i = i + 1
+  }
+  out
+}
+
+fn geometry_summary(session: ref<desk.Session>, width: u64, height: u64, seconds: f64)
+    -> unit effects {alloc,net,time} {
+  let frames: u64 = cast.sat(math.round(seconds * cast.float(h3_media.fps())))
+  let shown_width: i64 = cast.sat(width)
+  let shown_height: i64 = cast.sat(height)
+  let shown_frames: i64 = cast.sat(frames)
+  var label = text.concat(string.from_int(shown_width), "×")
+  string.append(label, string.from_int(shown_height))
+  string.append(label, " · ")
+  string.append(label, string.from_int(shown_frames))
+  string.append(label, " frames · 24 FPS")
+  let _ = desk.set_text(session, "gen_geometry_summary", label)
+  let _ = desk.set_text(session, "gen_dimension_readout",
+    text.concat(string.from_int(shown_width), text.concat(" × ", string.from_int(shown_height))))
+}
+
+fn clear_reference(session: ref<desk.Session>, last: bool) -> unit effects {alloc,net,time} {
+  let _ = desk.picture(session, if last { "last_reference_preview" } else { "reference_preview" }, "")
+  let _ = desk.set_bool(session, if last { "last_reference_preview" } else { "reference_preview" }, "visible", false)
+  let _ = desk.set_text(session, if last { "last_reference_name" } else { "reference_name" },
+    if last { "＋ Choose last frame" } else { "＋ Choose first frame" })
+  let _ = desk.set_text(session, if last { "last_reference_detail" } else { "reference_detail" }, "No media selected")
+  let _ = desk.set_bool(session, if last { "clear_last_reference" } else { "clear_reference" }, "sensitive", false)
+}
+
+fn show_result(session: ref<desk.Session>, filename: str) -> unit effects {alloc,net,time} {
+  let _ = desk.set_bool(session, "result_placeholder", "visible", false)
+  let _ = desk.set_bool(session, "result_empty_title", "visible", false)
+  let _ = desk.set_bool(session, "result_picture", "visible", false)
+  let _ = desk.set_bool(session, "result_video", "visible", true)
+  let _ = desk.play(session, "result_video", filename)
+  let _ = desk.set_text(session, "gen_batch_detail", filename)
+  let _ = desk.set_text(session, "gen_selected_result", path.basename(filename))
+  let _ = desk.set_bool(session, "gen_reuse_parameters", "sensitive", true)
+}
+
+fn show_source(session: ref<desk.Session>, filename: str) -> unit
+    effects {alloc,fs.meta,net,time} {
+  match media.inspect(filename, 8589934592) {
+    err(error) => { var held: media.Error = error
+      let _ = desk.set_text(session, "status", media_error(held)) },
+    ok(info) => {
+      if info.kind == media.Kind.Image {
+        let _ = desk.pause(session, "result_video", false)
+        let _ = desk.set_bool(session, "result_video", "visible", false)
+        let _ = desk.set_bool(session, "result_picture", "visible", true)
+        let _ = desk.picture(session, "result_picture", filename)
+        let _ = desk.set_bool(session, "result_placeholder", "visible", false)
+        let _ = desk.set_bool(session, "result_empty_title", "visible", false)
+      } else { show_result(session, filename) }
+      let _ = desk.set_bool(session, "gen_reuse_parameters", "sensitive", false)
+      let _ = desk.set_text(session, "gen_selected_result", path.basename(filename))
+    },
+  }
+}
+
+fn session_projection(value: u32) -> h3_session.Projection effects {} {
+  if value == h3.projection_exact_bf16() {
+    return h3_session.Projection.ExactBF16
+  }
+  if value == h3.projection_convrot_int8() {
+    return h3_session.Projection.ConvRotI8
+  }
+  panic "MM-Air reached an unselected H3 projection"
+}
+
+fn session_attention(value: u32) -> h3_session.Attention effects {} {
+  if value == h3.attention_exact() { return h3_session.Attention.Exact }
+  if value == h3.attention_donor_hybrid() {
+    return h3_session.Attention.HybridExact3DenseInt8
+  }
+  panic "MM-Air reached unselected H3 attention"
+}
+
+fn fail(message: str) -> i32 effects {alloc,io.write} {
+  io.ewrite(text.concat(message, "\n"))
+  1
+}
+
+fn absolute(value: str) -> result<string,string> effects {alloc,fs.read} {
+  if path.is_absolute(value) { return result.ok(path.normalize(value)) }
+  let cwd: string = match files.cwd() {
+    ok(found) => found,
+    err(problem) => { return result.err(text.copy(problem.message)) },
+  }
+  result.ok(path.join(cwd, value))
+}
+
+fn select_mode(session: ref<desk.Session>, mode: str) -> unit effects {alloc,net,time} {
+  let _ = desk.set_string(session, "main_stack", "visible-child-name", mode)
+  let _ = desk.set_bool(session, "nav_generate", "active", mode == "generate")
+  let _ = desk.set_bool(session, "nav_movie", "active", mode == "movie")
+  let _ = desk.set_bool(session, "nav_control", "active", mode == "control")
+  let title: str = if mode == "movie" { "Movie Maker" }
+    else if mode == "control" { "H3 ControlNet" }
+    else { "Generate" }
+  let _ = desk.set_text(session, "active_mode", title)
+  let _ = desk.set_text(session, "status", text.concat(title, " ready"))
+  ()
+}
+
+fn action_status(session: ref<desk.Session>, id: str) -> unit effects {alloc,net,time} {
+  let message: str = if id == "queue_take" { "H3 take staged · runtime wiring comes next" }
+    else if id == "control_action" { "ControlNet controls staged · runtime wiring comes next" }
+    else if id == "new_project" { "New movie project wiring comes next" }
+    else { "Editor control staged for the next functionality pass" }
+  let _ = desk.set_text(session, "status", message)
+  ()
+}
+
+fn show_media(session: ref<desk.Session>, id: str, filename: str,
+              media_kind: media.Kind) -> unit
+  effects {alloc,io.write,net,time} {
+  let first: bool = id == "choose_reference"
+  let last: bool = id == "choose_last_reference"
+  let title_id: str = if first { "reference_name" }
+    else if last { "last_reference_name" } else { "control_name" }
+  let detail_id: str = if first { "reference_detail" }
+    else if last { "last_reference_detail" } else { "control_detail" }
+  let picture_id: str = if first { "reference_preview" }
+    else if last { "last_reference_preview" } else { "control_preview" }
+  let name: string = path.basename(filename)
+  let _ = desk.set_text(session, title_id, str.view(name))
+  let _ = desk.set_text(session, detail_id, filename)
+  if first or last {
+    let _ = desk.set_bool(session, if last { "clear_last_reference" } else { "clear_reference" }, "sensitive", true)
+  }
+  if media_kind == media.Kind.Image {
+    let _ = desk.picture(session, picture_id, filename)
+    let _ = desk.set_bool(session, picture_id, "visible", true)
+  } else {
+    let _ = desk.picture(session, picture_id, "")
+    let _ = desk.set_bool(session, picture_id, "visible", false)
+  }
+  let slot: str = if first { "first-reference" }
+    else if last { "last-reference" } else { "control" }
+  let label: string = media.kind_name(media_kind)
+  let _ = desk.set_text(session, "status", text.concat("Selected H3 ",
+    text.concat(slot, text.concat(" ", text.concat(str.view(label), text.concat(": ", str.view(name)))))))
+  io.write(text.concat("mm-air media selected ", text.concat(slot, text.concat("=", text.concat(filename, "\n")))))
+  ()
+}
+
+fn media_error(problem: ref<media.Error>) -> string effects {alloc} {
+  let filename: str = str.view(struct.borrow(problem, field=path))
+  if problem.code == media.ErrorCode.NotRegularFile {
+    return text.concat("Cannot add media: not a regular file: ", filename)
+  }
+  if problem.code == media.ErrorCode.TooLarge {
+    return text.concat("Cannot add media: file exceeds the 8 GiB selection limit: ", filename)
+  }
+  text.concat("Cannot read media: ", filename)
+}
+
+fn accept_media(session: ref<desk.Session>, id: str, filename: str) -> bool
+  effects {alloc,fs.meta,io.write,net,time} {
+  match media.inspect(filename, 8589934592) {
+    err(found) => {
+      var problem: media.Error = found
+      let message: string = media_error(problem)
+      let _ = desk.set_text(session, "status", str.view(message))
+      io.write(text.concat("mm-air media rejected=", text.concat(filename, "\n")))
+      false
+    },
+    ok(found) => {
+      var info: media.Info = found
+      let control: bool = id == "choose_control"
+      if info.kind == media.Kind.Unknown or (control and info.kind == media.Kind.Audio) or
+         (not control and info.kind != media.Kind.Image) {
+        let _ = desk.set_text(session, "status",
+          text.concat("Cannot add H3 reference/control media type: ", filename))
+        io.write(text.concat("mm-air media rejected=", text.concat(filename, "\n")))
+        return false
+      }
+      show_media(session, id, filename, info.kind)
+      true
+    },
+  }
+}
+
+fn selected_references(first: str, last: str) -> array<string> effects {alloc} {
+  var out: array<string> = array.new()
+  if str.len(first) != 0 { array.push(out, text.copy(first)) }
+  if str.len(last) != 0 { array.push(out, text.copy(last)) }
+  out
+}
+
+pub fn main(args: view<str>) -> i32
+  effects {alloc,env,fs.read,fs.meta,fs.write,gpu,io.write,net,time,thread,process} {
+  let program: string = match absolute(view.get(args, 0)) {
+    ok(found) => found,
+    err(problem) => { return fail(problem) },
+  }
+  let bindir: string = path.dirname(program)
+  let shared: string = path.join(path.dirname(bindir), "share/mm-air")
+  let open_parameters: bool = view.len(args) > 1 and view.get(args, 1) == "--parameters"
+  if open_parameters and view.len(args) != 3 { return fail("Usage: mm-air --parameters FILE.json") }
+  let layout: string = if view.len(args) > 1 and not open_parameters { text.copy(view.get(args, 1)) }
+    else { path.join(shared, "desktop.ui") }
+  let css: string = if view.len(args) > 2 and not open_parameters { text.copy(view.get(args, 2)) }
+    else { path.join(shared, "desktop.css") }
+  let helper: string = if view.len(args) > 3 { text.copy(view.get(args, 3)) }
+    else { path.join(bindir, "air-ui") }
+
+  var reference_media: string = string.new()
+  var last_reference_media: string = string.new()
+  var control_media: string = string.new()
+  var output_media: string = string.new()
+  var prompt: string = text.copy("A cinematic wide shot with natural motion, detailed atmosphere, and synchronized environmental audio.")
+  var model_index: u32 = 0
+  var task_index: u32 = 2
+  var profile_index: u32 = 0
+  var conditioner_projection_index: u32 = 0
+  var transformer_projection_index: u32 = 0
+  var attention_index: u32 = 0
+  var resolution_index: u32 = 6
+  var width: u64 = 832
+  var height: u64 = 480
+  var seconds: f64 = cast.float(h3_media.frames()) / cast.float(h3_media.fps())
+  var visual_references: array<library.Item> = []
+  var audio_references: array<library.Item> = []
+  var history: array<library.Item> = match library.load_history() {
+    ok(value) => value,
+    err(message) => { io.ewrite(text.concat(message, "\n"))
+      [] },
+  }
+  var current: array<library.Item> = []
+  var selected_visual: string = string.new()
+  var selected_audio: string = string.new()
+  var saved_parameters: string = string.new()
+  var pending_parameters: string = string.new()
+  if open_parameters {
+    pending_parameters = match files.read_text(view.get(args, 2)) {
+      ok(value) => value,
+      err(error) => { return fail(fs.error.message(error)) },
+    }
+  }
+  var saving_parameters: string = string.new()
+  var running_parameters: string = string.new()
+  var generation_started: u64 = 0
+  var seed: i64 = 42
+  var seed_valid: bool = true
+
+  var session: desk.Session = match desk.prepare(helper, layout, css) {
+    ok(found) => found,
+    err(problem) => { return fail(problem) },
+  }
+  var result_code: i32 = 0
+  task.scope {
+    var hosts: array<task<proc.Exit>> = [task.spawn(desk.plan(session), fn=proc.start)]
+    var generations: array<task<generation.Outcome>> = array.new()
+    var progress_receivers: array<channel.Receiver> = array.new()
+    match desk.connect(session) {
+      err(problem) => { result_code = fail(problem) },
+      ok(_) => {
+        let _ = desk.shortcut(session, "<Control>1", "show_generate")
+        let _ = desk.shortcut(session, "<Control>2", "show_movie")
+        let _ = desk.shortcut(session, "<Control>3", "show_control")
+        let _ = desk.shortcut(session, "<Control>o", "choose_reference")
+        let _ = desk.shortcut(session, "<Control>l", "choose_last_reference")
+        let _ = desk.shortcut(session, "<Control><Shift>o", "choose_control")
+        let _ = desk.shortcut(session, "<Control>s", "choose_output")
+        let _ = desk.shortcut(session, "<Control><Shift>s", "gen_save_parameters")
+        let _ = desk.shortcut(session, "<Control><Shift>l", "gen_load_parameters")
+        let _ = desk.shortcut(session, "<Control>r", "gen_reuse_parameters")
+        let _ = desk.shortcut(session, "<Control><Shift>r", "reset_generate")
+        let _ = desk.shortcut(session, "F5", "generate_action")
+        let _ = desk.shortcut(session, "<Control>q", "quit")
+        if not open_parameters { let _ = desk.snapshot(session) }
+        select_mode(session, "generate")
+        source_widgets(session, task_index)
+        show_items(session, "gen_history", history)
+        let _ = desk.set_bool(session, "gen_history_empty", "visible", array.len(history) == 0)
+        loop {
+          if pending_parameters != "" {
+            match parameters.decode(pending_parameters) {
+              err(message) => { let _ = desk.set_text(session, "status", message) },
+              ok(value) => {
+                var restored: h3.Request = value
+                prompt = string.copy(struct.borrow(restored, field=prompt))
+                model_index = restored.model
+                task_index = restored.task
+                profile_index = restored.profile
+                conditioner_projection_index = restored.conditioner_projection
+                transformer_projection_index = restored.transformer_projection
+                attention_index = restored.attention
+                resolution_index = restored.resolution
+                seed = restored.seed
+                seed_valid = true
+                let geometry = restored.geometry
+                width = geometry.width
+                height = geometry.height
+                resolution_index = geometry_preset(resolution_index, width, height)
+                struct.set(restored, resolution_index, field=resolution)
+                seconds = restored.seconds
+                output_media = string.copy(struct.borrow(restored, field=output))
+                reference_media = string.new()
+                last_reference_media = string.new()
+                visual_references = []
+                audio_references = []
+                clear_reference(session, false)
+                clear_reference(session, true)
+                let references = struct.borrow(restored, field=references)
+                var i: u64 = 0
+                loop {
+                  if i == array.len(references) { break }
+                  let filename = array.borrow(references, i)
+                  if task_index == h3.task_ref2va() {
+                    match library.prep_reference(filename, "") {
+                      ok(item) => { array.push(visual_references, item) },
+                      err(message) => {
+                        array.push(visual_references, library.item(filename, "", ""))
+                        io.ewrite(text.concat(message, "\n"))
+                      },
+                    }
+                  } else if i == 0 {
+                    reference_media = string.copy(filename)
+                    let _ = accept_media(session, "choose_reference", filename)
+                  } else if i == 1 {
+                    last_reference_media = string.copy(filename)
+                    let _ = accept_media(session, "choose_last_reference", filename)
+                  }
+                  i = i + 1
+                }
+                let audio = struct.borrow(restored, field=audio_references)
+                i = 0
+                loop {
+                  if i == array.len(audio) { break }
+                  match library.prep_reference(array.borrow(audio, i), "") {
+                    ok(item) => { array.push(audio_references, item) },
+                    err(message) => {
+                      array.push(audio_references, library.item(array.borrow(audio, i), "", ""))
+                      io.ewrite(text.concat(message, "\n"))
+                    },
+                  }
+                  i = i + 1
+                }
+                show_items(session, "gen_visual_refs", visual_references)
+                show_items(session, "gen_audio_refs", audio_references)
+                apply_parameter_widgets(session, restored)
+                let _ = desk.set_text(session, "status", "Generate parameters restored")
+              },
+            }
+            pending_parameters = string.new()
+          }
+          if array.len(progress_receivers) != 0 {
+            match channel.recv_now(array.borrow(progress_receivers, 0),
+                time.monotonic_ns()) {
+              ok(value) => match value {
+                some(item) => { var update: channel.Message = item
+                  match channel.text_of(update) {
+                    some(message) => {
+                      let _ = desk.set_text(session, "status", str.view(message))
+                      let _ = desk.set_text(session, "gen_batch_status", str.view(message))
+                    },
+                    none => {},
+                  }
+                },
+                none => {},
+              },
+              err(_) => {},
+            }
+          }
+          if array.len(generations) != 0 {
+            let elapsed: u64 = (time.monotonic_ns() - generation_started) / 1000000000
+            let _ = desk.set_text(session, "gen_run_state",
+              text.concat("Generating · ", text.concat(string.from_int(elapsed), " s")))
+            match task.wait_any(generations, 0) {
+              some(_) => {
+                var completed: generation.Outcome = task.join(
+                  option.unwrap(array.pop(generations)))
+                match array.pop(progress_receivers) {
+                  some(receiver) => { let _ = channel.close(receiver) },
+                  none => {},
+                }
+                let _ = desk.set_bool(session, "generate_action", "sensitive", true)
+                let _ = desk.set_text(session, "status",
+                  str.view(struct.borrow(completed, field=message)))
+                if completed.succeeded {
+                  match library.prep_output(struct.borrow(completed, field=output), running_parameters) {
+                    ok(item) => {
+                      var held: library.Item = item
+                      array.push(current, library.item(struct.borrow(held, field=path),
+                        struct.borrow(held, field=thumbnail), struct.borrow(held, field=parameters)))
+                      array.push(history, held)
+                      show_items(session, "gen_current", current)
+                      show_items(session, "gen_history", history)
+                      let _ = desk.set_bool(session, "gen_current_empty", "visible", false)
+                      let _ = desk.set_bool(session, "gen_history_empty", "visible", false)
+                      match library.save_history(history) {
+                        ok(_) => {},
+                        err(message) => { io.ewrite(text.concat(message, "\n")) },
+                      }
+                    },
+                    err(message) => { io.ewrite(text.concat(message, "\n")) },
+                  }
+                  saved_parameters = string.copy(running_parameters)
+                  show_result(session, str.view(struct.borrow(completed, field=output)))
+                  let _ = desk.set_text(session, "gen_batch_status", "Completed")
+                  let _ = desk.set_text(session, "gen_run_state", "Ready")
+                  io.write(text.concat("mm-air H3 MP4 saved=",
+                    text.concat(str.view(struct.borrow(completed, field=output)), "\n")))
+                  io.write(text.concat("mm-air Generate-to-displayed-result ms=",
+                    text.concat(string.from_int((time.monotonic_ns() - generation_started) / 1000000), "\n")))
+                } else {
+                  let _ = desk.set_text(session, "gen_batch_status", "Failed")
+                  let _ = desk.set_text(session, "gen_run_state", "Failed")
+                  io.ewrite(text.concat("mm-air H3 generation failed: ",
+                    text.concat(str.view(struct.borrow(completed, field=message)), "\n")))
+                }
+              },
+              none => {},
+            }
+          }
+          var event: json.Document = match desk.next(session, 1000) {
+            ok(item) => match item {
+              some(value) => value,
+              none => { continue },
+            },
+            err(problem) => { result_code = fail(problem)
+              break },
+          }
+          let kind: string = desk.field(event, "event")
+          let id: string = desk.field(event, "id")
+          if kind == "dialog" {
+            if not desk.boolean(event, "cancelled") {
+              let selected: string = desk.field(event, "value")
+              if id == "gen_save_parameters" {
+                let filename = if path.extension(selected) == "" { text.concat(selected, ".json") } else { string.copy(selected) }
+                let stamp: i64 = cast.sat(time.monotonic_ns())
+                let temporary = text.concat(filename, text.concat(".tmp-", string.from_int(stamp)))
+                match files.write_atomic(filename, temporary, saving_parameters) {
+                  ok(_) => { let _ = desk.set_text(session, "status", text.concat("Parameters saved: ", filename)) },
+                  err(error) => { let _ = desk.set_text(session, "status", fs.error.message(error)) },
+                }
+              }
+              if id == "gen_load_parameters" {
+                match files.read_text(selected) {
+                  ok(value) => { pending_parameters = value },
+                  err(error) => { let _ = desk.set_text(session, "status", fs.error.message(error)) },
+                }
+              }
+              if id == "gen_add_visual" or id == "gen_add_audio" {
+                let audio: bool = id == "gen_add_audio"
+                var chosen: array<string> = desk.dialog_paths(event)
+                var choice: u64 = 0
+                loop {
+                  if choice == array.len(chosen) { break }
+                  if (audio and array.len(audio_references) >= 3) or
+                     (not audio and array.len(visual_references) >= 9) {
+                    let _ = desk.set_text(session, "status", "Reference limit reached: nine visuals and three audio clips")
+                    break
+                  }
+                  let chosen_path: str = str.view(array.borrow(chosen, choice))
+                  choice = choice + 1
+                  match media.inspect(chosen_path, 8589934592) {
+                  err(error) => { var held: media.Error = error
+                    let _ = desk.set_text(session, "status", media_error(held)) },
+                  ok(info) => {
+                    if (audio and info.kind != media.Kind.Audio) or
+                       (not audio and info.kind != media.Kind.Image and info.kind != media.Kind.Video) {
+                      let _ = desk.set_text(session, "status", "Choose media matching the visual/audio reference slot")
+                    } else {
+                      match library.prep_reference(chosen_path, "") {
+                        ok(item) => {
+                          if audio { array.push(audio_references, item) }
+                          else { array.push(visual_references, item) }
+                          show_items(session, "gen_visual_refs", visual_references)
+                          show_items(session, "gen_audio_refs", audio_references)
+                        },
+                        err(message) => { let _ = desk.set_text(session, "status", message) },
+                      }
+                    }
+                  },
+                }
+                }
+              }
+              if id == "choose_reference" {
+                if accept_media(session, id, str.view(selected)) {
+                  reference_media = text.copy(str.view(selected))
+                }
+              }
+              if id == "choose_last_reference" {
+                if accept_media(session, id, str.view(selected)) {
+                  last_reference_media = text.copy(str.view(selected))
+                }
+              }
+              if id == "choose_control" {
+                if accept_media(session, id, str.view(selected)) {
+                  control_media = text.copy(str.view(selected))
+                }
+              }
+              if id == "choose_output" {
+                output_media = text.copy(str.view(selected))
+                if path.extension(str.view(output_media)) == "" {
+                  output_media = text.concat(str.view(output_media), ".mp4")
+                }
+                let _ = desk.set_text(session, "output_name", str.view(output_media))
+                let _ = desk.set_text(session, "status", text.concat("H3 output: ", str.view(output_media)))
+                io.write(text.concat("mm-air output selected=", text.concat(str.view(output_media), "\n")))
+              }
+            }
+            continue
+          }
+          if kind == "close" or id == "quit" { break }
+          if kind == "select" or kind == "activate" {
+            let key = desk.field(event, "value")
+            if id == "gen_visual_refs" { selected_visual = string.copy(key)
+              let _ = desk.set_bool(session, "gen_remove_visual", "sensitive", key != "") }
+            if id == "gen_audio_refs" { selected_audio = string.copy(key)
+              let _ = desk.set_bool(session, "gen_remove_audio", "sensitive", key != "") }
+            if key != "" and (id == "gen_visual_refs" or id == "gen_audio_refs") {
+              let filename = if id == "gen_visual_refs" { selected_path(visual_references, key) }
+                             else { selected_path(audio_references, key) }
+              if filename != "" { show_source(session, filename) }
+            }
+            if id == "gen_history" or id == "gen_current" {
+              let found = if id == "gen_current" { selected_parameters(current, key) }
+                          else { selected_parameters(history, key) }
+              match found {
+                some(value) => {
+                  saved_parameters = value
+                  let filename = if id == "gen_current" { selected_path(current, key) }
+                                 else { selected_path(history, key) }
+                  show_result(session, filename)
+                },
+                none => {},
+              }
+            }
+          }
+          if kind == "error" {
+            let message = desk.field(event, "message")
+            io.ewrite(text.concat(message, "\n"))
+            let _ = desk.set_text(session, "status", message)
+            continue
+          }
+          if id == "show_generate" { select_mode(session, "generate")
+            continue }
+          if id == "show_movie" { select_mode(session, "movie")
+            continue }
+          if id == "show_control" { select_mode(session, "control")
+            continue }
+          if kind == "change" and desk.boolean(event, "value") {
+            if id == "nav_generate" { select_mode(session, "generate")
+              continue }
+            if id == "nav_movie" { select_mode(session, "movie")
+              continue }
+            if id == "nav_control" { select_mode(session, "control")
+              continue }
+          }
+          if kind == "change" {
+            if id == "gen_parameter_filter" { filter_parameters(session, desk.field(event, "value")) }
+            if id == "gen_prompt" { prompt = desk.field(event, "value") }
+            if id == "gen_model" {
+              model_index = cast.sat(desk.number(event, "value"))
+              if model_index == h3.model_reference() { task_index = h3.task_ref2va() }
+              else if task_index == h3.task_ref2va() { task_index = h3.task_fl2va() }
+              let _ = desk.set_number(session, "gen_task", "selected", cast.float(task_index))
+              source_widgets(session, task_index)
+            }
+            if id == "gen_task" {
+              task_index = cast.sat(desk.number(event, "value"))
+              model_index = if task_index == h3.task_ref2va() { h3.model_reference() } else { h3.model_base() }
+              let _ = desk.set_number(session, "gen_model", "selected", cast.float(model_index))
+              source_widgets(session, task_index)
+            }
+            if id == "gen_profile" { profile_index = cast.sat(desk.number(event, "value")) }
+            if id == "gen_conditioner_projection" {
+              conditioner_projection_index = cast.sat(desk.number(event, "value"))
+            }
+            if id == "gen_transformer_projection" {
+              transformer_projection_index = cast.sat(desk.number(event, "value"))
+            }
+            if id == "gen_attention" { attention_index = cast.sat(desk.number(event, "value")) }
+            if id == "gen_resolution" {
+              let selected_index: u32 = cast.sat(desk.number(event, "value"))
+              if selected_index == resolution_index { continue }
+              resolution_index = selected_index
+              let size: h3.Size = h3.resolution(resolution_index)
+              if size.width != 0 {
+                width = size.width
+                height = size.height
+                let _ = desk.set_number(session, "gen_width", "value", cast.float(width))
+                let _ = desk.set_number(session, "gen_height", "value", cast.float(height))
+              }
+              geometry_summary(session, width, height, seconds)
+            }
+            if id == "gen_width" { width = cast.sat(desk.number(event, "value"))
+              resolution_index = geometry_preset(resolution_index, width, height)
+              let _ = desk.set_number(session, "gen_resolution", "selected", cast.float(resolution_index))
+              geometry_summary(session, width, height, seconds) }
+            if id == "gen_height" { height = cast.sat(desk.number(event, "value"))
+              resolution_index = geometry_preset(resolution_index, width, height)
+              let _ = desk.set_number(session, "gen_resolution", "selected", cast.float(resolution_index))
+              geometry_summary(session, width, height, seconds) }
+            if id == "gen_duration" { seconds = desk.number(event, "value")
+              geometry_summary(session, width, height, seconds) }
+            if id == "gen_seed" {
+              match text.parse_i64(desk.field(event, "value")) {
+                some(value) => { seed = value
+                  seed_valid = true },
+                none => { seed_valid = false
+                  let _ = desk.set_text(session, "status", "Seed must be an integer (-1 for random)") },
+              }
+            }
+            continue
+          }
+          if kind == "action" {
+            if id == "reset_generate" {
+              var defaults = h3.request("A cinematic wide shot with natural motion, detailed atmosphere, and synchronized environmental audio.",
+                h3.model_base(), h3.task_fl2va(), h3.profile_unselected(),
+                h3.projection_unselected(), h3.projection_unselected(), h3.attention_unselected(),
+                42, 6, [], "")
+              pending_parameters = match parameters.encode(defaults) {
+                ok(value) => value,
+                err(message) => { let _ = desk.set_text(session, "status", message)
+                  string.new() },
+              }
+              continue
+            }
+            if id == "gen_load_parameters" {
+              let _ = desk.dialog(session, id, "open", "Load Generate parameters", "", "")
+              continue
+            }
+            if id == "gen_reuse_parameters" {
+              pending_parameters = string.copy(saved_parameters)
+              continue
+            }
+            if id == "gen_remove_visual" or id == "gen_remove_audio" {
+              if id == "gen_remove_visual" {
+                remove_item(visual_references, selected_visual)
+                selected_visual = string.new()
+                let _ = desk.set_bool(session, "gen_remove_visual", "sensitive", false)
+              } else {
+                remove_item(audio_references, selected_audio)
+                selected_audio = string.new()
+                let _ = desk.set_bool(session, "gen_remove_audio", "sensitive", false)
+              }
+              show_items(session, "gen_visual_refs", visual_references)
+              show_items(session, "gen_audio_refs", audio_references)
+              continue
+            }
+            if id == "clear_history" {
+              match library.clear_history() {
+                ok(_) => {
+                  history = []
+                  show_items(session, "gen_history", history)
+                  let _ = desk.set_bool(session, "gen_history_empty", "visible", true)
+                  let _ = desk.set_text(session, "status", "History cleared; generated media files were kept")
+                },
+                err(message) => { let _ = desk.set_text(session, "status", message) },
+              }
+              continue
+            }
+            if id == "clear_reference" {
+              reference_media = string.new()
+              clear_reference(session, false)
+              continue
+            }
+            if id == "clear_last_reference" {
+              last_reference_media = string.new()
+              clear_reference(session, true)
+              continue
+            }
+            if id == "gen_add_visual" or id == "gen_add_audio" {
+              let audio: bool = id == "gen_add_audio"
+              if (audio and array.len(audio_references) >= 3) or
+                 (not audio and array.len(visual_references) >= 9) {
+                let _ = desk.set_text(session, "status", "Reference limit reached: nine visuals and three audio clips")
+                continue
+              }
+              let _ = desk.dialog_multiple(session, id,
+                if audio { "Add audio references" } else { "Add image or video references" }, "")
+              continue
+            }
+            if id == "choose_reference" {
+              let folder: string = if reference_media == "" { string.new() } else { path.dirname(str.view(reference_media)) }
+              let _ = desk.dialog(session, id, "open", "Add H3 reference media", "", str.view(folder))
+              continue
+            }
+            if id == "choose_last_reference" {
+              let folder: string = if last_reference_media == "" { string.new() } else { path.dirname(str.view(last_reference_media)) }
+              let _ = desk.dialog(session, id, "open", "Choose H3 last frame", "", str.view(folder))
+              continue
+            }
+            if id == "choose_control" {
+              let folder: string = if control_media == "" { string.new() } else { path.dirname(str.view(control_media)) }
+              let _ = desk.dialog(session, id, "open", "Add H3 control media", "", str.view(folder))
+              continue
+            }
+            if id == "choose_output" {
+              let folder: string = if output_media == "" { string.new() } else { path.dirname(str.view(output_media)) }
+              // Leave the chooser's suggested name extension-free. Some GTK
+              // backends otherwise append the suggested .mp4 to a location
+              // that the user already typed with .mp4.
+              let _ = desk.dialog(session, id, "save", "Save H3 video", "mm-air-h3", str.view(folder))
+              continue
+            }
+            if id == "generate_action" or id == "gen_save_parameters" {
+              if not seed_valid {
+                let _ = desk.set_text(session, "status", "Seed must be an integer (-1 for random)")
+                continue
+              }
+              if array.len(generations) != 0 and id == "generate_action" {
+                let _ = desk.set_text(session, "status",
+                  "MiniMax-H3 generation is already running")
+                continue
+              }
+              if id == "generate_action" { generation_started = time.monotonic_ns() }
+              var request_references: array<string> = selected_references(
+                str.view(reference_media), str.view(last_reference_media))
+              if task_index == h3.task_t2va() { request_references = [] }
+              if task_index == h3.task_i2va() {
+                request_references = selected_references(str.view(reference_media), "")
+              }
+              var request: h3.Request = h3.request(str.view(prompt), model_index, task_index,
+                profile_index, conditioner_projection_index,
+                transformer_projection_index, attention_index, seed,
+                resolution_index, request_references, str.view(output_media))
+              if task_index == h3.task_ref2va() {
+                let _ = ref.swap(struct.borrow(request, field=references), item_paths(visual_references))
+                let _ = ref.swap(struct.borrow(request, field=audio_references), item_paths(audio_references))
+              }
+              match h3.set_geometry(request, width, height, seconds) {
+                ok(_) => {},
+                err(error) => { var held: h3.Problem = error
+                  let _ = desk.set_text(session, "status", h3.describe(held))
+                  continue },
+              }
+              if id == "gen_save_parameters" {
+                match parameters.encode(request) {
+                  ok(value) => {
+                    saving_parameters = value
+                    let _ = desk.dialog(session, id, "save", "Save Generate parameters", "mm-air-parameters", "")
+                  },
+                  err(message) => { let _ = desk.set_text(session, "status", message) },
+                }
+                continue
+              }
+              match h3.validate(request) {
+                err(found) => {
+                  var problem: h3.Problem = found
+                  let _ = desk.set_text(session, "status", h3.describe(problem))
+                },
+                ok(_) => {
+                  let task = if request.task == h3.task_t2va() { h3_session.Task.T2VA }
+                    else if request.task == h3.task_i2va() { h3_session.Task.I2VA }
+                    else if request.task == h3.task_fl2va() { h3_session.Task.FL2VA }
+                    else { h3_session.Task.Ref2VA }
+                  let model = if request.model == h3.model_base() { h3_session.Model.Base }
+                    else { h3_session.Model.Reference }
+                  let conditioner_projection: h3_session.Projection = session_projection(request.conditioner_projection)
+                  let transformer_projection: h3_session.Projection = session_projection(request.transformer_projection)
+                  let attention: h3_session.Attention = session_attention(request.attention)
+                  var configuration: generation.Configuration = match generation.configuration() {
+                    ok(value) => value,
+                    err(problem) => {
+                      let _ = desk.set_text(session, "status", str.view(problem))
+                      continue
+                    },
+                  }
+                  var receiver: channel.Receiver = match channel.open(16, 1024) {
+                    ok(value) => value,
+                    err(problem) => {
+                      var owned_problem: channel.Error = problem
+                      let _ = desk.set_text(session, "status",
+                        str.view(channel.message(owned_problem)))
+                      continue
+                    },
+                  }
+                  let actual_seed: u64 = if request.seed < 0 {
+                    time.monotonic_ns()
+                  } else { cast.sat(request.seed) }
+                  struct.set(request, cast.sat(actual_seed), field=seed)
+                  running_parameters = match parameters.encode(request) {
+                    ok(value) => value,
+                    err(message) => { let _ = desk.set_text(session, "status", message)
+                      continue },
+                  }
+                  var job_references = copy_paths(struct.borrow(request, field=references))
+                  var job_audio = copy_paths(struct.borrow(request, field=audio_references))
+                  var job: generation.Job = generation.job(configuration,
+                    str.view(struct.borrow(request, field=prompt)),
+                    model, task, request.geometry,
+                    job_references, job_audio,
+                    str.view(struct.borrow(request, field=output)), actual_seed,
+                    h3.evaluations(request.profile), conditioner_projection,
+                    transformer_projection, attention, channel.ticket(receiver))
+                  array.push(progress_receivers, receiver)
+                  array.push(generations, task.spawn(job, fn=generation.run))
+                  let _ = desk.set_bool(session, "generate_action", "sensitive", false)
+                  let _ = desk.set_text(session, "gen_run_state", "Generating")
+                  let _ = desk.set_text(session, "status",
+                    "Starting linked AIR MiniMax-H3 generation")
+                  let _ = desk.set_text(session, "gen_batch_status", "Running")
+                  io.write("mm-air started linked AIR H3 generation\n")
+                },
+              }
+              continue
+            }
+            action_status(session, id)
+          }
+        }
+      },
+    }
+    desk.close(session)
+    let _ = proc.settle(hosts, session.root, 2000, 300)
+  }
+  desk.cleanup(session)
+  result_code
+}

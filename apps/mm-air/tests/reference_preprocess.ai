@@ -1,0 +1,64 @@
+// Source-faithful host contracts for Serenity's shipped H3 Ref2VA profile.
+module app.mm_air.tests.reference_preprocess
+
+import "../generate.ai" as generate
+
+fn expect_canvas(width: u64, height: u64,
+                 expected_width: u64, expected_height: u64) -> bool
+    effects {alloc} {
+  match generate.reference_image_canvas(width, height) {
+    ok(value) => value.width == expected_width and
+                 value.height == expected_height,
+    err(_) => false,
+  }
+}
+
+fn expect_canvas_error(width: u64, height: u64) -> bool effects {alloc} {
+  match generate.reference_image_canvas(width, height) {
+    ok(_) => false,
+    err(_) => true,
+  }
+}
+
+fn expect_encode_frames(frames: u64, expected: u64) -> bool effects {alloc} {
+  match generate.reference_video_encode_frames(frames) {
+    ok(value) => value == expected,
+    err(_) => false,
+  }
+}
+
+fn expect_encode_frames_error(frames: u64) -> bool effects {alloc} {
+  match generate.reference_video_encode_frames(frames) {
+    ok(_) => false,
+    err(_) => true,
+  }
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc,io.write} {
+  // Shipped 24 GB profile: 768 short edge, independent half-even /32
+  // rounding, and no video-style total-area cap.
+  if not expect_canvas(1024, 1024, 768, 768) or
+     not expect_canvas(1000, 500, 1536, 768) or
+     not expect_canvas(2000, 500, 3072, 768) or
+     not expect_canvas(1040, 768, 1024, 768) or
+     not expect_canvas(1072, 768, 1088, 768) or
+     not expect_canvas_error(0, 768) or
+     not expect_canvas_error(4001, 1000) {
+    io.ewrite("MM-Air H3 reference image canvas regression FAIL\n")
+    return 1
+  }
+
+  // Qwen vision retains the complete target-truncated frame sequence. Only
+  // the VAE input is shortened to a 17n+5 prefix.
+  let vision_frames: u64 = 48
+  if not expect_encode_frames(vision_frames, 39) or vision_frames != 48 or
+     not expect_encode_frames(124, 124) or
+     not expect_encode_frames(100, 90) or
+     not expect_encode_frames_error(21) {
+    io.ewrite("MM-Air H3 reference video frame regression FAIL\n")
+    return 1
+  }
+
+  io.write("MM-Air H3 reference preprocessing contracts: PASS\n")
+  0
+}

@@ -1,0 +1,28 @@
+# Generated application output and resolved private packages
+build*/
+.air/
+air.lock.json
+*.o
+*.a
+*.so
+*.so.*
+*.exe
+*.safetensors
+*.diftensor
+*.mp4
+*.wav
+*.raw
+__pycache__/
+
+# AIR remains private; never import the compiler checkout here.
+/AIR/
+/backend/
+/frontend/
+/ir/
+/runtime/
+/compute/
+/providers/
+/models/
+/stdlib/
+/toolkits/
+/archive/

@@ -1,0 +1,143 @@
+// Native Generate control round-trip. Run with helper, ui, css paths.
+module app.mm_air.tests.ui_layout
+import std.process as proc
+import "../../../toolkits/desktop/ui.ai" as desk
+import std.json as json
+import std.codec as codec
+
+fn populate(session: ref<desk.Session>, id: str, count: u64, thumbnail: str)
+  -> unit effects {alloc,net,time} {
+  var command = desk.command("items", id)
+  codec.key(command, "items")
+  codec.begin_array(command)
+  var i: u64 = 0
+  loop {
+    if i == count { break }
+    codec.begin_object(command)
+    codec.field_text(command, "key", string.from_int(i))
+    codec.field_text(command, "label", string.from_int(i))
+    codec.field_text(command, "path", thumbnail)
+    codec.end_object(command)
+    i = i + 1
+  }
+  codec.end_array(command)
+  let _ = desk.submit(session, command)
+  let _ = desk.select(session, id, string.from_int(count - 1))
+}
+
+pub fn main(args: view<str>) -> i32
+  effects {alloc,env,fs.read,fs.meta,fs.write,net,time,thread,process,io.write} {
+  if view.len(args) < 4 { return 2 }
+  var multiple = match json.parse("{\"event\":\"dialog\",\"value\":\"first.png\",\"values\":[\"first.png\",\"clip.mp4\",\"third.png\"],\"cancelled\":false}") {
+    ok(value) => value, err(_) => { return 1 },
+  }
+  var paths = desk.dialog_paths(multiple)
+  if array.len(paths) != 3 or str.view(array.borrow(paths, 0)) != "first.png" or
+     str.view(array.borrow(paths, 1)) != "clip.mp4" or
+     str.view(array.borrow(paths, 2)) != "third.png" { return 1 }
+  var single = match json.parse("{\"event\":\"dialog\",\"value\":\"old.wav\",\"cancelled\":false}") {
+    ok(value) => value, err(_) => { return 1 },
+  }
+  var legacy = desk.dialog_paths(single)
+  if array.len(legacy) != 1 or str.view(array.borrow(legacy, 0)) != "old.wav" { return 1 }
+  var s: desk.Session = match desk.prepare(view.get(args, 1), view.get(args, 2), view.get(args, 3)) {
+    ok(v) => v, err(message) => { io.ewrite(message)
+      return 1 },
+  }
+  var code: i32 = 0
+  task.scope {
+    var child: task<proc.Exit> = task.spawn(desk.plan(s), fn=proc.start)
+    match desk.connect(s) {
+      err(message) => { io.ewrite(message)
+        code = 1 },
+      ok(_) => {
+        let _ = desk.set_number(s, "gen_width", "value", 960.0)
+        let _ = desk.set_number(s, "gen_height", "value", 544.0)
+        let _ = desk.set_number(s, "gen_duration", "value", 10.0)
+        let _ = desk.set_number(s, "gen_task", "selected", 3.0)
+        let _ = desk.set_text(s, "gen_seed", "9007199254740993")
+        let _ = desk.set_text(s, "gen_prompt_buffer", "Native Generate widget regression")
+        let thumbnail: string = if view.len(args) > 5 { string.copy(view.get(args, 5)) } else { "" }
+        populate(s, "gen_visual_refs", 9, thumbnail)
+        populate(s, "gen_audio_refs", 3, thumbnail)
+        populate(s, "gen_history", 2, thumbnail)
+        populate(s, "gen_current", 2, thumbnail)
+        if view.len(args) > 4 {
+          let _ = desk.set_bool(s, "result_video", "visible", true)
+          let _ = desk.play(s, "result_video", view.get(args, 4))
+        }
+        let _ = desk.snapshot(s)
+        var width_seen: bool = false
+        var height_seen: bool = false
+        var duration_seen: bool = false
+        var task_seen: bool = false
+        var prompt_seen: bool = false
+        var seed_seen: bool = false
+        var video_seen: bool = view.len(args) <= 4
+        var playback_audio_seen: bool = view.len(args) <= 4
+        var visual_seen: bool = false
+        var audio_seen: bool = false
+        var history_seen: bool = false
+        var current_seen: bool = false
+        let deadline: u64 = time.monotonic_ns() + 15000000000
+        loop {
+          if time.monotonic_ns() >= deadline { break }
+          match desk.next(s, 500) {
+            ok(value) => match value {
+              some(value) => {
+                var event: json.Document = value
+                io.write(json.stringify(event))
+                io.write("\n")
+                let kind = desk.field(event, "event")
+                if kind == "error" {
+                  io.ewrite("GTK media error: ")
+                  io.ewrite(desk.field(event, "message"))
+                  io.ewrite("\n")
+                  code = 1
+                }
+                let id = desk.field(event, "id")
+                if kind == "select" {
+                  let key = desk.field(event, "value")
+                  if id == "gen_visual_refs" and key == "8" and desk.number(event, "count") == 9.0 { visual_seen = true }
+                  if id == "gen_audio_refs" and key == "2" and desk.number(event, "count") == 3.0 { audio_seen = true }
+                  if id == "gen_history" and key == "1" and desk.number(event, "count") == 2.0 { history_seen = true }
+                  if id == "gen_current" and key == "1" and desk.number(event, "count") == 2.0 { current_seen = true }
+                }
+                if id == "gen_width" and desk.number(event, "value") == 960.0 { width_seen = true }
+                if id == "gen_height" and desk.number(event, "value") == 544.0 { height_seen = true }
+                if id == "gen_duration" and desk.number(event, "value") == 10.0 { duration_seen = true }
+                if id == "gen_task" and desk.number(event, "value") == 3.0 { task_seen = true }
+                if id == "gen_prompt" and desk.field(event, "value") == "Native Generate widget regression" { prompt_seen = true }
+                if id == "gen_seed" and desk.field(event, "value") == "9007199254740993" { seed_seen = true }
+                if kind == "video" and id == "result_video" and
+                   desk.number(event, "duration") >= 9.5 and
+                   desk.number(event, "position") >= 4.0 {
+                  video_seen = true
+                  if desk.boolean(event, "has_audio") and
+                     not desk.boolean(event, "muted") and
+                     desk.number(event, "volume") > 0.0 {
+                    playback_audio_seen = true
+                  }
+                }
+              }, none => {},
+            },
+            err(message) => { io.ewrite(message)
+              code = 1
+              break },
+          }
+          if width_seen and height_seen and duration_seen and task_seen and prompt_seen and seed_seen and video_seen and playback_audio_seen and visual_seen and audio_seen and history_seen and current_seen { break }
+        }
+        if not width_seen or not height_seen or not duration_seen or not task_seen or not prompt_seen or not seed_seen or not video_seen or not playback_audio_seen or not visual_seen or not audio_seen or not history_seen or not current_seen { code = 1 }
+        let _ = desk.send(s, "{\"op\":\"quit\"}")
+      },
+    }
+    desk.close(s)
+    var finished: proc.Exit = task.join(child)
+    if not proc.finished(finished) {
+      io.ewrite(proc.describe(finished))
+      code = 1
+    }
+  }
+  desk.cleanup(s)
+  code
+}

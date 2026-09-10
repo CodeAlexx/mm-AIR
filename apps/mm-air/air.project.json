@@ -1,0 +1,48 @@
+{
+  "schema": "air.project",
+  "version": 1,
+  "package": {
+    "name": "mm-air-h3",
+    "version": "0.1.0",
+    "description": "MM-Air compile boundary for the shared pure-AIR MiniMax-H3 session library.",
+    "license": "MIT",
+    "namespace": "app.mm_air"
+  },
+  "targets": {
+    "test": [
+      {
+        "name": "h3-library-import",
+        "entry": "tests/h3_library_import.ai"
+      },
+      {
+        "name": "library",
+        "entry": "tests/library.ai"
+      },
+      {
+        "name": "parameters",
+        "entry": "tests/parameters.ai"
+      },
+      {
+        "name": "reference-preprocess",
+        "entry": "tests/reference_preprocess.ai"
+      }
+    ]
+  },
+  "sources": [
+    "generate.ai",
+    "library.ai",
+    "parameters.ai",
+    "tests"
+  ],
+  "requires": {
+    "os": ["linux"],
+    "arch": ["x86_64"],
+    "airc": ">=0.1.0"
+  },
+  "dependencies": {
+    "h3": {
+      "path": "../../../AIR/models/h3",
+      "version": ">=0.1.0"
+    }
+  }
+}
