@@ -40,6 +40,7 @@
     "airc": ">=0.1.0"
   },
   "dependencies": {
+    "krea2": {"path":"../../../AIR/models/krea2","version":">=0.1.0"},
     "h3": {
       "path": "../../../AIR/models/h3",
       "version": ">=0.1.0"

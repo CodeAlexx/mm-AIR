@@ -24,6 +24,43 @@ import ".air/deps/h3/packing.ai" as packing
 import ".air/deps/h3/presentation.ai" as presentation
 import ".air/deps/h3/session.ai" as session
 import ".air/deps/h3/vae.ai" as vae
+import ".air/deps/krea2/session.ai" as krea_session
+import ".air/deps/krea2/config.ai" as krea_config
+import "parameters.ai" as parameters
+
+pub type KreaJob = struct {sources:krea_session.Sources,request:parameters.KreaRequest,progress:channel.Ticket}
+pub fn krea_sources() -> result<krea_session.Sources,string> effects {alloc,env} {
+  result.ok(krea_session.Sources {
+    model_checkpoint:try required_environment("MM_AIR_KREA_MODEL"),
+    qwen_index:try required_environment("MM_AIR_KREA_QWEN_INDEX"),
+    tokenizer_directory:try required_environment("MM_AIR_KREA_TOKENIZER_DIR"),
+    vae_checkpoint:try required_environment("MM_AIR_KREA_VAE"),
+    vae_config:try required_environment("MM_AIR_KREA_VAE_CONFIG"),
+    manifest_directory:try required_environment("MM_AIR_KREA_MANIFEST_ROOT")})
+}
+pub fn run_krea(job: KreaJob own) -> Outcome effects {alloc,fs.read,fs.write,gpu,net,time} {
+  var owned = job
+  var ticket = ref.swap(struct.borrow(owned,field=progress),no_progress())
+  var connection = match channel.connect(ticket,time.monotonic_ns()+30000000000) {
+    ok(value) => value,
+    err(_) => { return outcome(false,struct.borrow(struct.borrow(owned,field=request),field=output),
+      "Cannot connect the MM-Air Krea progress channel") },
+  }
+  var sender: option<channel.Sender> = option.some(connection)
+  var finished = run_krea_inner(owned,sender)
+  finish_progress(sender,finished)
+  finished
+}
+fn run_krea_inner(owned: ref<KreaJob>,sender:ref<option<channel.Sender>>) -> Outcome effects {alloc,fs.read,fs.write,gpu,net,time} {
+  let request = struct.borrow(owned,field=request)
+  let seed: u64 = cast.sat(request.seed)
+  let settings = krea_config.Config {width:request.width,height:request.height}
+  match krea_session.run_to_png(struct.borrow(owned,field=sources),
+      struct.borrow(request,field=prompt),seed,settings,struct.borrow(request,field=output),sender) {
+    ok(_) => outcome(true,struct.borrow(request,field=output),"Linked AIR Krea 2 Turbo image completed"),
+    err(message) => outcome(false,struct.borrow(request,field=output),message),
+  }
+}
 
 pub type Job = struct {
   checkpoint_root: string,
@@ -40,6 +77,7 @@ pub type Job = struct {
   output: string,
   seed: u64,
   evaluations: u64,
+  schedule_kind: session.Schedule,
   conditioner_projection: session.Projection,
   transformer_projection: session.Projection,
   attention: session.Attention,
@@ -101,7 +139,8 @@ pub fn job(configuration: ref<Configuration>, prompt: str,
            evaluations: u64,
            conditioner_projection: session.Projection,
            transformer_projection: session.Projection,
-           attention: session.Attention, progress: channel.Ticket own) -> Job
+           attention: session.Attention, progress: channel.Ticket own,
+           schedule_kind: session.Schedule) -> Job
     effects {alloc} {
   var owned_references: array<string> = references
   var owned_audio_references: array<string> = audio_references
@@ -119,6 +158,7 @@ pub fn job(configuration: ref<Configuration>, prompt: str,
     prompt: text.copy(prompt), model: model, task: task, geometry: geometry,
     references: owned_references, audio_references: owned_audio_references,
     output: text.copy(output), seed: seed, evaluations: evaluations,
+    schedule_kind: schedule_kind,
     conditioner_projection: conditioner_projection,
     transformer_projection: transformer_projection, attention: attention,
     progress: progress}
@@ -137,8 +177,24 @@ fn no_progress() -> channel.Ticket effects {alloc} {
   channel.Ticket {port: 0, token: string.new(), capacity: 0, max_message: 0}
 }
 
-fn report(sender: ref<channel.Sender>, message: str) -> unit effects {alloc,net,time} {
-  let _ = channel.offer(sender, 1, str.bytes(message))
+fn report(sender: ref<option<channel.Sender>>, message: str) -> unit effects {alloc,net,time} {
+  match sender {
+    some(value) => { let _ = channel.offer(value,1,str.bytes(message)) },
+    none => {},
+  }
+  ()
+}
+fn finish_progress(sender:ref<option<channel.Sender>>,finished:ref<Outcome>) -> unit effects {alloc,net,time} {
+  var empty: option<channel.Sender> = option.none()
+  var owned: option<channel.Sender> = ref.swap(sender,empty)
+  match owned {
+    some(value) => {
+      var held: channel.Sender = value
+      let _ = channel.finish(held,if finished.succeeded {2} else {3},
+        str.bytes(struct.borrow(finished,field=message)),time.monotonic_ns()+30000000000)
+      let _ = channel.hang_up(held)
+    },none => {},
+  }
   ()
 }
 
@@ -485,7 +541,7 @@ fn intake_failure(phase: str, source: str, detail: str) -> string
   message
 }
 
-fn intake_report(sender: ref<channel.Sender>, rail: str, index: u64,
+fn intake_report(sender: ref<option<channel.Sender>>, rail: str, index: u64,
                  count: u64, source: str, phase: str) -> unit
     effects {alloc,net,time} {
   var message: string = text.copy("Ref2VA ")
@@ -505,7 +561,7 @@ fn intake_report(sender: ref<channel.Sender>, rail: str, index: u64,
 fn prepare_ref2va_inputs(
     context: ref<GpuContext>, stream: ref<GpuStream>, job: ref<Job>,
     sources: ref<session.Sources>, checkpoint_root: str, manifests: str,
-    scratch: str, sender: ref<channel.Sender>) -> result<ReferenceInputs,string>
+    scratch: str, sender: ref<option<channel.Sender>>) -> result<ReferenceInputs,string>
     effects {alloc,fs.meta,fs.read,fs.write,gpu,net,process,time} {
   var rows: array<session.ReferenceRows> = array.new()
   var presentations: array<presentation.Reference> = array.new()
@@ -838,7 +894,7 @@ fn clean_scratch(scratch: str) -> unit effects {alloc,fs.write} {
   ()
 }
 
-fn execute(job: ref<Job>, sender: ref<channel.Sender>) -> Outcome
+fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
     effects {alloc,fs.meta,fs.read,fs.write,gpu,net,process,time} {
   let checkpoint_root: string = match job.model {
     Base => text.copy(str.view(struct.borrow(job, field=checkpoint_root))),
@@ -933,6 +989,10 @@ fn execute(job: ref<Job>, sender: ref<channel.Sender>) -> Outcome
       "serenity_runtime_cache_v1/native_convrot_h256_ref2va_blocks_50.safetensors")
   } else { joined(str.view(checkpoint_root),
     "serenity_runtime_cache_v1/native_convrot_h256_official_blocks_50.safetensors") }
+  // The existing Ref2VA steps20 artifact is the accepted DC exponential-grid
+  // cache (difmodcache --schedule-points 20, shifts 12/3). The explicit
+  // Exponential profile uses that same prepared artifact, not a second cache.
+  // Keep the older Simple profile's path unchanged for saved-request behavior.
   let modulation_name: str = if job.model == session.Model.Reference and
       job.evaluations == 7 {
     "serenity_runtime_cache_v1/native-modcache-ref2va-steps8-blocks50.safetensors"
@@ -968,6 +1028,9 @@ fn execute(job: ref<Job>, sender: ref<channel.Sender>) -> Outcome
       exact_blocks_manifest: joined(str.view(manifests), "h3-blocks-bf16.json"),
       convrot_checkpoint: transformer_convrot,
       convrot_blocks_manifest: joined(str.view(manifests), "h3-blocks-convrot.json"),
+      row_scaled_checkpoint: joined(str.view(checkpoint_root),
+        "serenity_runtime_cache_v1/resident_w8a8_row_blocks_50.safetensors"),
+      row_scaled_blocks_manifest: joined(str.view(manifests), "h3-blocks-row-scaled-i8.json"),
       modulation_checkpoint: joined(str.view(checkpoint_root), modulation_name),
       modulation_manifest: joined(str.view(manifests), "h3-modulation-cache.json")},
     video_vae_checkpoint: joined(str.view(checkpoint_root),
@@ -1006,7 +1069,7 @@ fn execute(job: ref<Job>, sender: ref<channel.Sender>) -> Outcome
       str.view(struct.borrow(job, field=prompt)), job.model, job.task,
       reference_surfaces, job.geometry, job.seed, job.conditioner_projection,
       job.transformer_projection, job.attention, job.evaluations,
-      str.view(scratch), str.view(output_path))
+      str.view(scratch), str.view(output_path), job.schedule_kind,sender)
   } else {
     var inputs: ReferenceInputs = match prepare_ref2va_inputs(context, stream,
         job, sources, str.view(checkpoint_root), str.view(manifests),
@@ -1057,7 +1120,7 @@ fn execute(job: ref<Job>, sender: ref<channel.Sender>) -> Outcome
       struct.borrow(inputs, field=presentations),
       struct.borrow(inputs, field=patches), job.geometry, job.seed,
       job.conditioner_projection, job.transformer_projection, job.attention,
-      job.evaluations, str.view(scratch), str.view(output_path))
+      job.evaluations, str.view(scratch), str.view(output_path), job.schedule_kind,sender)
   }
   // Provider diagnostics and counters belong to the live context. Snapshot
   // them before teardown so a UI failure reports the real allocation boundary.
@@ -1097,16 +1160,14 @@ pub fn run(source: Job own) -> Outcome
   var job: Job = source
   var ticket: channel.Ticket = ref.swap(
     struct.borrow(job, field=progress), no_progress())
-  var sender: channel.Sender = match channel.connect(ticket,
+  var connection: channel.Sender = match channel.connect(ticket,
       time.monotonic_ns() + 30000000000) {
     ok(value) => value,
     err(_) => { return outcome(false, str.view(struct.borrow(job, field=output)),
       "Cannot connect the MM-Air H3 progress channel") },
   }
+  var sender: option<channel.Sender> = option.some(connection)
   var finished: Outcome = execute(job, sender)
-  let _ = channel.finish(sender, if finished.succeeded { 2 } else { 3 },
-    str.bytes(str.view(struct.borrow(finished, field=message))),
-    time.monotonic_ns() + 30000000000)
-  let _ = channel.hang_up(sender)
+  finish_progress(sender,finished)
   finished
 }

@@ -24,6 +24,20 @@ pub fn item(source: str, thumbnail: str, parameters: str) -> Item effects {alloc
     parameters: text.copy(parameters)}
 }
 
+// Move the whole reference record, including its thumbnail and saved metadata.
+// Return the moved item's new index; endpoints and stale selections are no-ops.
+pub fn move_item(items: ref<array<Item>>, index: u64, earlier: bool)
+    -> option<u64> effects {} {
+  let count: u64 = array.len(items)
+  if index >= count { return option.none() }
+  if (earlier and index == 0) or (not earlier and index + 1 == count) {
+    return option.none()
+  }
+  let target: u64 = if earlier { index - 1 } else { index + 1 }
+  array.swap(items, index, target)
+  option.some(target)
+}
+
 fn filesystem_error(prefix: str, problem: fs.error) -> string effects {alloc} {
   text.concat(prefix, fs.error.message(problem))
 }
@@ -166,8 +180,8 @@ fn prepare(source: str, parameters: str, output_only: bool)
     err(_) => { return result.err("media must be a readable regular file under 64 GiB") },
   }
   let kind: input.Kind = inspected.kind
-  if output_only and kind != input.Kind.Video {
-    return result.err("Generate history output must be a video")
+  if output_only and kind != input.Kind.Video and kind != input.Kind.Image {
+    return result.err("Generate history output must be an image or video")
   }
   if kind == input.Kind.Unknown {
     return result.err("MM-Air does not recognize this media type")

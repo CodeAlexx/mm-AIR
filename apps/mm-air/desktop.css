@@ -266,3 +266,4 @@ button { box-shadow: none; }
 
 scrollbar slider { min-width: 5px; min-height: 5px; background: #41494a; border-radius: 999px; }
 separator { background: @rule; }
+.generation-status { font-size: 14px; font-weight: 600; color: #efc078; padding-top: 6px; }

@@ -67,6 +67,39 @@ fn remove_item(items: ref<array<library.Item>>, selected: str) -> unit effects {
   let _ = ref.swap(items, kept)
 }
 
+fn reference_actions(session: ref<desk.Session>, audio: bool, key: str, count: u64)
+    -> unit effects {alloc,net,time} {
+  let index: u64 = match text.parse_u64(key) {
+    some(value) => value, none => count,
+  }
+  let valid: bool = index < count
+  let _ = desk.set_bool(session, if audio { "gen_remove_audio" } else { "gen_remove_visual" },
+    "sensitive", valid)
+  let _ = desk.set_bool(session, if audio { "gen_audio_earlier" } else { "gen_visual_earlier" },
+    "sensitive", valid and index > 0)
+  let _ = desk.set_bool(session, if audio { "gen_audio_later" } else { "gen_visual_later" },
+    "sensitive", valid and index + 1 < count)
+}
+
+fn move_reference(session: ref<desk.Session>, items: ref<array<library.Item>>,
+    selected: ref<string>, audio: bool, earlier: bool) -> unit effects {alloc,net,time} {
+  let index: u64 = match text.parse_u64(str.view(selected)) {
+    some(value) => value, none => { return () },
+  }
+  match library.move_item(items, index, earlier) {
+    some(target) => {
+      var key: string = string.from_int(target)
+      let _ = ref.swap(selected, key)
+      let id: str = if audio { "gen_audio_refs" } else { "gen_visual_refs" }
+      show_items(session, id, items)
+      let _ = desk.select(session, id, str.view(selected))
+      reference_actions(session, audio, str.view(selected), array.len(items))
+    },
+    none => {},
+  }
+  ()
+}
+
 fn selected_parameters(items: ref<array<library.Item>>, key: str) -> option<string> effects {alloc} {
   var i: u64 = 0
   loop {
@@ -132,6 +165,28 @@ fn apply_parameter_widgets(session: ref<desk.Session>, request: ref<h3.Request>)
   let _ = desk.set_text(session, "output_name", struct.borrow(request, field=output))
   geometry_summary(session, geometry.width, geometry.height, request.seconds)
   source_widgets(session, request.task)
+  model_widgets(session, false)
+}
+
+fn model_widgets(session: ref<desk.Session>, krea: bool) -> unit effects {alloc,net,time} {
+  let _ = desk.set_bool(session,"gen_krea_details","visible",krea)
+  let _ = desk.set_bool(session,"gen_task","sensitive",not krea)
+  let _ = desk.set_bool(session,"gen_profile","sensitive",not krea)
+  let _ = desk.set_bool(session,"gen_conditioner_projection","sensitive",not krea)
+  let _ = desk.set_bool(session,"gen_transformer_projection","sensitive",not krea)
+  let _ = desk.set_bool(session,"gen_attention","sensitive",not krea)
+  let _ = desk.set_bool(session,"gen_duration","sensitive",not krea)
+  let _ = desk.set_bool(session,"gen_duration_row","visible",not krea)
+  let _ = desk.set_bool(session,"gen_width","sensitive",not krea)
+  let _ = desk.set_bool(session,"gen_height","sensitive",not krea)
+  let _ = desk.set_bool(session,"gen_resolution","sensitive",not krea)
+  let _ = desk.set_bool(session,"gen_sources_group","sensitive",not krea)
+  let _ = desk.set_text(session,"generate_action",if krea {"Generate Krea PNG"} else {"Generate H3 MP4"})
+  let _ = desk.set_text(session,"gen_media_badge",if krea {"IMAGE"} else {"VIDEO"})
+  let _ = desk.set_text(session,"gen_stage_badge",if krea {"K2"} else {"H3"})
+  let _ = desk.set_text(session,"gen_stage_model",if krea {"Krea 2 Turbo · native AIR session"} else {"MiniMax H3 · native AIR session"})
+  let _ = desk.set_text(session,"gen_fps_badge",if krea {"PNG"} else {"24 FPS"})
+  let _ = desk.set_text(session,"gen_output_contract",if krea {"PNG target · linked AIR Krea 2 Turbo session"} else {"MP4 target · linked pure-AIR H3 session"})
 }
 
 fn source_widgets(session: ref<desk.Session>, task: u32) -> unit effects {alloc,net,time} {
@@ -175,6 +230,14 @@ fn geometry_summary(session: ref<desk.Session>, width: u64, height: u64, seconds
   let _ = desk.set_text(session, "gen_dimension_readout",
     text.concat(string.from_int(shown_width), text.concat(" × ", string.from_int(shown_height))))
 }
+fn geometry_widgets(session: ref<desk.Session>, width: u64, height: u64, seconds: f64, krea: bool)
+    -> unit effects {alloc,net,time} {
+  if krea {
+    let _ = desk.set_text(session,"gen_geometry_summary","1024×1024 · image · 8 steps")
+    let _ = desk.set_text(session,"gen_dimension_readout","1024 × 1024")
+  } else { geometry_summary(session,width,height,seconds) }
+  ()
+}
 
 fn clear_reference(session: ref<desk.Session>, last: bool) -> unit effects {alloc,net,time} {
   let _ = desk.picture(session, if last { "last_reference_preview" } else { "reference_preview" }, "")
@@ -185,15 +248,23 @@ fn clear_reference(session: ref<desk.Session>, last: bool) -> unit effects {allo
   let _ = desk.set_bool(session, if last { "clear_last_reference" } else { "clear_reference" }, "sensitive", false)
 }
 
-fn show_result(session: ref<desk.Session>, filename: str) -> unit effects {alloc,net,time} {
+fn show_result(session: ref<desk.Session>, filename: str) -> unit effects {alloc,fs.meta,net,time} {
+  let is_image: bool = match media.inspect(filename, 68719476736) {
+    ok(info) => info.kind == media.Kind.Image,
+    err(_) => false,
+  }
   let _ = desk.set_bool(session, "result_placeholder", "visible", false)
   let _ = desk.set_bool(session, "result_empty_title", "visible", false)
-  let _ = desk.set_bool(session, "result_picture", "visible", false)
-  let _ = desk.set_bool(session, "result_video", "visible", true)
-  let _ = desk.play(session, "result_video", filename)
+  let _ = desk.set_bool(session, "result_picture", "visible", is_image)
+  let _ = desk.set_bool(session, "result_video", "visible", not is_image)
+  if is_image {
+    let _ = desk.pause(session, "result_video", false)
+    let _ = desk.picture(session, "result_picture", filename)
+  } else { let _ = desk.play(session, "result_video", filename) }
   let _ = desk.set_text(session, "gen_batch_detail", filename)
   let _ = desk.set_text(session, "gen_selected_result", path.basename(filename))
   let _ = desk.set_bool(session, "gen_reuse_parameters", "sensitive", true)
+  let _ = desk.set_bool(session, "gen_use_image_reference", "sensitive", is_image)
 }
 
 fn show_source(session: ref<desk.Session>, filename: str) -> unit
@@ -211,6 +282,7 @@ fn show_source(session: ref<desk.Session>, filename: str) -> unit
         let _ = desk.set_bool(session, "result_empty_title", "visible", false)
       } else { show_result(session, filename) }
       let _ = desk.set_bool(session, "gen_reuse_parameters", "sensitive", false)
+      let _ = desk.set_bool(session, "gen_use_image_reference", "sensitive", false)
       let _ = desk.set_text(session, "gen_selected_result", path.basename(filename))
     },
   }
@@ -223,6 +295,7 @@ fn session_projection(value: u32) -> h3_session.Projection effects {} {
   if value == h3.projection_convrot_int8() {
     return h3_session.Projection.ConvRotI8
   }
+  if value == h3.projection_row_scaled_int8() { return h3_session.Projection.RowScaledI8 }
   panic "MM-Air reached an unselected H3 projection"
 }
 
@@ -231,12 +304,20 @@ fn session_attention(value: u32) -> h3_session.Attention effects {} {
   if value == h3.attention_donor_hybrid() {
     return h3_session.Attention.HybridExact3DenseInt8
   }
+  if value == h3.attention_dense_int8() { return h3_session.Attention.DenseInt8 }
   panic "MM-Air reached unselected H3 attention"
 }
 
 fn fail(message: str) -> i32 effects {alloc,io.write} {
   io.ewrite(text.concat(message, "\n"))
   1
+}
+
+fn generation_status(session:ref<desk.Session>,message:str) -> unit
+    effects {alloc,net,time,io.write} {
+  let _ = desk.set_text(session,"status",message)
+  let _ = desk.set_text(session,"gen_progress_detail",message)
+  io.write(text.concat("mm-air status: ",text.concat(message,"\n")))
 }
 
 fn absolute(value: str) -> result<string,string> effects {alloc,fs.read} {
@@ -379,6 +460,14 @@ pub fn main(args: view<str>) -> i32
   var width: u64 = 832
   var height: u64 = 480
   var seconds: f64 = cast.float(h3_media.frames()) / cast.float(h3_media.fps())
+  var saved_h3_width: u64 = width
+  var saved_h3_height: u64 = height
+  var saved_h3_seconds: f64 = seconds
+  var saved_h3_resolution: u32 = resolution_index
+  var saved_h3_output: string = string.new()
+  var saved_krea_output: string = string.new()
+  var choosing_generation_output: bool = false
+  var resume_generation: bool = false
   var visual_references: array<library.Item> = []
   var audio_references: array<library.Item> = []
   var history: array<library.Item> = match library.load_history() {
@@ -390,6 +479,7 @@ pub fn main(args: view<str>) -> i32
   var selected_visual: string = string.new()
   var selected_audio: string = string.new()
   var saved_parameters: string = string.new()
+  var selected_result: string = string.new()
   var pending_parameters: string = string.new()
   if open_parameters {
     pending_parameters = match files.read_text(view.get(args, 2)) {
@@ -435,6 +525,42 @@ pub fn main(args: view<str>) -> i32
         let _ = desk.set_bool(session, "gen_history_empty", "visible", array.len(history) == 0)
         loop {
           if pending_parameters != "" {
+            if parameters.is_krea(pending_parameters) {
+              match parameters.decode_krea(pending_parameters) {
+                ok(restored) => {
+                  var request = restored
+                  if model_index != parameters.krea_model_index() {
+                    saved_h3_width = width
+                    saved_h3_height = height
+                    saved_h3_seconds = seconds
+                    saved_h3_resolution = resolution_index
+                    saved_h3_output = string.copy(output_media)
+                  }
+                  prompt = string.copy(struct.borrow(request,field=prompt))
+                  seed = request.seed
+                  seed_valid = true
+                  width = request.width
+                  height = request.height
+                  output_media = string.copy(struct.borrow(request,field=output))
+                  saved_krea_output = string.copy(output_media)
+                  model_index = parameters.krea_model_index()
+                  resolution_index = h3.resolution_custom()
+                  let _ = desk.set_number(session,"gen_model","selected",cast.float(model_index))
+                  let _ = desk.set_number(session,"gen_resolution","selected",cast.float(resolution_index))
+                  let _ = desk.set_number(session,"gen_width","value",cast.float(width))
+                  let _ = desk.set_number(session,"gen_height","value",cast.float(height))
+                  let _ = desk.set_text(session,"gen_seed",string.from_int(seed))
+                  let _ = desk.set_text(session,"gen_prompt_buffer",prompt)
+                  let _ = desk.set_text(session,"output_name",output_media)
+                  model_widgets(session,true)
+                  geometry_widgets(session,width,height,seconds,true)
+                  let _ = desk.set_text(session,"status","Krea Generate parameters restored")
+                },
+                err(message) => { let _ = desk.set_text(session,"status",message) },
+              }
+              pending_parameters = string.new()
+              continue
+            }
             match parameters.decode(pending_parameters) {
               err(message) => { let _ = desk.set_text(session, "status", message) },
               ok(value) => {
@@ -460,6 +586,8 @@ pub fn main(args: view<str>) -> i32
                 last_reference_media = string.new()
                 visual_references = []
                 audio_references = []
+                selected_visual = string.new()
+                selected_audio = string.new()
                 clear_reference(session, false)
                 clear_reference(session, true)
                 let references = struct.borrow(restored, field=references)
@@ -499,6 +627,8 @@ pub fn main(args: view<str>) -> i32
                 }
                 show_items(session, "gen_visual_refs", visual_references)
                 show_items(session, "gen_audio_refs", audio_references)
+                reference_actions(session, false, "", array.len(visual_references))
+                reference_actions(session, true, "", array.len(audio_references))
                 apply_parameter_widgets(session, restored)
                 let _ = desk.set_text(session, "status", "Generate parameters restored")
               },
@@ -506,27 +636,33 @@ pub fn main(args: view<str>) -> i32
             pending_parameters = string.new()
           }
           if array.len(progress_receivers) != 0 {
+            var drained: u64 = 0
+            loop {
+            if drained >= 128 { break }
+            drained = drained + 1
             match channel.recv_now(array.borrow(progress_receivers, 0),
                 time.monotonic_ns()) {
               ok(value) => match value {
                 some(item) => { var update: channel.Message = item
                   match channel.text_of(update) {
                     some(message) => {
-                      let _ = desk.set_text(session, "status", str.view(message))
-                      let _ = desk.set_text(session, "gen_batch_status", str.view(message))
+                      generation_status(session,str.view(message))
                     },
                     none => {},
                   }
                 },
-                none => {},
+                none => { break },
               },
-              err(_) => {},
+              err(_) => { break },
+            }
             }
           }
           if array.len(generations) != 0 {
             let elapsed: u64 = (time.monotonic_ns() - generation_started) / 1000000000
             let _ = desk.set_text(session, "gen_run_state",
               text.concat("Generating · ", text.concat(string.from_int(elapsed), " s")))
+            let _ = desk.set_text(session,"gen_progress_elapsed",
+              text.concat("Elapsed: ",text.concat(string.from_int(elapsed)," s")))
             match task.wait_any(generations, 0) {
               some(_) => {
                 var completed: generation.Outcome = task.join(
@@ -536,8 +672,7 @@ pub fn main(args: view<str>) -> i32
                   none => {},
                 }
                 let _ = desk.set_bool(session, "generate_action", "sensitive", true)
-                let _ = desk.set_text(session, "status",
-                  str.view(struct.borrow(completed, field=message)))
+                generation_status(session,str.view(struct.borrow(completed,field=message)))
                 if completed.succeeded {
                   match library.prep_output(struct.borrow(completed, field=output), running_parameters) {
                     ok(item) => {
@@ -557,31 +692,37 @@ pub fn main(args: view<str>) -> i32
                     err(message) => { io.ewrite(text.concat(message, "\n")) },
                   }
                   saved_parameters = string.copy(running_parameters)
+                  selected_result = string.copy(struct.borrow(completed, field=output))
                   show_result(session, str.view(struct.borrow(completed, field=output)))
                   let _ = desk.set_text(session, "gen_batch_status", "Completed")
                   let _ = desk.set_text(session, "gen_run_state", "Ready")
-                  io.write(text.concat("mm-air H3 MP4 saved=",
+                  io.write(text.concat("mm-air generated media saved=",
                     text.concat(str.view(struct.borrow(completed, field=output)), "\n")))
                   io.write(text.concat("mm-air Generate-to-displayed-result ms=",
                     text.concat(string.from_int((time.monotonic_ns() - generation_started) / 1000000), "\n")))
                 } else {
                   let _ = desk.set_text(session, "gen_batch_status", "Failed")
                   let _ = desk.set_text(session, "gen_run_state", "Failed")
-                  io.ewrite(text.concat("mm-air H3 generation failed: ",
+                  io.ewrite(text.concat("mm-air generation failed: ",
                     text.concat(str.view(struct.borrow(completed, field=message)), "\n")))
                 }
               },
               none => {},
             }
           }
-          var event: json.Document = match desk.next(session, 1000) {
+          var event: json.Document = if resume_generation {
+            resume_generation = false
+            match json.parse("{\"event\":\"action\",\"id\":\"generate_action\",\"resumed\":true}") {
+              ok(value) => value,err(_) => { panic "Invalid internal Generate event" },
+            }
+          } else { match desk.next(session, 1000) {
             ok(item) => match item {
               some(value) => value,
               none => { continue },
             },
             err(problem) => { result_code = fail(problem)
               break },
-          }
+          } }
           let kind: string = desk.field(event, "event")
           let id: string = desk.field(event, "id")
           if kind == "dialog" {
@@ -625,10 +766,17 @@ pub fn main(args: view<str>) -> i32
                     } else {
                       match library.prep_reference(chosen_path, "") {
                         ok(item) => {
-                          if audio { array.push(audio_references, item) }
-                          else { array.push(visual_references, item) }
-                          show_items(session, "gen_visual_refs", visual_references)
-                          show_items(session, "gen_audio_refs", audio_references)
+                          if audio {
+                            array.push(audio_references, item)
+                            selected_audio = string.new()
+                            show_items(session, "gen_audio_refs", audio_references)
+                            reference_actions(session, true, "", array.len(audio_references))
+                          } else {
+                            array.push(visual_references, item)
+                            selected_visual = string.new()
+                            show_items(session, "gen_visual_refs", visual_references)
+                            reference_actions(session, false, "", array.len(visual_references))
+                          }
                         },
                         err(message) => { let _ = desk.set_text(session, "status", message) },
                       }
@@ -655,22 +803,25 @@ pub fn main(args: view<str>) -> i32
               if id == "choose_output" {
                 output_media = text.copy(str.view(selected))
                 if path.extension(str.view(output_media)) == "" {
-                  output_media = text.concat(str.view(output_media), ".mp4")
+                  output_media = text.concat(str.view(output_media),
+                    if model_index == parameters.krea_model_index() {".png"} else {".mp4"})
                 }
                 let _ = desk.set_text(session, "output_name", str.view(output_media))
-                let _ = desk.set_text(session, "status", text.concat("H3 output: ", str.view(output_media)))
+                let _ = desk.set_text(session, "status", text.concat("Output: ", str.view(output_media)))
                 io.write(text.concat("mm-air output selected=", text.concat(str.view(output_media), "\n")))
+                if choosing_generation_output { resume_generation = true }
               }
             }
+            if id == "choose_output" { choosing_generation_output = false }
             continue
           }
           if kind == "close" or id == "quit" { break }
           if kind == "select" or kind == "activate" {
             let key = desk.field(event, "value")
             if id == "gen_visual_refs" { selected_visual = string.copy(key)
-              let _ = desk.set_bool(session, "gen_remove_visual", "sensitive", key != "") }
+              reference_actions(session, false, key, array.len(visual_references)) }
             if id == "gen_audio_refs" { selected_audio = string.copy(key)
-              let _ = desk.set_bool(session, "gen_remove_audio", "sensitive", key != "") }
+              reference_actions(session, true, key, array.len(audio_references)) }
             if key != "" and (id == "gen_visual_refs" or id == "gen_audio_refs") {
               let filename = if id == "gen_visual_refs" { selected_path(visual_references, key) }
                              else { selected_path(audio_references, key) }
@@ -684,6 +835,7 @@ pub fn main(args: view<str>) -> i32
                   saved_parameters = value
                   let filename = if id == "gen_current" { selected_path(current, key) }
                                  else { selected_path(history, key) }
+                  selected_result = string.copy(filename)
                   show_result(session, filename)
                 },
                 none => {},
@@ -714,13 +866,49 @@ pub fn main(args: view<str>) -> i32
             if id == "gen_parameter_filter" { filter_parameters(session, desk.field(event, "value")) }
             if id == "gen_prompt" { prompt = desk.field(event, "value") }
             if id == "gen_model" {
+              let previous_model = model_index
               model_index = cast.sat(desk.number(event, "value"))
+              model_widgets(session,model_index == parameters.krea_model_index())
+              if model_index == parameters.krea_model_index() {
+                if previous_model != parameters.krea_model_index() {
+                  saved_h3_width = width
+                  saved_h3_height = height
+                  saved_h3_seconds = seconds
+                  saved_h3_resolution = resolution_index
+                  saved_h3_output = string.copy(output_media)
+                  output_media = string.copy(saved_krea_output)
+                  let _ = desk.set_text(session,"output_name",output_media)
+                }
+                width = 1024
+                height = 1024
+                resolution_index = h3.resolution_custom()
+                let _ = desk.set_number(session,"gen_width","value",1024.0)
+                let _ = desk.set_number(session,"gen_height","value",1024.0)
+                let _ = desk.set_number(session,"gen_resolution","selected",cast.float(resolution_index))
+                geometry_widgets(session,width,height,seconds,true)
+                continue
+              }
+              if previous_model == parameters.krea_model_index() {
+                saved_krea_output = string.copy(output_media)
+                width = saved_h3_width
+                height = saved_h3_height
+                seconds = saved_h3_seconds
+                resolution_index = saved_h3_resolution
+                output_media = string.copy(saved_h3_output)
+                let _ = desk.set_number(session,"gen_width","value",cast.float(width))
+                let _ = desk.set_number(session,"gen_height","value",cast.float(height))
+                let _ = desk.set_number(session,"gen_duration","value",seconds)
+                let _ = desk.set_number(session,"gen_resolution","selected",cast.float(resolution_index))
+                let _ = desk.set_text(session,"output_name",output_media)
+                geometry_summary(session,width,height,seconds)
+              }
               if model_index == h3.model_reference() { task_index = h3.task_ref2va() }
               else if task_index == h3.task_ref2va() { task_index = h3.task_fl2va() }
               let _ = desk.set_number(session, "gen_task", "selected", cast.float(task_index))
               source_widgets(session, task_index)
             }
             if id == "gen_task" {
+              if model_index == parameters.krea_model_index() { continue }
               task_index = cast.sat(desk.number(event, "value"))
               model_index = if task_index == h3.task_ref2va() { h3.model_reference() } else { h3.model_base() }
               let _ = desk.set_number(session, "gen_model", "selected", cast.float(model_index))
@@ -745,18 +933,18 @@ pub fn main(args: view<str>) -> i32
                 let _ = desk.set_number(session, "gen_width", "value", cast.float(width))
                 let _ = desk.set_number(session, "gen_height", "value", cast.float(height))
               }
-              geometry_summary(session, width, height, seconds)
+              geometry_widgets(session, width, height, seconds, model_index == parameters.krea_model_index())
             }
             if id == "gen_width" { width = cast.sat(desk.number(event, "value"))
               resolution_index = geometry_preset(resolution_index, width, height)
               let _ = desk.set_number(session, "gen_resolution", "selected", cast.float(resolution_index))
-              geometry_summary(session, width, height, seconds) }
+              geometry_widgets(session, width, height, seconds, model_index == parameters.krea_model_index()) }
             if id == "gen_height" { height = cast.sat(desk.number(event, "value"))
               resolution_index = geometry_preset(resolution_index, width, height)
               let _ = desk.set_number(session, "gen_resolution", "selected", cast.float(resolution_index))
-              geometry_summary(session, width, height, seconds) }
+              geometry_widgets(session, width, height, seconds, model_index == parameters.krea_model_index()) }
             if id == "gen_duration" { seconds = desk.number(event, "value")
-              geometry_summary(session, width, height, seconds) }
+              geometry_widgets(session, width, height, seconds, model_index == parameters.krea_model_index()) }
             if id == "gen_seed" {
               match text.parse_i64(desk.field(event, "value")) {
                 some(value) => { seed = value
@@ -788,18 +976,74 @@ pub fn main(args: view<str>) -> i32
               pending_parameters = string.copy(saved_parameters)
               continue
             }
+            if id == "gen_use_image_reference" {
+              if array.len(visual_references) >= 9 {
+                let _ = desk.set_text(session, "status", "Remove a visual reference before adding another (maximum 9)")
+                continue
+              }
+              let is_image: bool = match media.inspect(selected_result, 68719476736) {
+                ok(info) => info.kind == media.Kind.Image,
+                err(_) => false,
+              }
+              if not is_image {
+                let _ = desk.set_text(session, "status", "Select a generated image first")
+                continue
+              }
+              match library.prep_reference(selected_result, saved_parameters) {
+                ok(item) => {
+                  array.push(visual_references, item)
+                  selected_visual = string.from_int(array.len(visual_references) - 1)
+                  if model_index == parameters.krea_model_index() {
+                    saved_krea_output = string.copy(output_media)
+                    width = saved_h3_width
+                    height = saved_h3_height
+                    seconds = saved_h3_seconds
+                    resolution_index = saved_h3_resolution
+                    output_media = string.copy(saved_h3_output)
+                    let _ = desk.set_number(session,"gen_width","value",cast.float(width))
+                    let _ = desk.set_number(session,"gen_height","value",cast.float(height))
+                    let _ = desk.set_number(session,"gen_duration","value",seconds)
+                    let _ = desk.set_number(session,"gen_resolution","selected",cast.float(resolution_index))
+                    let _ = desk.set_text(session,"output_name",output_media)
+                    geometry_summary(session,width,height,seconds)
+                  }
+                  model_index = h3.model_reference()
+                  task_index = h3.task_ref2va()
+                  model_widgets(session,false)
+                  let _ = desk.set_number(session, "gen_model", "selected", cast.float(model_index))
+                  let _ = desk.set_number(session, "gen_task", "selected", cast.float(task_index))
+                  source_widgets(session, task_index)
+                  show_items(session, "gen_visual_refs", visual_references)
+                  let _ = desk.select(session, "gen_visual_refs", selected_visual)
+                  reference_actions(session, false, selected_visual, array.len(visual_references))
+                  let _ = desk.set_text(session, "status", "Selected image added to H3 references; prompt and execution settings were kept")
+                },
+                err(message) => { let _ = desk.set_text(session, "status", message) },
+              }
+              continue
+            }
+            if id == "gen_visual_earlier" or id == "gen_visual_later" {
+              move_reference(session, visual_references, selected_visual,
+                false, id == "gen_visual_earlier")
+              continue
+            }
+            if id == "gen_audio_earlier" or id == "gen_audio_later" {
+              move_reference(session, audio_references, selected_audio,
+                true, id == "gen_audio_earlier")
+              continue
+            }
             if id == "gen_remove_visual" or id == "gen_remove_audio" {
               if id == "gen_remove_visual" {
                 remove_item(visual_references, selected_visual)
                 selected_visual = string.new()
-                let _ = desk.set_bool(session, "gen_remove_visual", "sensitive", false)
+                show_items(session, "gen_visual_refs", visual_references)
+                reference_actions(session, false, "", array.len(visual_references))
               } else {
                 remove_item(audio_references, selected_audio)
                 selected_audio = string.new()
-                let _ = desk.set_bool(session, "gen_remove_audio", "sensitive", false)
+                show_items(session, "gen_audio_refs", audio_references)
+                reference_actions(session, true, "", array.len(audio_references))
               }
-              show_items(session, "gen_visual_refs", visual_references)
-              show_items(session, "gen_audio_refs", audio_references)
               continue
             }
             if id == "clear_history" {
@@ -855,20 +1099,72 @@ pub fn main(args: view<str>) -> i32
               // Leave the chooser's suggested name extension-free. Some GTK
               // backends otherwise append the suggested .mp4 to a location
               // that the user already typed with .mp4.
-              let _ = desk.dialog(session, id, "save", "Save H3 video", "mm-air-h3", str.view(folder))
+              let krea: bool = model_index == parameters.krea_model_index()
+              let _ = desk.dialog(session, id, "save",
+                if krea {"Save Krea image"} else {"Save H3 video"},
+                if krea {"mm-air-krea"} else {"mm-air-h3"},str.view(folder))
               continue
             }
             if id == "generate_action" or id == "gen_save_parameters" {
               if not seed_valid {
-                let _ = desk.set_text(session, "status", "Seed must be an integer (-1 for random)")
+                generation_status(session,"Seed must be an integer (-1 for random)")
                 continue
               }
               if array.len(generations) != 0 and id == "generate_action" {
-                let _ = desk.set_text(session, "status",
-                  "MiniMax-H3 generation is already running")
+                generation_status(session,"Generation is already running")
                 continue
               }
-              if id == "generate_action" { generation_started = time.monotonic_ns() }
+              if id == "generate_action" and not desk.boolean(event,"resumed") {
+                generation_started = time.monotonic_ns()
+              }
+              if id == "generate_action" and output_media == "" {
+                choosing_generation_output = true
+                let krea = model_index == parameters.krea_model_index()
+                generation_status(session,"Choose an output file to continue generation")
+                let _ = desk.dialog(session,"choose_output","save",
+                  if krea {"Save Krea image"} else {"Save H3 video"},
+                  if krea {"mm-air-krea"} else {"mm-air-h3"},"")
+                continue
+              }
+              if model_index == parameters.krea_model_index() {
+                var request = parameters.KreaRequest {prompt:string.copy(prompt),seed:seed,
+                  width:width,height:height,output:string.copy(output_media)}
+                if id == "gen_save_parameters" {
+                  match parameters.encode_krea(request) {
+                    ok(value) => { saving_parameters = value
+                      let _ = desk.dialog(session,id,"save","Save Krea parameters","mm-air-krea-parameters","") },
+                    err(message) => { let _ = desk.set_text(session,"status",message) },
+                  }
+                  continue
+                }
+                match parameters.validate_krea(request) {
+                  err(message) => { generation_status(session,message)
+                    continue },ok(_) => {},
+                }
+                var sources = match generation.krea_sources() {
+                  ok(value) => value,err(message) => { generation_status(session,message)
+                    continue },
+                }
+                if request.seed < 0 { struct.set(request,cast.sat(time.monotonic_ns()),field=seed) }
+                running_parameters = match parameters.encode_krea(request) {
+                  ok(value) => value,err(message) => { let _ = desk.set_text(session,"status",message)
+                    continue },
+                }
+                var receiver = match channel.open(128,1024) {
+                  ok(value) => value,err(problem) => { var held = problem
+                    generation_status(session,channel.message(held))
+                    continue },
+                }
+                var work = generation.KreaJob {sources:sources,request:request,progress:channel.ticket(receiver)}
+                array.push(progress_receivers,receiver)
+                array.push(generations,task.spawn(work,fn=generation.run_krea))
+                let _ = desk.set_bool(session,"generate_action","sensitive",false)
+                let _ = desk.set_text(session,"gen_run_state","Generating")
+                let _ = desk.set_text(session,"gen_batch_status","Running")
+                generation_status(session,"Starting linked AIR Krea 2 Turbo generation")
+                io.write("mm-air started linked AIR Krea 2 Turbo generation\n")
+                continue
+              }
               var request_references: array<string> = selected_references(
                 str.view(reference_media), str.view(last_reference_media))
               if task_index == h3.task_t2va() { request_references = [] }
@@ -886,7 +1182,7 @@ pub fn main(args: view<str>) -> i32
               match h3.set_geometry(request, width, height, seconds) {
                 ok(_) => {},
                 err(error) => { var held: h3.Problem = error
-                  let _ = desk.set_text(session, "status", h3.describe(held))
+                  generation_status(session,h3.describe(held))
                   continue },
               }
               if id == "gen_save_parameters" {
@@ -902,7 +1198,7 @@ pub fn main(args: view<str>) -> i32
               match h3.validate(request) {
                 err(found) => {
                   var problem: h3.Problem = found
-                  let _ = desk.set_text(session, "status", h3.describe(problem))
+                  generation_status(session,h3.describe(problem))
                 },
                 ok(_) => {
                   let task = if request.task == h3.task_t2va() { h3_session.Task.T2VA }
@@ -917,11 +1213,11 @@ pub fn main(args: view<str>) -> i32
                   var configuration: generation.Configuration = match generation.configuration() {
                     ok(value) => value,
                     err(problem) => {
-                      let _ = desk.set_text(session, "status", str.view(problem))
+                      generation_status(session,str.view(problem))
                       continue
                     },
                   }
-                  var receiver: channel.Receiver = match channel.open(16, 1024) {
+                  var receiver: channel.Receiver = match channel.open(128, 1024) {
                     ok(value) => value,
                     err(problem) => {
                       var owned_problem: channel.Error = problem
@@ -947,13 +1243,13 @@ pub fn main(args: view<str>) -> i32
                     job_references, job_audio,
                     str.view(struct.borrow(request, field=output)), actual_seed,
                     h3.evaluations(request.profile), conditioner_projection,
-                    transformer_projection, attention, channel.ticket(receiver))
+                    transformer_projection, attention, channel.ticket(receiver),
+                    if request.profile == h3.profile_dc_euler_19() {h3_session.Schedule.Exponential} else {h3_session.Schedule.Simple})
                   array.push(progress_receivers, receiver)
                   array.push(generations, task.spawn(job, fn=generation.run))
                   let _ = desk.set_bool(session, "generate_action", "sensitive", false)
                   let _ = desk.set_text(session, "gen_run_state", "Generating")
-                  let _ = desk.set_text(session, "status",
-                    "Starting linked AIR MiniMax-H3 generation")
+                  generation_status(session,"Starting linked AIR MiniMax-H3 generation")
                   let _ = desk.set_text(session, "gen_batch_status", "Running")
                   io.write("mm-air started linked AIR H3 generation\n")
                 },

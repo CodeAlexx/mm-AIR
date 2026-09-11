@@ -8,7 +8,49 @@ fn expect_error(source: str) -> bool effects {alloc} {
   match parameters.decode(source) { ok(_) => false, err(_) => true }
 }
 
+fn geometry_round_trip(width: u64, height: u64, seconds: f64,
+                       frames: u64) -> bool effects {alloc} {
+  var refs: array<string> = []
+  var request = h3.request("fractional duration", 0, 0, 2, 2, 2, 2,
+    42, 6, refs, "/tmp/mm-air-fractional-parameters.mp4")
+  match h3.set_geometry(request, width, height, seconds) {
+    ok(_) => {}, err(_) => { return false },
+  }
+  let encoded = match parameters.encode(request) {
+    ok(value) => value, err(_) => { return false },
+  }
+  var decoded: h3.Request = match parameters.decode(encoded) {
+    ok(value) => value, err(_) => { return false },
+  }
+  decoded.geometry.width == width and decoded.geometry.height == height and
+    decoded.geometry.frames == frames and decoded.seconds == seconds
+}
+
 pub fn main(args: view<str>) -> i32 effects {alloc} {
+  var krea = parameters.KreaRequest {prompt:"mechanical robot reference",seed:9007199254740993,
+    width:1024,height:1024,output:"/tmp/mm-air-krea.png"}
+  let krea_json = match parameters.encode_krea(krea) { ok(value) => value,err(_) => { return 1 }, }
+  if not parameters.is_krea(krea_json) or parameters.is_krea("{}") { return 1 }
+  var krea_restored = match parameters.decode_krea(krea_json) { ok(value) => value,err(_) => { return 1 }, }
+  if krea_restored.seed != 9007199254740993 or krea_restored.width != 1024 or
+     krea_restored.height != 1024 or krea_restored.prompt != "mechanical robot reference" or
+     krea_restored.output != "/tmp/mm-air-krea.png" { return 1 }
+  match parameters.validate_krea(krea_restored) { ok(_) => {},err(_) => { return 1 }, }
+  struct.set(krea_restored,832,field=width)
+  match parameters.validate_krea(krea_restored) { ok(_) => { return 1 },err(_) => {}, }
+  let unsupported = match parameters.encode_krea(krea_restored) { ok(value) => value,err(_) => { return 1 }, }
+  match parameters.decode_krea(unsupported) { ok(_) => { return 1 },err(_) => {}, }
+  if not expect_error(krea_json) { return 1 }
+  var dc_request = h3.request("explicit DC recipe", 1, 3,
+    h3.profile_dc_euler_19(), h3.projection_exact_bf16(),
+    h3.projection_row_scaled_int8(), h3.attention_dense_int8(),
+    7311, 3, ["robot.png"], "/tmp/mm-air-dc.mp4")
+  let dc_json = match parameters.encode(dc_request) { ok(value) => value,err(_) => { return 1 }, }
+  var dc_restored = match parameters.decode(dc_json) { ok(value) => value,err(_) => { return 1 }, }
+  if dc_restored.profile != 3 or dc_restored.conditioner_projection != 1 or
+     dc_restored.transformer_projection != 3 or dc_restored.attention != 3 or
+     h3.evaluations(dc_restored.profile) != 19 { return 1 }
+  match h3.validate(dc_restored) { ok(_) => {},err(_) => { return 1 }, }
   var refs: array<string> = []
   var i: u64 = 0
   loop {
@@ -53,5 +95,14 @@ pub fn main(args: view<str>) -> i32 effects {alloc} {
   if not expect_error(excessive_visual) { return 1 }
   if not expect_error("{}") { return 1 }
   if not expect_error("{\"schema\":\"mm-air.generate.parameters\",\"version\":99}") { return 1 }
+  // Persist the requested fractional seconds, recomputing delivery frames on
+  // the native 24 FPS clock when parameters are loaded or reused.
+  if not geometry_round_trip(832, 480, 10.25, 246) or
+     not geometry_round_trip(960, 544, 7.5, 180) or
+     not geometry_round_trip(1344, 768, 5.125, 123) or
+     not geometry_round_trip(512, 896, 12.75, 306) or
+     not geometry_round_trip(832, 480, 2.3125, 56) {
+    return 1
+  }
   0
 }

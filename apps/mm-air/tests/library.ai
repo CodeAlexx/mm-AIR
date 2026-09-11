@@ -48,6 +48,37 @@ fn fixture_png(filename: str) -> unit effects {alloc,fs.write} {
   }
 }
 
+fn reorder() -> unit effects {alloc,io.write} {
+  var items: array<library.Item> = [library.item("same.png", "a.png", "first"),
+    library.item("same.png", "b.png", "second"), library.item("clip.mp4", "c.png", "third")]
+  require(option.unwrap(library.move_item(items, 1, true)) == 0,
+    "earlier returns the moved item's index")
+  require(array.borrow(items, 0).thumbnail == "b.png" and
+    array.borrow(items, 0).parameters == "second" and
+    array.borrow(items, 1).thumbnail == "a.png",
+    "duplicate media paths move as whole distinct records")
+  require(option.unwrap(library.move_item(items, 0, false)) == 1,
+    "later preserves the selected record")
+  require(array.borrow(items, 0).parameters == "first" and
+    array.borrow(items, 1).parameters == "second" and
+    array.borrow(items, 2).parameters == "third", "round-trip order")
+  match library.move_item(items, 0, true) {
+    some(_) => { require(false, "cannot move before first") }, none => {},
+  }
+  match library.move_item(items, 2, false) {
+    some(_) => { require(false, "cannot move past last") }, none => {},
+  }
+  match library.move_item(items, 18446744073709551615, false) {
+    some(_) => { require(false, "stale selection must be ignored") }, none => {},
+  }
+  var empty: array<library.Item> = []
+  match library.move_item(empty, 0, false) {
+    some(_) => { require(false, "empty list must remain empty") }, none => {},
+  }
+  require(array.len(items) == 3 and array.borrow(items, 0).parameters == "first" and
+    array.borrow(items, 2).parameters == "third", "invalid moves preserve records")
+}
+
 pub fn main(args: view<str>) -> i32
     effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process} {
   if view.len(args) < 2 or view.len(args) > 4 {
@@ -55,6 +86,7 @@ pub fn main(args: view<str>) -> i32
     return 2
   }
   let root: str = view.get(args, 1)
+  reorder()
   match files.mkdirs(root) { ok(_) => {}, err(_) => { return 2 }, }
   let image_path: string = path.join(root, "reference.png")
   fixture_png(str.view(image_path))
@@ -70,6 +102,16 @@ pub fn main(args: view<str>) -> i32
     "image reference must use its original path as thumbnail")
   require(prepared.parameters == "{\"prompt\":\"reference\"}",
     "reference parameters must remain byte-for-byte reusable")
+  var generated_image: library.Item = match library.prep_output(image_path,
+      "{\"model\":\"krea2-turbo\",\"seed\":7311}") {
+    ok(value) => value,
+    err(problem) => { io.ewrite(problem)
+      return 1 },
+  }
+  require(generated_image.path == image_path and generated_image.thumbnail == image_path,
+    "generated image uses its original pixels in history")
+  require(generated_image.parameters == "{\"model\":\"krea2-turbo\",\"seed\":7311}",
+    "generated image parameters remain reusable")
 
   let keep_path: string = path.join(root, "keep-user-output.mp4")
   match files.write_bytes(str.view(keep_path), b"user-owned") {

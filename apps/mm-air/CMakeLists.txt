@@ -83,6 +83,7 @@ set(MM_AIR_H3_MANIFEST_NAMES
   h3-transformer-denoiser-static.json
   h3-blocks-bf16.json
   h3-blocks-convrot.json
+  h3-blocks-row-scaled-i8.json
   h3-modulation-cache.json
   h3-video-vae-encoder.json
   h3-video-vae-decoder-aux.json

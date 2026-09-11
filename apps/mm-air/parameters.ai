@@ -5,6 +5,64 @@ import std.json as json
 import std.text as text
 import "./.air/deps/h3/request.ai" as h3
 
+pub fn krea_model_index() -> u32 effects {} { 2 }
+pub type KreaRequest = struct {prompt:string,seed:i64,width:u64,height:u64,output:string}
+pub fn is_krea(source: str) -> bool effects {alloc} {
+  var document = match json.parse(source) { ok(value) => value,err(_) => { return false }, }
+  match string_field(document,"schema") {
+    ok(value) => value == "mm-air.krea2.parameters",err(_) => false,
+  }
+}
+pub fn validate_krea(request: ref<KreaRequest>) -> result<unit,string> effects {alloc} {
+  if request.prompt == "" { return result.err("Krea prompt must not be empty") }
+  if request.width != 1024 or request.height != 1024 {
+    return result.err("The native Krea 2 Turbo decoder currently supports 1024x1024")
+  }
+  if request.seed < -1 { return result.err("Seed must be nonnegative or -1 for random") }
+  if not text.ends_with(text.lower_ascii(struct.borrow(request,field=output)),".png") {
+    return result.err("Choose a .png output for Krea 2 Turbo")
+  }
+  result.ok(())
+}
+pub fn encode_krea(request: ref<KreaRequest>) -> result<string,string> effects {alloc} {
+  var out = codec.writer()
+  codec.begin_object(out)
+  codec.field_text(out,"schema","mm-air.krea2.parameters")
+  codec.field_u64(out,"version",1)
+  codec.field_text(out,"model","krea2-turbo")
+  codec.field_text(out,"prompt",struct.borrow(request,field=prompt))
+  codec.field_i64(out,"seed",request.seed)
+  codec.field_u64(out,"width",request.width)
+  codec.field_u64(out,"height",request.height)
+  codec.field_u64(out,"steps",8)
+  codec.field_text(out,"precision","bf16")
+  codec.field_text(out,"output",struct.borrow(request,field=output))
+  codec.end_object(out)
+  match codec.finish(out) { ok(value) => result.ok(value),err(error) => result.err(codec.describe(error)), }
+}
+pub fn decode_krea(source: str) -> result<KreaRequest,string> effects {alloc} {
+  var document = match json.parse(source) {
+    ok(value) => value,err(error) => { return result.err(json.error_message(error)) },
+  }
+  let schema = try string_field(document,"schema")
+  let version = try count(document,"version")
+  let model = try string_field(document,"model")
+  let steps = try count(document,"steps")
+  let precision = try string_field(document,"precision")
+  if schema != "mm-air.krea2.parameters" or version != 1 or
+     model != "krea2-turbo" or steps != 8 or precision != "bf16" {
+    return result.err("Unsupported Krea parameter model, steps, precision, or version")
+  }
+  let seed = match json.as_i64(document,try field(document,"seed")) {
+    some(value) => value,none => { return result.err("Expected signed integer seed") },
+  }
+  var request = KreaRequest {prompt:try string_field(document,"prompt"),seed:seed,
+    width:try count(document,"width"),height:try count(document,"height"),
+    output:try string_field(document,"output")}
+  try validate_krea(request)
+  result.ok(request)
+}
+
 pub fn encode(request: ref<h3.Request>) -> result<string,string> effects {alloc} {
   var out: codec.Writer = codec.writer()
   codec.begin_object(out)

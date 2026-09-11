@@ -55,6 +55,9 @@ pub fn main(args: view<str>) -> i32
         let _ = desk.set_number(s, "gen_height", "value", 544.0)
         let _ = desk.set_number(s, "gen_duration", "value", 10.0)
         let _ = desk.set_number(s, "gen_task", "selected", 3.0)
+        let _ = desk.set_number(s, "gen_profile", "selected", 3.0)
+        let _ = desk.set_number(s, "gen_transformer_projection", "selected", 3.0)
+        let _ = desk.set_number(s, "gen_attention", "selected", 3.0)
         let _ = desk.set_text(s, "gen_seed", "9007199254740993")
         let _ = desk.set_text(s, "gen_prompt_buffer", "Native Generate widget regression")
         let thumbnail: string = if view.len(args) > 5 { string.copy(view.get(args, 5)) } else { "" }
@@ -71,6 +74,9 @@ pub fn main(args: view<str>) -> i32
         var height_seen: bool = false
         var duration_seen: bool = false
         var task_seen: bool = false
+        var dc_profile_seen: bool = false
+        var w8a8_seen: bool = false
+        var dense_int8_seen: bool = false
         var prompt_seen: bool = false
         var seed_seen: bool = false
         var video_seen: bool = view.len(args) <= 4
@@ -107,6 +113,9 @@ pub fn main(args: view<str>) -> i32
                 if id == "gen_height" and desk.number(event, "value") == 544.0 { height_seen = true }
                 if id == "gen_duration" and desk.number(event, "value") == 10.0 { duration_seen = true }
                 if id == "gen_task" and desk.number(event, "value") == 3.0 { task_seen = true }
+                if id == "gen_profile" and desk.number(event, "value") == 3.0 { dc_profile_seen = true }
+                if id == "gen_transformer_projection" and desk.number(event, "value") == 3.0 { w8a8_seen = true }
+                if id == "gen_attention" and desk.number(event, "value") == 3.0 { dense_int8_seen = true }
                 if id == "gen_prompt" and desk.field(event, "value") == "Native Generate widget regression" { prompt_seen = true }
                 if id == "gen_seed" and desk.field(event, "value") == "9007199254740993" { seed_seen = true }
                 if kind == "video" and id == "result_video" and
@@ -125,9 +134,9 @@ pub fn main(args: view<str>) -> i32
               code = 1
               break },
           }
-          if width_seen and height_seen and duration_seen and task_seen and prompt_seen and seed_seen and video_seen and playback_audio_seen and visual_seen and audio_seen and history_seen and current_seen { break }
+          if width_seen and height_seen and duration_seen and task_seen and dc_profile_seen and w8a8_seen and dense_int8_seen and prompt_seen and seed_seen and video_seen and playback_audio_seen and visual_seen and audio_seen and history_seen and current_seen { break }
         }
-        if not width_seen or not height_seen or not duration_seen or not task_seen or not prompt_seen or not seed_seen or not video_seen or not playback_audio_seen or not visual_seen or not audio_seen or not history_seen or not current_seen { code = 1 }
+        if not width_seen or not height_seen or not duration_seen or not task_seen or not dc_profile_seen or not w8a8_seen or not dense_int8_seen or not prompt_seen or not seed_seen or not video_seen or not playback_audio_seen or not visual_seen or not audio_seen or not history_seen or not current_seen { code = 1 }
         let _ = desk.send(s, "{\"op\":\"quit\"}")
       },
     }

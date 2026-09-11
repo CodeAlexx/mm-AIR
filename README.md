@@ -1,8 +1,9 @@
 # MM-Air
 
 MM-Air is a native desktop application for AI media generation, written in AIR.
-Its current focus is MiniMax H3 video generation with audio: a Generate workspace
-for prompts, reference media, generation settings, saved results, and playback.
+Its Generate workspace supports MiniMax H3 video generation with audio and
+Krea 2 Turbo image generation, with prompts, reference media, generation
+settings, saved results, and playback.
 
 This repository publishes the **MM-Air application source only**. **AIR itself
 is private, under development, and not ready for public release.** This is an
@@ -10,7 +11,8 @@ early development snapshot, not a standalone, publicly buildable release.
 
 ## What MM-Air does
 
-- Runs the AIR-native H3 session directly inside the application process.
+- Runs the AIR-native H3 and Krea 2 Turbo sessions directly inside the
+  application process.
 - Provides text-to-video/audio, first-image and first/last-image conditioning,
   and reference-conditioned generation.
 - Exposes editable resolution and duration in seconds, with duration mapped to
@@ -21,6 +23,11 @@ early development snapshot, not a standalone, publicly buildable release.
   generations below the preview, with embedded video playback.
 - Saves, loads, and reuses generation parameters, including the prompt, seed,
   resolution, duration, references, and explicitly selected execution settings.
+- Generates Krea 2 Turbo PNGs with its current 1024×1024, eight-step BF16 recipe;
+  an explicit action can reuse an image result as an H3 reference.
+- Shows actual loading, conditioning, sampling step/count, decoding and saving
+  stages, elapsed time, and prominent validation errors. Generate opens a Save
+  dialog when no output path is selected; cancelling submits no worker.
 
 The interface uses native GTK controls. AIR owns application state and generation;
 there is no browser-based generation server, Python model runtime, or separate
@@ -51,18 +58,30 @@ source. These are separate projects and separate publication boundaries.
 
 ## Availability and current status
 
-Native development builds have produced H3 MP4s, including an 832×480,
-241-frame result. That does **not** establish complete model parity or production
-readiness. Generated audio quality and peak GPU-memory behavior are still being
-investigated, and UI interaction fixes remain in progress.
+On 2026-09-10, actual native Generate-button tests completed both paths:
+
+- **Krea 2 Turbo:** a 1024×1024 PNG with eight steps, in about 148 seconds.
+  The resulting image was opened and visually inspected.
+- **H3:** a five-second 768×768 H.264 MP4 with AAC stereo audio at 32 kHz,
+  in about 531 seconds. Full video/audio decoding passed.
+
+These tests observed real stage updates and advancing elapsed time, and
+required a newly saved output plus a persisted history entry. Isolated 4K/2×
+UI tests also passed for click-only gallery selection, playback, output-chooser
+cancellation without generation, and visible missing-model validation errors.
+
+These are development-run results, not promised performance on other hardware.
+They do **not** establish full numerical model parity, speech intelligibility,
+audio quality, or production readiness. Other settings and larger workloads
+require their own validation; editable geometry is not a memory-capacity claim.
 
 Building this snapshot requires access to the private AIR toolchain, its desktop
-SDK, and the AIR-native H3 package, plus separately obtained model assets and
+SDK, and the AIR-native H3/Krea packages, plus separately obtained model assets and
 compatible native dependencies. The application manifest and integration CMake
 file retain those external dependency references. This repository does not
 currently supply a standalone public build or downloadable application release.
 
-No AIR compiler implementation, standard library, GPU provider, H3 model
+No AIR compiler implementation, standard library, GPU provider, H3/Krea model
 implementation, private Git history, binaries, model weights, or generated
 caches are included here. Publishing MM-Air does not release AIR.
 
