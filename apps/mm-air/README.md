@@ -29,8 +29,10 @@ See the [repository README](../../README.md) for the publication boundary.
   messages appear next to Generate, with elapsed time and application logs.
   The UI does not invent progress percentages. Validation errors use the same
   prominent status area.
-- Generate with no destination opens the native Save dialog. Selecting a path
-  continues the request; Cancel starts no worker.
+- Krea Generate automatically saves a fresh PNG under `output/krea` at the
+  application root, including when reusing saved parameters. It opens no Save
+  dialog and does not choose existing results for overwrite. H3's blank output
+  still opens the Save dialog; Cancel starts no worker.
 - History is on the right; current generations are below the preview. Hover
   does not change the selected result. Explicit selection updates the preview;
   videos use embedded playback controls.

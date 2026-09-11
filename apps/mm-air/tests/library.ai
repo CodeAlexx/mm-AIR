@@ -88,6 +88,17 @@ pub fn main(args: view<str>) -> i32
   let root: str = view.get(args, 1)
   reorder()
   match files.mkdirs(root) { ok(_) => {}, err(_) => { return 2 }, }
+  let output_dir: string = path.join(root,"output/krea")
+  let first_output: string = match library.unused_output(output_dir,"krea-test",".png") {
+    ok(value) => value,err(_) => { return 1 },
+  }
+  require(first_output == path.join(output_dir,"krea-test.png"),"automatic Krea directory and filename")
+  fixture_png(first_output)
+  let second_output: string = match library.unused_output(output_dir,"krea-test",".png") {
+    ok(value) => value,err(_) => { return 1 },
+  }
+  require(second_output == path.join(output_dir,"krea-test-1.png"),"existing output gets a new name")
+  require(valid_png(first_output),"existing generated output is preserved")
   let image_path: string = path.join(root, "reference.png")
   fixture_png(str.view(image_path))
 

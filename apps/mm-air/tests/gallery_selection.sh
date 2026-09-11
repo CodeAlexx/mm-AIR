@@ -177,8 +177,11 @@ fi
 run_generation() {
   local fixture=$1 model=$2 action_name=$3 output action last_labels= elapsed_first=
   local elapsed_advanced=false sampled=false decoded=false saved=false labels elapsed stage
-  output=$(jq -er '.output | select(type == "string" and startswith("/") and length > 1)' "$fixture")
-  [[ ! -e $output ]] || { echo "Refusing existing generation output: $output" >&2; return 1; }
+  output=
+  if [[ $model != Krea ]]; then
+    output=$(jq -er '.output | select(type == "string" and startswith("/") and length > 1)' "$fixture")
+    [[ ! -e $output ]] || { echo "Refusing existing generation output: $output" >&2; return 1; }
+  fi
   action=$(jq -r --arg name "$action_name" '.data[0][] |
     select(.[6] == $name and .[7] == 43) | .[0][1]' <<< "$cache")
   [[ -n $action ]] || { echo "Missing real Generate action: $action_name" >&2; return 1; }
@@ -194,6 +197,12 @@ run_generation() {
   local started=$SECONDS
   call "$action" org.a11y.atspi.Action DoAction i 0 >/dev/null
   while ((SECONDS - started < 720)); do
+    if [[ $model == Krea && -z $output ]]; then
+      output=$(sed -n 's/^mm-air automatic Krea output=//p' "$scratch/app.out" | tail -1)
+      if [[ -n $output ]]; then
+        [[ $output == "$(dirname "$(dirname "$(dirname "$app")")")/output/krea/"*.png ]]
+      fi
+    fi
     kill -0 "$app_pid" 2>/dev/null || { echo "Native app exited during generation" >&2; return 1; }
     cache=$(timeout 5s busctl --address="$a11y" --json=short call "$peer" \
       /org/a11y/atspi/cache org.a11y.atspi.Cache GetItems)
@@ -270,7 +279,20 @@ if [[ -n ${MM_AIR_TEST_KREA_PARAMETERS:-} ]]; then
     sleep 0.1
   done
   jq -e '[.data[0][] | select(.[6] == "Set MM_AIR_KREA_MODEL")] | length >= 2' <<< "$cache" >/dev/null
-  echo "PASS: native Krea parameters restored and Generate dispatch reaches asset validation; no GPU submitted"
+  automatic_output=$(sed -n 's/^mm-air automatic Krea output=//p' "$scratch/app.out" | tail -1)
+  [[ $automatic_output == "$(dirname "$(dirname "$(dirname "$app")")")/output/krea/"*.png ]]
+  [[ -d $(dirname "$automatic_output") && ! -e $automatic_output ]]
+  ! rg -q '^mm-air status: Choose an output file' "$scratch/app.out"
+  roots=$(call /org/a11y/atspi/accessible/root org.a11y.atspi.Accessible GetChildren)
+  [[ $(jq '.data[0] | length' <<< "$roots") == 1 ]]
+  call "$generate" org.a11y.atspi.Action DoAction i 0 >/dev/null
+  for ((attempt=0;attempt<30;attempt++)); do
+    [[ $(rg -c '^mm-air automatic Krea output=' "$scratch/app.out") -ge 2 ]] && break
+    sleep 0.1
+  done
+  next_output=$(sed -n 's/^mm-air automatic Krea output=//p' "$scratch/app.out" | tail -1)
+  [[ $next_output != "$automatic_output" ]]
+  echo "PASS: Krea Generate chooses fresh output/krea PNG paths without a dialog, reaches asset validation, and starts no GPU"
   exit 0
 fi
 if [[ -n ${MM_AIR_TEST_PARAMETERS:-} ]]; then

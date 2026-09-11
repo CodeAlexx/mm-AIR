@@ -18,7 +18,8 @@ layout.
 | H3 native generation | `generate.ai` media intake and direct shared H3 session call |
 | Krea native generation | `generate.run_krea` and direct shared Krea session call |
 | Loading, step/count, decode and save status | Existing worker channel; `main.ai` central status, elapsed display and logs |
-| Blank output on Generate | Native Save chooser; selection resumes the request, cancellation submits no worker |
+| Krea output on Generate | Fresh automatic PNG path in application-root `output/krea`, including reused requests; no Save chooser |
+| H3 blank output on Generate | Native Save chooser; selection resumes the request, cancellation submits no worker |
 
 The implementation retains explicit H3 execution-policy selection rather than
 importing another application's defaults. The private model packages own model

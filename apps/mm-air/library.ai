@@ -19,6 +19,30 @@ pub type Item = struct {
   parameters: string
 }
 
+// Automatic output names never select an existing result for overwrite.
+pub fn unused_output(directory: str, stem: str, extension: str)
+    -> result<string,string> effects {alloc,fs.meta,fs.write} {
+  match files.mkdirs(directory) {
+    ok(_) => {},
+    err(problem) => { return result.err(text.concat(directory,
+      text.concat(": ", fs.error.message(problem)))) },
+  }
+  var suffix: u64 = 0
+  loop {
+    let name: string = if suffix == 0 { text.concat(stem, extension) }
+      else { text.concat(stem, text.concat("-",
+        text.concat(string.from_int(suffix), extension))) }
+    let destination: string = path.join(directory, str.view(name))
+    match files.exists(str.view(destination)) {
+      ok(present) => { if not present { return result.ok(destination) } },
+      err(problem) => { return result.err(text.concat(str.view(destination),
+        text.concat(": ", fs.error.message(problem)))) },
+    }
+    suffix = suffix + 1
+  }
+  result.err("No unused output filename")
+}
+
 pub fn item(source: str, thumbnail: str, parameters: str) -> Item effects {alloc} {
   Item {path: text.copy(source), thumbnail: text.copy(thumbnail),
     parameters: text.copy(parameters)}
