@@ -122,3 +122,8 @@ Native 4K/2x UI tests cover individual/all reference removal, LoRA strength/togg
 removal and saved-state reuse. The supplied rank64 Krea adapter completed a native
 1024x1024,8-step Generate in about55seconds with a valid PNG and parameter sidecar.
 This is execution evidence, not full-model numerical parity. The H3 Prompter is deferred.
+
+The shared AIR media reader also fixes JPEG reference intake: first-frame decode
+does not seek to zero (which can discard a JPEG's sole packet), and empty decoder
+output reports the source instead of a misleading missing-file message. Rebuild
+MM-Air against current private AIR to pick up this generic library correction.
