@@ -181,13 +181,12 @@ fn model_widgets(session: ref<desk.Session>, krea: bool) -> unit effects {alloc,
   let _ = desk.set_bool(session,"gen_height","sensitive",not krea)
   let _ = desk.set_bool(session,"gen_resolution","sensitive",not krea)
   let _ = desk.set_bool(session,"gen_sources_group","sensitive",not krea)
-  let _ = desk.set_bool(session,"choose_output","sensitive",not krea)
   let _ = desk.set_text(session,"generate_action",if krea {"Generate Krea PNG"} else {"Generate H3 MP4"})
   let _ = desk.set_text(session,"gen_media_badge",if krea {"IMAGE"} else {"VIDEO"})
   let _ = desk.set_text(session,"gen_stage_badge",if krea {"K2"} else {"H3"})
   let _ = desk.set_text(session,"gen_stage_model",if krea {"Krea 2 Turbo · native AIR session"} else {"MiniMax H3 · native AIR session"})
   let _ = desk.set_text(session,"gen_fps_badge",if krea {"PNG"} else {"24 FPS"})
-  let _ = desk.set_text(session,"gen_output_contract",if krea {"Automatically saved in output/krea"} else {"MP4 target · linked pure-AIR H3 session"})
+  let _ = desk.set_text(session,"gen_output_contract",if krea {"Automatically saved in output/krea"} else {"Automatically saved in output/h3"})
 }
 
 fn source_widgets(session: ref<desk.Session>, task: u32) -> unit effects {alloc,net,time} {
@@ -436,8 +435,8 @@ pub fn main(args: view<str>) -> i32
     err(problem) => { return fail(problem) },
   }
   let bindir: string = path.dirname(program)
-  let krea_output_directory: string = path.join(
-    path.dirname(path.dirname(bindir)), "output/krea")
+  let output_directory: string = path.join(
+    path.dirname(path.dirname(bindir)), "output")
   let shared: string = path.join(path.dirname(bindir), "share/mm-air")
   let open_parameters: bool = view.len(args) > 1 and view.get(args, 1) == "--parameters"
   if open_parameters and view.len(args) != 3 { return fail("Usage: mm-air --parameters FILE.json") }
@@ -469,8 +468,6 @@ pub fn main(args: view<str>) -> i32
   var saved_h3_resolution: u32 = resolution_index
   var saved_h3_output: string = string.new()
   var saved_krea_output: string = string.new()
-  var choosing_generation_output: bool = false
-  var resume_generation: bool = false
   var visual_references: array<library.Item> = []
   var audio_references: array<library.Item> = []
   var history: array<library.Item> = match library.load_history() {
@@ -713,19 +710,14 @@ pub fn main(args: view<str>) -> i32
               none => {},
             }
           }
-          var event: json.Document = if resume_generation {
-            resume_generation = false
-            match json.parse("{\"event\":\"action\",\"id\":\"generate_action\",\"resumed\":true}") {
-              ok(value) => value,err(_) => { panic "Invalid internal Generate event" },
-            }
-          } else { match desk.next(session, 1000) {
+          var event: json.Document = match desk.next(session, 1000) {
             ok(item) => match item {
               some(value) => value,
               none => { continue },
             },
             err(problem) => { result_code = fail(problem)
               break },
-          } }
+          }
           let kind: string = desk.field(event, "event")
           let id: string = desk.field(event, "id")
           if kind == "dialog" {
@@ -803,19 +795,7 @@ pub fn main(args: view<str>) -> i32
                   control_media = text.copy(str.view(selected))
                 }
               }
-              if id == "choose_output" {
-                output_media = text.copy(str.view(selected))
-                if path.extension(str.view(output_media)) == "" {
-                  output_media = text.concat(str.view(output_media),
-                    if model_index == parameters.krea_model_index() {".png"} else {".mp4"})
-                }
-                let _ = desk.set_text(session, "output_name", str.view(output_media))
-                let _ = desk.set_text(session, "status", text.concat("Output: ", str.view(output_media)))
-                io.write(text.concat("mm-air output selected=", text.concat(str.view(output_media), "\n")))
-                if choosing_generation_output { resume_generation = true }
-              }
             }
-            if id == "choose_output" { choosing_generation_output = false }
             continue
           }
           if kind == "close" or id == "quit" { break }
@@ -1097,17 +1077,6 @@ pub fn main(args: view<str>) -> i32
               let _ = desk.dialog(session, id, "open", "Add H3 control media", "", str.view(folder))
               continue
             }
-            if id == "choose_output" {
-              let folder: string = if output_media == "" { string.new() } else { path.dirname(str.view(output_media)) }
-              // Leave the chooser's suggested name extension-free. Some GTK
-              // backends otherwise append the suggested .mp4 to a location
-              // that the user already typed with .mp4.
-              let krea: bool = model_index == parameters.krea_model_index()
-              let _ = desk.dialog(session, id, "save",
-                if krea {"Save Krea image"} else {"Save H3 video"},
-                if krea {"mm-air-krea"} else {"mm-air-h3"},str.view(folder))
-              continue
-            }
             if id == "generate_action" or id == "gen_save_parameters" {
               if not seed_valid {
                 generation_status(session,"Seed must be an integer (-1 for random)")
@@ -1117,27 +1086,20 @@ pub fn main(args: view<str>) -> i32
                 generation_status(session,"Generation is already running")
                 continue
               }
-              if id == "generate_action" and not desk.boolean(event,"resumed") {
+              if id == "generate_action" {
                 generation_started = time.monotonic_ns()
-              }
-              if id == "generate_action" and model_index == parameters.krea_model_index() {
-                output_media = match library.unused_output(krea_output_directory,
-                    text.concat("krea-",string.from_int(time.monotonic_ns())), ".png") {
+                let krea: bool = model_index == parameters.krea_model_index()
+                let folder: str = if krea {"krea"} else {"h3"}
+                output_media = match library.unused_output(path.join(output_directory,folder),
+                    text.concat(folder,text.concat("-",string.from_int(time.monotonic_ns()))),
+                    if krea {".png"} else {".mp4"}) {
                   ok(value) => value,
                   err(problem) => { generation_status(session,problem)
                     continue },
                 }
                 let _ = desk.set_text(session,"output_name",output_media)
-                io.write(text.concat("mm-air automatic Krea output=",text.concat(output_media,"\n")))
-              }
-              if id == "generate_action" and output_media == "" {
-                choosing_generation_output = true
-                let krea = model_index == parameters.krea_model_index()
-                generation_status(session,"Choose an output file to continue generation")
-                let _ = desk.dialog(session,"choose_output","save",
-                  if krea {"Save Krea image"} else {"Save H3 video"},
-                  if krea {"mm-air-krea"} else {"mm-air-h3"},"")
-                continue
+                io.write(text.concat(if krea {"mm-air automatic Krea output="} else {"mm-air automatic H3 output="},
+                  text.concat(output_media,"\n")))
               }
               if model_index == parameters.krea_model_index() {
                 var request = parameters.KreaRequest {prompt:string.copy(prompt),seed:seed,

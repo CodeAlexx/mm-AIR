@@ -29,10 +29,11 @@ See the [repository README](../../README.md) for the publication boundary.
   messages appear next to Generate, with elapsed time and application logs.
   The UI does not invent progress percentages. Validation errors use the same
   prominent status area.
-- Krea Generate automatically saves a fresh PNG under `output/krea` at the
-  application root, including when reusing saved parameters. It opens no Save
-  dialog and does not choose existing results for overwrite. H3's blank output
-  still opens the Save dialog; Cancel starts no worker.
+- Generate handles filenames and saving automatically under application-root
+  `output/krea` (PNG) or `output/h3` (MP4), including reused requests. No output
+  Save dialog appears; completed results and parameters link into history.
+- Select a reference thumbnail, then press that list's Remove selected button
+  to remove it from the request. Source files are not deleted.
 - History is on the right; current generations are below the preview. Hover
   does not change the selected result. Explicit selection updates the preview;
   videos use embedded playback controls.
@@ -92,13 +93,13 @@ Supported modes:
 - `MM_AIR_TEST_KREA_PARAMETERS=FILE.json`: restore Krea, then verify Generate
   reports a missing model in both central status and footer. This mode unsets
   the model location and does not generate by default.
-- `MM_AIR_TEST_OUTPUT_CHOOSER=1`: use the initial blank output, open Save with
-  Generate, cancel and require no worker or history change.
+- `MM_AIR_TEST_AUTOMATIC_OUTPUT=1`: press H3 Generate twice with unselected
+  policies; require distinct automatic paths, no dialog and no worker.
 - **Explicit GPU opt-in:** `MM_AIR_TEST_GENERATE=1` with Krea parameters above,
   or `MM_AIR_TEST_H3_GENERATE_PARAMETERS=FILE.json`, presses the real Generate
   button with configured assets. It requires observed sampling/decode stages,
   advancing elapsed time, a new nonempty output and persisted history, with a
-  720-second deadline. Never combine this opt-in with a cancellation test.
+  720-second deadline. Never combine this opt-in with a no-generation test.
 
-The opt-in generation test refuses pre-existing output paths. Use a fresh
-destination and only run one model-generation test at a time on a shared GPU.
+The opt-in generation test follows the application's automatic output path.
+Only run one model-generation test at a time on a shared GPU.

@@ -12,9 +12,9 @@
 # Add MM_AIR_TEST_GENERATE=1 to retain the real Krea asset environment and run
 # actual Generate (720 seconds maximum), requiring visible progress and history.
 # MM_AIR_TEST_H3_GENERATE_PARAMETERS=FILE.json selects the same opt-in real H3
-# test. Both real modes require MM_AIR_TEST_GENERATE=1 and a new output path.
-# MM_AIR_TEST_OUTPUT_CHOOSER=1 uses the blank-output initial state, clicks
-# Generate, then Cancel in the native Save dialog; no worker may start.
+# test. Both real modes require MM_AIR_TEST_GENERATE=1; filenames are automatic.
+# MM_AIR_TEST_AUTOMATIC_OUTPUT=1 presses H3 Generate twice with unselected
+# policies; fresh paths are chosen with no dialog and no worker may start.
 set -Eeuo pipefail
 trap 'echo "gallery regression failed at line $LINENO" >&2' ERR
 
@@ -138,50 +138,35 @@ for ((i=0;i<${#queue[@]};i++)); do
   queue+=("${children[@]}")
 done
 cache=$(call /org/a11y/atspi/cache org.a11y.atspi.Cache GetItems)
-if [[ ${MM_AIR_TEST_OUTPUT_CHOOSER:-0} == 1 ]]; then
+if [[ ${MM_AIR_TEST_AUTOMATIC_OUTPUT:-0} == 1 ]]; then
   [[ ${MM_AIR_TEST_GENERATE:-0} != 1 && -z ${MM_AIR_TEST_KREA_PARAMETERS:-} &&
-     -z ${MM_AIR_TEST_PARAMETERS:-} && -z ${MM_AIR_TEST_H3_GENERATE_PARAMETERS:-} ]] || {
-    echo "Output chooser cancellation test requires initial blank state and no generation opt-in" >&2; exit 2;
-  }
+     -z ${MM_AIR_TEST_PARAMETERS:-} && -z ${MM_AIR_TEST_H3_GENERATE_PARAMETERS:-} ]]
   generate=$(jq -r '.data[0][] | select(.[6] == "Generate H3 MP4" and .[7] == 43) | .[0][1]' <<< "$cache")
   [[ -n $generate ]]
-  call "$generate" org.a11y.atspi.Action DoAction i 0 >/dev/null
-  cancel=
-  for ((attempt=0;attempt<20;attempt++)); do
-    queue=(/org/a11y/atspi/accessible/root)
-    for ((j=0;j<${#queue[@]};j++)); do
-      [[ $j -lt 1024 ]]
-      mapfile -t children < <(call "${queue[j]}" org.a11y.atspi.Accessible GetChildren |
-        jq -r '.data[0][] | .[1]')
-      queue+=("${children[@]}")
+  for click in 1 2; do
+    call "$generate" org.a11y.atspi.Action DoAction i 0 >/dev/null
+    for ((attempt=0;attempt<30;attempt++)); do
+      [[ $(rg -c '^mm-air automatic H3 output=' "$scratch/app.out" || true) -ge $click ]] && break
+      sleep 0.1
     done
-    cache=$(call /org/a11y/atspi/cache org.a11y.atspi.Cache GetItems)
-    cancel=$(jq -r '.data[0][] | select((.[6] == "Cancel" or .[6] == "_Cancel") and .[7] == 43) | .[0][1]' <<< "$cache" | head -1)
-    [[ -z $cancel ]] || break
-    sleep 0.1
   done
-  [[ -n $cancel ]] || { echo "Generate did not open native Save chooser" >&2; false; }
-  jq -e '.data[0][] | select(.[6] == "Save H3 video")' <<< "$cache" >/dev/null
-  jq -e '[.data[0][] | select(.[6] == "Choose an output file to continue generation")] | length >= 2' <<< "$cache" >/dev/null
-  call "$cancel" org.a11y.atspi.Action DoAction i 0 >/dev/null
-  sleep 1.5
+  mapfile -t outputs < <(sed -n 's/^mm-air automatic H3 output=//p' "$scratch/app.out")
+  [[ ${#outputs[@]} == 2 && ${outputs[0]} != "${outputs[1]}" ]]
+  for output in "${outputs[@]}"; do
+    [[ $output == "$(dirname "$(dirname "$(dirname "$app")")")/output/h3/"*.mp4 ]]
+    [[ -d $(dirname "$output") && ! -e $output ]]
+  done
   roots=$(call /org/a11y/atspi/accessible/root org.a11y.atspi.Accessible GetChildren)
-  [[ $(jq '.data[0] | length' <<< "$roots") == 1 ]] || {
-    echo "Cancel did not dismiss the native Save chooser" >&2; false;
-  }
-  ! rg -q '^mm-air started linked AIR|^mm-air generated media saved=' "$scratch/app.out"
+  [[ $(jq '.data[0] | length' <<< "$roots") == 1 ]]
+  ! rg -q 'Choose an output file|^mm-air started linked AIR|^mm-air generated media saved=' "$scratch/app.out"
   jq -e '.items | length == 2' "$scratch/data/mm-air/generate-history.json" >/dev/null
-  echo "PASS: blank-output Generate opened native Save chooser; Cancel dismissed it without starting a worker"
+  echo "PASS: H3 Generate chooses fresh output/h3 MP4 paths without a dialog; explicit-policy validation starts no worker"
   exit 0
 fi
 run_generation() {
   local fixture=$1 model=$2 action_name=$3 output action last_labels= elapsed_first=
   local elapsed_advanced=false sampled=false decoded=false saved=false labels elapsed stage
   output=
-  if [[ $model != Krea ]]; then
-    output=$(jq -er '.output | select(type == "string" and startswith("/") and length > 1)' "$fixture")
-    [[ ! -e $output ]] || { echo "Refusing existing generation output: $output" >&2; return 1; }
-  fi
   action=$(jq -r --arg name "$action_name" '.data[0][] |
     select(.[6] == $name and .[7] == 43) | .[0][1]' <<< "$cache")
   [[ -n $action ]] || { echo "Missing real Generate action: $action_name" >&2; return 1; }
@@ -197,10 +182,12 @@ run_generation() {
   local started=$SECONDS
   call "$action" org.a11y.atspi.Action DoAction i 0 >/dev/null
   while ((SECONDS - started < 720)); do
-    if [[ $model == Krea && -z $output ]]; then
-      output=$(sed -n 's/^mm-air automatic Krea output=//p' "$scratch/app.out" | tail -1)
+    if [[ -z $output ]]; then
+      output=$(sed -n "s/^mm-air automatic $model output=//p" "$scratch/app.out" | tail -1)
       if [[ -n $output ]]; then
-        [[ $output == "$(dirname "$(dirname "$(dirname "$app")")")/output/krea/"*.png ]]
+        folder=h3; extension=mp4
+        if [[ $model == Krea ]]; then folder=krea; extension=png; fi
+        [[ $output == "$(dirname "$(dirname "$(dirname "$app")")")/output/$folder/"*.$extension ]]
       fi
     fi
     kill -0 "$app_pid" 2>/dev/null || { echo "Native app exited during generation" >&2; return 1; }

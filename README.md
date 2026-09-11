@@ -67,8 +67,8 @@ On 2026-09-10, actual native Generate-button tests completed both paths:
 
 These tests observed real stage updates and advancing elapsed time, and
 required a newly saved output plus a persisted history entry. Isolated 4K/2×
-UI tests also passed for click-only gallery selection, playback, output-chooser
-cancellation without generation, and visible missing-model validation errors.
+UI tests also passed for click-only gallery selection, playback, automatic output
+naming without dialogs, and visible policy/missing-model validation errors.
 
 These are development-run results, not promised performance on other hardware.
 They do **not** establish full numerical model parity, speech intelligibility,
