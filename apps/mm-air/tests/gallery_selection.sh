@@ -129,6 +129,11 @@ for ((i=0;i<500;i++)); do
 done
 [[ $app_ready == true ]] || { echo "no ready accessible air-ui process" >&2; cat "$scratch/app.err" >&2; busctl --address="$a11y" list --no-pager >&2; exit 1; }
 call() { busctl --address="$a11y" --json=short call "$peer" "$@"; }
+mouse() {
+  busctl --address="$a11y" call org.a11y.atspi.Registry \
+    /org/a11y/atspi/registry/deviceeventcontroller \
+    org.a11y.atspi.DeviceEventController GenerateMouseEvent iis "$@" >/dev/null
+}
 # GTK exports descendants lazily. Walk only this test application's tree.
 queue=(/org/a11y/atspi/accessible/root)
 for ((i=0;i<${#queue[@]};i++)); do
@@ -253,6 +258,71 @@ if [[ -n ${MM_AIR_TEST_KREA_PARAMETERS:-} ]]; then
   done
   jq -e '.data[0][] | select(.[6] == "Krea Generate parameters restored")' <<< "$cache" >/dev/null
   jq -e '.data[0][] | select(.[6] == "Krea 2 Turbo · 1024×1024 · 8 steps · BF16")' <<< "$cache" >/dev/null
+  if [[ ${MM_AIR_TEST_LORAS:-0} == 1 ]]; then
+    refresh_lora_tree() {
+      queue=(/org/a11y/atspi/accessible/root)
+      for ((j=0;j<${#queue[@]};j++)); do
+        [[ $j -lt 1024 ]] || return 1
+        mapfile -t children < <(call "${queue[j]}" org.a11y.atspi.Accessible GetChildren | jq -r '.data[0][] | .[1]')
+        queue+=("${children[@]}")
+      done
+      cache=$(call /org/a11y/atspi/cache org.a11y.atspi.Cache GetItems)
+    }
+    snapshot_loras() {
+      local previous=${saved:-}
+      refresh_lora_tree
+      save=$(jq -r '.data[0][] | select(.[6] == "Save parameters" and .[7] == 43) | .[0][1]' <<< "$cache")
+      call "$save" org.a11y.atspi.Action DoAction i 0 >/dev/null
+      for ((attempt=0;attempt<30;attempt++)); do
+        saved=$(sed -n 's/^mm-air parameters saved=//p' "$scratch/app.out" | tail -1)
+        [[ -n $saved && $saved != "$previous" && -s $saved ]] && return
+        sleep 0.1
+      done
+      return 1
+    }
+    refresh_lora_tree
+    first_lora=$(jq -r '.loras[0].path | split("/")[-1]' "$MM_AIR_TEST_KREA_PARAMETERS")
+    grid=$(jq -r --arg name "$first_lora" '.data[0] as $items |
+      [$items[] | select(.[6] == $name) | .[2][1]] as $parents |
+      $items[] | select(.[0][1] as $path | $parents | index($path)) |
+      select(.[5] | index("org.a11y.atspi.Selection")) | .[0][1]' <<< "$cache" | head -1)
+    [[ -n $grid ]]
+    call "$grid" org.a11y.atspi.Selection SelectChild i 0 >/dev/null
+    sleep 0.2
+    refresh_lora_tree
+    enabled=$(jq -r '.data[0][] | select(.[6] == "Enabled" and .[7] == 7) | .[0][1]' <<< "$cache")
+    strength=
+    while IFS= read -r widget; do
+      current=$(busctl --address="$a11y" --json=short get-property "$peer" "$widget" org.a11y.atspi.Value CurrentValue | jq -r '.data')
+      if jq -e '. == 0.75' <<< "$current" >/dev/null; then strength=$widget; break; fi
+    done < <(jq -r '.data[0][] | select(.[5] | index("org.a11y.atspi.Value")) | .[0][1]' <<< "$cache")
+    [[ -n $strength ]]
+    busctl --address="$a11y" set-property "$peer" "$strength" org.a11y.atspi.Value CurrentValue d 1.25
+    sleep 0.2
+    extent=$(call "$enabled" org.a11y.atspi.Component GetExtents u 1)
+    window_info=$(xwininfo -name 'MM-AIR · MiniMax H3 Studio')
+    origin_x=$(awk '/Absolute upper-left X:/ {print $4}' <<< "$window_info")
+    origin_y=$(awk '/Absolute upper-left Y:/ {print $4}' <<< "$window_info")
+    x=$(jq --argjson origin "$origin_x" --argjson scale "$GDK_SCALE" '.data[0] | $origin + $scale * (.[0]+12)' <<< "$extent")
+    y=$(jq --argjson origin "$origin_y" --argjson scale "$GDK_SCALE" '.data[0] | $origin + $scale * (.[1]+(.[3]/2|floor))' <<< "$extent")
+    mouse "$x" "$y" abs
+    mouse "$x" "$y" b1c
+    sleep 0.2
+    snapshot_loras
+    jq -e '.loras[0].enabled == false and .loras[0].strength == 1.25 and (.loras|length)==2' "$saved" >/dev/null
+    remove=$(jq -r '.data[0][] | select(.[6] == "Remove LoRA" and .[7] == 43) | .[0][1]' <<< "$cache")
+    call "$remove" org.a11y.atspi.Action DoAction i 0 >/dev/null
+    sleep 0.2
+    snapshot_loras
+    jq -e '(.loras|length)==1' "$saved" >/dev/null
+    clear=$(jq -r '.data[0][] | select(.[6] == "Clear LoRAs" and .[7] == 43) | .[0][1]' <<< "$cache")
+    call "$clear" org.a11y.atspi.Action DoAction i 0 >/dev/null
+    sleep 0.2
+    snapshot_loras
+    jq -e '.loras == []' "$saved" >/dev/null
+    echo "PASS: native LoRA restore, selection, strength edit, toggle, individual removal, clear all, and parameter persistence"
+    exit 0
+  fi
   if [[ ${MM_AIR_TEST_GENERATE:-0} == 1 ]]; then
     run_generation "$MM_AIR_TEST_KREA_PARAMETERS" Krea "Generate Krea PNG"
     exit 0
@@ -351,9 +421,29 @@ if [[ -n ${MM_AIR_TEST_PARAMETERS:-} ]]; then
     call "${buttons[3]}" org.a11y.atspi.Action DoAction i 0 >/dev/null
     sleep 0.2
     assert_order # moving after the last item is also a no-op
-    echo "PASS: $media references load in order; earlier/later preserve selection and endpoints"
+    call "${buttons[1]}" org.a11y.atspi.Action DoAction i 0 >/dev/null
+    sleep 0.3
+    unset 'expected[${#expected[@]}-1]'
+    assert_order
+    echo "PASS: $media ordering and individual removal; remaining references preserved"
     refresh_tree
   done
+  clear_all=$(jq -r '.data[0][] | select(.[6] == "Clear all references" and .[7] == 43) | .[0][1]' <<< "$cache")
+  call "$clear_all" org.a11y.atspi.Action DoAction i 0 >/dev/null
+  sleep 0.3
+  refresh_tree
+  save=$(jq -r '.data[0][] | select(.[6] == "Save parameters" and .[7] == 43) | .[0][1]' <<< "$cache")
+  call "$save" org.a11y.atspi.Action DoAction i 0 >/dev/null
+  for ((attempt=0;attempt<30;attempt++)); do
+    saved=$(sed -n 's/^mm-air parameters saved=//p' "$scratch/app.out" | tail -1)
+    [[ -n $saved && -s $saved ]] && break
+    sleep 0.1
+  done
+  jq -e '.references == [] and .audio_references == []' "$saved" >/dev/null
+  while IFS= read -r original; do [[ -f $original ]]; done < <(jq -r '.references[], .audio_references[]' "$MM_AIR_TEST_PARAMETERS")
+  roots=$(call /org/a11y/atspi/accessible/root org.a11y.atspi.Accessible GetChildren)
+  [[ $(jq '.data[0] | length' <<< "$roots") == 1 ]]
+  echo "PASS: clear all removes visual/audio request entries, preserves source files, saves parameters without a filename dialog"
   exit 0
 fi
 grid=$(jq -r --arg name "$first_name" '
@@ -365,11 +455,6 @@ grid=$(jq -r --arg name "$first_name" '
 children=$(call "$grid" org.a11y.atspi.Accessible GetChildren)
 first=$(jq -r '.data[0][0][1]' <<< "$children")
 second=$(jq -r '.data[0][1][1]' <<< "$children")
-mouse() {
-  busctl --address="$a11y" call org.a11y.atspi.Registry \
-    /org/a11y/atspi/registry/deviceeventcontroller \
-    org.a11y.atspi.DeviceEventController GenerateMouseEvent iis "$@" >/dev/null
-}
 selected() { call "$grid" org.a11y.atspi.Selection GetSelectedChild i 0 | jq -r '.data[0][1]'; }
 mouse 1 1 abs
 call "$grid" org.a11y.atspi.Selection SelectChild i 0 >/dev/null

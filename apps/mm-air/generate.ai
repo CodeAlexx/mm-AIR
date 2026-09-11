@@ -26,6 +26,7 @@ import ".air/deps/h3/session.ai" as session
 import ".air/deps/h3/vae.ai" as vae
 import ".air/deps/krea2/session.ai" as krea_session
 import ".air/deps/krea2/config.ai" as krea_config
+import ".air/deps/krea2/lora.ai" as krea_lora
 import "parameters.ai" as parameters
 
 pub type KreaJob = struct {sources:krea_session.Sources,request:parameters.KreaRequest,progress:channel.Ticket}
@@ -55,8 +56,24 @@ fn run_krea_inner(owned: ref<KreaJob>,sender:ref<option<channel.Sender>>) -> Out
   let request = struct.borrow(owned,field=request)
   let seed: u64 = cast.sat(request.seed)
   let settings = krea_config.Config {width:request.width,height:request.height}
-  match krea_session.run_to_png(struct.borrow(owned,field=sources),
-      struct.borrow(request,field=prompt),seed,settings,struct.borrow(request,field=output),sender) {
+  match parameters.validate_krea(request) {
+    ok(_) => {},
+    err(message) => { return outcome(false,struct.borrow(request,field=output),message) },
+  }
+  var loras: array<krea_lora.Request> = []
+  let entries = struct.borrow(request,field=loras)
+  var index: u64 = 0
+  loop {
+    if index >= array.len(entries) { break }
+    let entry = array.borrow(entries,index)
+    if entry.enabled {
+      array.push(loras,krea_lora.Request {path:string.copy(struct.borrow(entry,field=path)),
+        strength:cast.float(entry.strength)})
+    }
+    index = index + 1
+  }
+  match krea_session.run_to_png_loras(struct.borrow(owned,field=sources),
+      struct.borrow(request,field=prompt),seed,settings,struct.borrow(request,field=output),loras,sender) {
     ok(_) => outcome(true,struct.borrow(request,field=output),"Linked AIR Krea 2 Turbo image completed"),
     err(message) => outcome(false,struct.borrow(request,field=output),message),
   }

@@ -28,6 +28,24 @@ fn item_paths(source: ref<array<library.Item>>) -> array<string> effects {alloc}
   out
 }
 
+fn save_parameter_snapshot(session: ref<desk.Session>, directory: str, encoded: str)
+    -> unit effects {alloc,fs.meta,fs.write,net,time,io.write} {
+  let filename = match library.unused_output(path.join(directory,"parameters"),
+      text.concat("settings-",string.from_int(time.monotonic_ns())),".json") {
+    ok(value) => value, err(message) => {
+      let _ = desk.set_text(session,"status",message)
+      return ()
+    },
+  }
+  match files.write_atomic(filename,text.concat(filename,".tmp"),encoded) {
+    ok(_) => {
+      let _ = desk.set_text(session,"status",text.concat("Parameters saved: ",filename))
+      io.write(text.concat("mm-air parameters saved=",text.concat(filename,"\n")))
+    },
+    err(error) => { let _ = desk.set_text(session,"status",fs.error.message(error)) },
+  }
+}
+
 fn show_items(session: ref<desk.Session>, id: str, items: ref<array<library.Item>>)
     -> unit effects {alloc,net,time} {
   var command = desk.command("items", id)
@@ -50,6 +68,47 @@ fn show_items(session: ref<desk.Session>, id: str, items: ref<array<library.Item
   }
   codec.end_array(command)
   let _ = desk.submit(session, command)
+}
+
+fn lora_editor(session: ref<desk.Session>, entries: ref<array<parameters.LoraEntry>>, selected: u64)
+    -> unit effects {alloc,net,time} {
+  let valid = selected < array.len(entries)
+  let _ = desk.set_bool(session,"gen_lora_editor","sensitive",valid)
+  let _ = desk.set_bool(session,"gen_remove_lora","sensitive",valid)
+  let _ = desk.set_bool(session,"gen_clear_loras","sensitive",array.len(entries) > 0)
+  if valid {
+    let entry = array.borrow(entries,selected)
+    let _ = desk.set_text(session,"gen_lora_selected",path.basename(struct.borrow(entry,field=path)))
+    let _ = desk.set_number(session,"gen_lora_strength","value",entry.strength)
+    let _ = desk.set_bool(session,"gen_lora_strength","sensitive",entry.enabled)
+    let _ = desk.set_bool(session,"gen_lora_enabled","active",entry.enabled)
+  } else {
+    let _ = desk.set_text(session,"gen_lora_selected","Select a LoRA to adjust")
+  }
+}
+
+fn show_loras(session: ref<desk.Session>, entries: ref<array<parameters.LoraEntry>>, selected: u64)
+    -> unit effects {alloc,net,time} {
+  var command = desk.command("items","gen_loras")
+  codec.field_u64(command,"thumbnail_width",32)
+  codec.field_u64(command,"thumbnail_height",24)
+  codec.key(command,"items")
+  codec.begin_array(command)
+  var i: u64 = 0
+  loop {
+    if i == array.len(entries) { break }
+    let entry = array.borrow(entries,i)
+    codec.begin_object(command)
+    codec.field_text(command,"key",string.from_int(i))
+    codec.field_text(command,"label",path.basename(struct.borrow(entry,field=path)))
+    codec.field_text(command,"icon","applications-engineering-symbolic")
+    codec.end_object(command)
+    i = i + 1
+  }
+  codec.end_array(command)
+  let _ = desk.submit(session,command)
+  let _ = desk.select(session,"gen_loras",if selected < array.len(entries) {string.from_int(selected)} else {string.new()})
+  lora_editor(session,entries,selected)
 }
 
 fn remove_item(items: ref<array<library.Item>>, selected: str) -> unit effects {alloc} {
@@ -169,6 +228,7 @@ fn apply_parameter_widgets(session: ref<desk.Session>, request: ref<h3.Request>)
 }
 
 fn model_widgets(session: ref<desk.Session>, krea: bool) -> unit effects {alloc,net,time} {
+  let _ = desk.set_bool(session,"gen_lora_group","visible",krea)
   let _ = desk.set_bool(session,"gen_krea_details","visible",krea)
   let _ = desk.set_bool(session,"gen_task","sensitive",not krea)
   let _ = desk.set_bool(session,"gen_profile","sensitive",not krea)
@@ -181,6 +241,7 @@ fn model_widgets(session: ref<desk.Session>, krea: bool) -> unit effects {alloc,
   let _ = desk.set_bool(session,"gen_height","sensitive",not krea)
   let _ = desk.set_bool(session,"gen_resolution","sensitive",not krea)
   let _ = desk.set_bool(session,"gen_sources_group","sensitive",not krea)
+  let _ = desk.set_bool(session,"gen_sources_group","visible",not krea)
   let _ = desk.set_text(session,"generate_action",if krea {"Generate Krea PNG"} else {"Generate H3 MP4"})
   let _ = desk.set_text(session,"gen_media_badge",if krea {"IMAGE"} else {"VIDEO"})
   let _ = desk.set_text(session,"gen_stage_badge",if krea {"K2"} else {"H3"})
@@ -448,6 +509,8 @@ pub fn main(args: view<str>) -> i32
     else { path.join(bindir, "air-ui") }
 
   var reference_media: string = string.new()
+  var krea_loras: array<parameters.LoraEntry> = []
+  var selected_lora: u64 = 18446744073709551615
   var last_reference_media: string = string.new()
   var control_media: string = string.new()
   var output_media: string = string.new()
@@ -487,7 +550,6 @@ pub fn main(args: view<str>) -> i32
       err(error) => { return fail(fs.error.message(error)) },
     }
   }
-  var saving_parameters: string = string.new()
   var running_parameters: string = string.new()
   var generation_started: u64 = 0
   var seed: i64 = 42
@@ -529,6 +591,9 @@ pub fn main(args: view<str>) -> i32
               match parameters.decode_krea(pending_parameters) {
                 ok(restored) => {
                   var request = restored
+                  krea_loras = parameters.clone_loras(struct.borrow(request,field=loras))
+                  selected_lora = 18446744073709551615
+                  show_loras(session,krea_loras,selected_lora)
                   if model_index != parameters.krea_model_index() {
                     saved_h3_width = width
                     saved_h3_height = height
@@ -674,6 +739,12 @@ pub fn main(args: view<str>) -> i32
                 let _ = desk.set_bool(session, "generate_action", "sensitive", true)
                 generation_status(session,str.view(struct.borrow(completed,field=message)))
                 if completed.succeeded {
+                  let sidecar = text.concat(struct.borrow(completed,field=output),".json")
+                  match files.write_atomic(sidecar,text.concat(sidecar,text.concat(".tmp-",
+                      string.from_int(time.monotonic_ns()))),running_parameters) {
+                    ok(_) => {},
+                    err(error) => { io.ewrite(text.concat("Parameter sidecar: ",text.concat(fs.error.message(error),"\n"))) },
+                  }
                   match library.prep_output(struct.borrow(completed, field=output), running_parameters) {
                     ok(item) => {
                       var held: library.Item = item
@@ -723,14 +794,36 @@ pub fn main(args: view<str>) -> i32
           if kind == "dialog" {
             if not desk.boolean(event, "cancelled") {
               let selected: string = desk.field(event, "value")
-              if id == "gen_save_parameters" {
-                let filename = if path.extension(selected) == "" { text.concat(selected, ".json") } else { string.copy(selected) }
-                let stamp: i64 = cast.sat(time.monotonic_ns())
-                let temporary = text.concat(filename, text.concat(".tmp-", string.from_int(stamp)))
-                match files.write_atomic(filename, temporary, saving_parameters) {
-                  ok(_) => { let _ = desk.set_text(session, "status", text.concat("Parameters saved: ", filename)) },
-                  err(error) => { let _ = desk.set_text(session, "status", fs.error.message(error)) },
+              if id == "gen_add_lora" {
+                var chosen = desk.dialog_paths(event)
+                var choice: u64 = 0
+                loop {
+                  if choice == array.len(chosen) { break }
+                  let filename = array.borrow(chosen,choice)
+                  choice = choice + 1
+                  if not text.ends_with(text.lower_ascii(filename),".safetensors") {
+                    let _ = desk.set_text(session,"status","Choose a LoRA .safetensors file")
+                    continue
+                  }
+                  var duplicate: bool = false
+                  var i: u64 = 0
+                  loop {
+                    if i == array.len(krea_loras) { break }
+                    if str.view(struct.borrow(array.borrow(krea_loras,i),field=path)) == str.view(filename) {
+                      duplicate = true
+                    }
+                    i = i + 1
+                  }
+                  if not duplicate {
+                    if array.len(krea_loras) > 0 {
+                      let _ = desk.set_text(session,"status","Krea admits one LoRA; remove the current LoRA before adding another")
+                      continue
+                    }
+                    array.push(krea_loras,parameters.LoraEntry {path:string.copy(filename),strength:1.0,enabled:true})
+                    selected_lora = array.len(krea_loras) - 1
+                  }
                 }
+                show_loras(session,krea_loras,selected_lora)
               }
               if id == "gen_load_parameters" {
                 match files.read_text(selected) {
@@ -800,6 +893,13 @@ pub fn main(args: view<str>) -> i32
           }
           if kind == "close" or id == "quit" { break }
           if kind == "select" or kind == "activate" {
+            if id == "gen_loras" {
+              selected_lora = match text.parse_u64(desk.field(event,"value")) {
+                some(value) => value, none => 18446744073709551615,
+              }
+              lora_editor(session,krea_loras,selected_lora)
+              continue
+            }
             let key = desk.field(event, "value")
             if id == "gen_visual_refs" { selected_visual = string.copy(key)
               reference_actions(session, false, key, array.len(visual_references)) }
@@ -846,6 +946,29 @@ pub fn main(args: view<str>) -> i32
               continue }
           }
           if kind == "change" {
+            if id == "gen_lora_strength" and selected_lora < array.len(krea_loras) {
+              struct.set(array.borrow(krea_loras,selected_lora),desk.number(event,"value"),field=strength)
+            }
+            if id == "gen_lora_enabled" and selected_lora < array.len(krea_loras) {
+              let enabled = desk.boolean(event,"value")
+              var accepted = true
+              if enabled {
+                var i: u64 = 0
+                loop {
+                  if i == array.len(krea_loras) { break }
+                  let other = array.borrow(krea_loras,i)
+                  if i != selected_lora and other.enabled { accepted = false }
+                  i = i + 1
+                }
+              }
+              if accepted {
+                struct.set(array.borrow(krea_loras,selected_lora),enabled,field=enabled)
+                let _ = desk.set_bool(session,"gen_lora_strength","sensitive",enabled)
+              } else {
+                let _ = desk.set_bool(session,"gen_lora_enabled","active",false)
+                let _ = desk.set_text(session,"status","Disable the current LoRA before enabling another")
+              }
+            }
             if id == "gen_parameter_filter" { filter_parameters(session, desk.field(event, "value")) }
             if id == "gen_prompt" { prompt = desk.field(event, "value") }
             if id == "gen_model" {
@@ -939,6 +1062,46 @@ pub fn main(args: view<str>) -> i32
             continue
           }
           if kind == "action" {
+            if id == "gen_add_lora" {
+              let folder = match env.get("HOME") {
+                some(value) => path.join(value,".serenity/models/loras"), none => string.new(),
+              }
+              let _ = desk.dialog_multiple(session,id,"Add Krea LoRAs",folder)
+              continue
+            }
+            if id == "gen_remove_lora" or id == "gen_clear_loras" {
+              var kept: array<parameters.LoraEntry> = []
+              var i: u64 = 0
+              loop {
+                if i == array.len(krea_loras) { break }
+                let entry = array.borrow(krea_loras,i)
+                if id != "gen_clear_loras" and i != selected_lora {
+                  array.push(kept,parameters.LoraEntry {path:string.copy(struct.borrow(entry,field=path)),
+                    strength:entry.strength,enabled:entry.enabled})
+                }
+                i = i + 1
+              }
+              krea_loras = kept
+              selected_lora = 18446744073709551615
+              show_loras(session,krea_loras,selected_lora)
+              continue
+            }
+            if id == "gen_clear_references" {
+              visual_references = []
+              audio_references = []
+              selected_visual = string.new()
+              selected_audio = string.new()
+              reference_media = string.new()
+              last_reference_media = string.new()
+              clear_reference(session,false)
+              clear_reference(session,true)
+              show_items(session,"gen_visual_refs",visual_references)
+              show_items(session,"gen_audio_refs",audio_references)
+              reference_actions(session,false,"",0)
+              reference_actions(session,true,"",0)
+              let _ = desk.set_text(session,"status","All references removed from this request; source files kept")
+              continue
+            }
             if id == "reset_generate" {
               var defaults = h3.request("A cinematic wide shot with natural motion, detailed atmosphere, and synchronized environmental audio.",
                 h3.model_base(), h3.task_fl2va(), h3.profile_unselected(),
@@ -1103,11 +1266,10 @@ pub fn main(args: view<str>) -> i32
               }
               if model_index == parameters.krea_model_index() {
                 var request = parameters.KreaRequest {prompt:string.copy(prompt),seed:seed,
-                  width:width,height:height,output:string.copy(output_media)}
+                  width:width,height:height,output:string.copy(output_media),loras:parameters.clone_loras(krea_loras)}
                 if id == "gen_save_parameters" {
                   match parameters.encode_krea(request) {
-                    ok(value) => { saving_parameters = value
-                      let _ = desk.dialog(session,id,"save","Save Krea parameters","mm-air-krea-parameters","") },
+                    ok(value) => { save_parameter_snapshot(session,output_directory,value) },
                     err(message) => { let _ = desk.set_text(session,"status",message) },
                   }
                   continue
@@ -1163,8 +1325,7 @@ pub fn main(args: view<str>) -> i32
               if id == "gen_save_parameters" {
                 match parameters.encode(request) {
                   ok(value) => {
-                    saving_parameters = value
-                    let _ = desk.dialog(session, id, "save", "Save Generate parameters", "mm-air-parameters", "")
+                    save_parameter_snapshot(session,output_directory,value)
                   },
                   err(message) => { let _ = desk.set_text(session, "status", message) },
                 }

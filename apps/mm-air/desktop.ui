@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <interface>
   <requires lib="gtk" version="4.10"/>
+  <object class="GtkAdjustment" id="gen_lora_strength_adjustment">
+    <property name="lower">-10</property><property name="upper">10</property><property name="step-increment">0.05</property><property name="value">1</property>
+  </object>
 
   <object class="GtkAdjustment" id="movie_duration_adjustment">
     <property name="lower">5</property><property name="upper">15</property><property name="step-increment">1</property><property name="value">8</property>
@@ -152,6 +155,22 @@
                     <child><object class="GtkLabel"><property name="label">Linked native AIR model</property><property name="xalign">0</property><style><class name="capability-note"/></style></object></child>
                   </object></child></object></child>
 
+                  <child><object class="GtkFrame" id="gen_lora_group"><property name="visible">false</property><style><class name="parameter-group"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">8</property><property name="margin-start">12</property><property name="margin-end">12</property><property name="margin-top">11</property><property name="margin-bottom">12</property>
+                    <child><object class="GtkLabel"><property name="label">Krea LoRAs</property><property name="xalign">0</property><style><class name="section-title"/></style></object></child>
+                    <child><object class="GtkLabel"><property name="label">One LoRA overlay · enable, adjust strength or remove</property><property name="wrap">true</property><property name="xalign">0</property><style><class name="capability-note"/></style></object></child>
+                    <child><object class="GtkGridView" id="gen_loras"><property name="max-columns">1</property><property name="single-click-activate">false</property></object></child>
+                    <child><object class="GtkBox"><property name="spacing">6</property>
+                      <child><object class="GtkButton" id="gen_add_lora"><property name="label">Add LoRA</property></object></child>
+                      <child><object class="GtkButton" id="gen_remove_lora"><property name="label">Remove LoRA</property><property name="sensitive">false</property></object></child>
+                      <child><object class="GtkButton" id="gen_clear_loras"><property name="label">Clear LoRAs</property><property name="sensitive">false</property></object></child>
+                    </object></child>
+                    <child><object class="GtkLabel" id="gen_lora_selected"><property name="label">Select a LoRA to adjust</property><property name="ellipsize">middle</property><property name="xalign">0</property></object></child>
+                    <child><object class="GtkBox" id="gen_lora_editor"><property name="sensitive">false</property><property name="spacing">8</property>
+                      <child><object class="GtkCheckButton" id="gen_lora_enabled"><property name="label">Enabled</property><property name="active">true</property><property name="hexpand">true</property></object></child>
+                      <child><object class="GtkLabel"><property name="label">Strength</property></object></child>
+                      <child><object class="GtkSpinButton" id="gen_lora_strength"><property name="adjustment">gen_lora_strength_adjustment</property><property name="digits">2</property><property name="numeric">true</property></object></child>
+                    </object></child>
+                  </object></child></object></child>
                   <child><object class="GtkFrame" id="gen_core_group"><style><class name="parameter-group"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">9</property><property name="margin-start">12</property><property name="margin-end">12</property><property name="margin-top">11</property><property name="margin-bottom">12</property>
                     <child><object class="GtkLabel"><property name="label">Core parameters</property><property name="xalign">0</property><style><class name="section-title"/></style></object></child>
                     <child><object class="GtkLabel"><property name="label">Task</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child>
@@ -181,7 +200,10 @@
                   </object></child></object></child>
 
                   <child><object class="GtkFrame" id="gen_sources_group"><style><class name="parameter-group"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">9</property><property name="margin-start">12</property><property name="margin-end">12</property><property name="margin-top">11</property><property name="margin-bottom">12</property>
-                    <child><object class="GtkLabel"><property name="label">Source / References</property><property name="xalign">0</property><style><class name="section-title"/></style></object></child>
+                    <child><object class="GtkBox"><property name="spacing">6</property>
+                      <child><object class="GtkLabel"><property name="label">Source / References</property><property name="xalign">0</property><property name="hexpand">true</property><style><class name="section-title"/></style></object></child>
+                      <child><object class="GtkButton" id="gen_clear_references"><property name="label">Clear all references</property><property name="tooltip-text">Remove every image, video and audio reference from this request. Source files are kept.</property><style><class name="quiet-button"/></style></object></child>
+                    </object></child>
                     <child><object class="GtkButton" id="choose_reference"><style><class name="drop-target"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">4</property><property name="margin-top">10</property><property name="margin-bottom">10</property>
                       <child><object class="GtkPicture" id="reference_preview"><property name="visible">false</property><property name="height-request">96</property><property name="can-shrink">true</property><property name="content-fit">cover</property></object></child>
                       <child><object class="GtkLabel" id="reference_name"><property name="label">＋  Choose first frame</property><property name="ellipsize">end</property><style><class name="drop-title"/></style></object></child>

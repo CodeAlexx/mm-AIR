@@ -3,10 +3,53 @@ module app.mm_air.parameters
 import std.codec as codec
 import std.json as json
 import std.text as text
+import std.math as math
 import "./.air/deps/h3/request.ai" as h3
 
 pub fn krea_model_index() -> u32 effects {} { 2 }
-pub type KreaRequest = struct {prompt:string,seed:i64,width:u64,height:u64,output:string}
+pub type LoraEntry = struct {path:string,strength:f64,enabled:bool}
+pub type KreaRequest = struct {
+  prompt:string,seed:i64,width:u64,height:u64,output:string,loras:array<LoraEntry>
+}
+
+pub fn clone_loras(entries: ref<array<LoraEntry>>) -> array<LoraEntry> effects {alloc} {
+  var output: array<LoraEntry> = []
+  var index: u64 = 0
+  loop {
+    if index >= array.len(entries) { break }
+    let entry = array.borrow(entries,index)
+    array.push(output,LoraEntry {path:string.copy(struct.borrow(entry,field=path)),
+      strength:entry.strength,enabled:entry.enabled})
+    index = index + 1
+  }
+  output
+}
+
+pub fn validate_loras(entries: ref<array<LoraEntry>>) -> result<unit,string> effects {alloc} {
+  var index: u64 = 0
+  var enabled_count: u64 = 0
+  loop {
+    if index >= array.len(entries) { break }
+    let entry = array.borrow(entries,index)
+    if entry.enabled { enabled_count = enabled_count + 1 }
+    if enabled_count > 1 {
+      return result.err("Krea supports one enabled LoRA at a time; disable another LoRA first")
+    }
+    let runtime_strength: f32 = cast.float(entry.strength)
+    if not math.is_finite(entry.strength) or
+       not math.is_finite(cast.float(runtime_strength)) {
+      return result.err("LoRA strength must be finite")
+    }
+    if entry.strength < -10.0 or entry.strength > 10.0 {
+      return result.err("LoRA strength must be between -10 and 10, matching the Serenity UI controls")
+    }
+    if not text.ends_with(text.lower_ascii(struct.borrow(entry,field=path)),".safetensors") {
+      return result.err("Choose a .safetensors LoRA file")
+    }
+    index = index + 1
+  }
+  result.ok(())
+}
 pub fn is_krea(source: str) -> bool effects {alloc} {
   var document = match json.parse(source) { ok(value) => value,err(_) => { return false }, }
   match string_field(document,"schema") {
@@ -22,6 +65,7 @@ pub fn validate_krea(request: ref<KreaRequest>) -> result<unit,string> effects {
   if not text.ends_with(text.lower_ascii(struct.borrow(request,field=output)),".png") {
     return result.err("Choose a .png output for Krea 2 Turbo")
   }
+  try validate_loras(struct.borrow(request,field=loras))
   result.ok(())
 }
 pub fn encode_krea(request: ref<KreaRequest>) -> result<string,string> effects {alloc} {
@@ -37,6 +81,21 @@ pub fn encode_krea(request: ref<KreaRequest>) -> result<string,string> effects {
   codec.field_u64(out,"steps",8)
   codec.field_text(out,"precision","bf16")
   codec.field_text(out,"output",struct.borrow(request,field=output))
+  codec.key(out,"loras")
+  codec.begin_array(out)
+  let entries = struct.borrow(request,field=loras)
+  var index: u64 = 0
+  loop {
+    if index >= array.len(entries) { break }
+    let entry = array.borrow(entries,index)
+    codec.begin_object(out)
+    codec.field_text(out,"path",struct.borrow(entry,field=path))
+    codec.field_f64(out,"strength",entry.strength)
+    codec.field_bool(out,"enabled",entry.enabled)
+    codec.end_object(out)
+    index = index + 1
+  }
+  codec.end_array(out)
   codec.end_object(out)
   match codec.finish(out) { ok(value) => result.ok(value),err(error) => result.err(codec.describe(error)), }
 }
@@ -58,9 +117,52 @@ pub fn decode_krea(source: str) -> result<KreaRequest,string> effects {alloc} {
   }
   var request = KreaRequest {prompt:try string_field(document,"prompt"),seed:seed,
     width:try count(document,"width"),height:try count(document,"height"),
-    output:try string_field(document,"output")}
+    output:try string_field(document,"output"),loras:try decode_loras(document)}
   try validate_krea(request)
   result.ok(request)
+}
+
+fn decode_loras(document: ref<json.Document>) -> result<array<LoraEntry>,string> effects {alloc} {
+  var output: array<LoraEntry> = []
+  let node: u64 = match json.get(document,json.root(),"loras") {
+    some(value) => value,none => { return result.ok(output) },
+  }
+  match json.kind(document,node) {
+    some(kind) => { if kind != json.Kind.Array { return result.err("Expected LoRA array") } },
+    none => { return result.err("Expected LoRA array") },
+  }
+  let size: u64 = match json.len(document,node) {
+    some(value) => value,none => { return result.err("Expected LoRA array") },
+  }
+  var index: u64 = 0
+  loop {
+    if index >= size { break }
+    let item: u64 = match json.at(document,node,index) {
+      some(value) => value,none => { return result.err("Expected LoRA record") },
+    }
+    let path_node: u64 = match json.get(document,item,"path") {
+      some(value) => value,none => { return result.err("Missing LoRA path") },
+    }
+    let path: string = match json.as_string(document,path_node) {
+      some(value) => value,none => { return result.err("Expected LoRA path string") },
+    }
+    let strength_node: u64 = match json.get(document,item,"strength") {
+      some(value) => value,none => { return result.err("Missing LoRA strength") },
+    }
+    let strength: f64 = match json.as_f64(document,strength_node) {
+      some(value) => value,none => { return result.err("Expected finite LoRA strength") },
+    }
+    let enabled_node: u64 = match json.get(document,item,"enabled") {
+      some(value) => value,none => { return result.err("Missing LoRA enabled toggle") },
+    }
+    let enabled: bool = match json.as_bool(document,enabled_node) {
+      some(value) => value,none => { return result.err("Expected LoRA enabled boolean") },
+    }
+    array.push(output,LoraEntry {path:path,strength:strength,enabled:enabled})
+    index = index + 1
+  }
+  try validate_loras(output)
+  result.ok(output)
 }
 
 pub fn encode(request: ref<h3.Request>) -> result<string,string> effects {alloc} {

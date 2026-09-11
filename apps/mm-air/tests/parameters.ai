@@ -8,6 +8,62 @@ fn expect_error(source: str) -> bool effects {alloc} {
   match parameters.decode(source) { ok(_) => false, err(_) => true }
 }
 
+fn lora_round_trip() -> bool effects {alloc} {
+  var entries: array<parameters.LoraEntry> = [
+    parameters.LoraEntry {path:"/tmp/robot.safetensors",strength:0.75,enabled:true},
+    parameters.LoraEntry {path:"/tmp/style.SAFETENSORS",strength:-0.25,enabled:false},
+    parameters.LoraEntry {path:"/tmp/detail.safetensors",strength:1.5,enabled:false}]
+  var request = parameters.KreaRequest {prompt:"robot",seed:42,width:1024,height:1024,
+    output:"/tmp/robot.png",loras:parameters.clone_loras(entries)}
+  var encoded = match parameters.encode_krea(request) { ok(v) => v,err(_) => { return false }, }
+  var restored = match parameters.decode_krea(encoded) { ok(v) => v,err(_) => { return false }, }
+  let copies = struct.borrow(restored,field=loras)
+  if array.len(copies) != 3 { return false }
+  var index: u64 = 0
+  loop {
+    if index >= 3 { break }
+    let expected = array.borrow(entries,index)
+    let actual = array.borrow(copies,index)
+    if str.view(struct.borrow(actual,field=path)) != str.view(struct.borrow(expected,field=path)) or actual.strength != expected.strength or
+       actual.enabled != expected.enabled { return false }
+    index = index + 1
+  }
+  // Clone owns independent rows, including disabled entries for saved UI state.
+  struct.set(array.borrow(entries,0),9.0,field=strength)
+  if array.borrow(copies,0).strength != 0.75 { return false }
+  struct.set(array.borrow(entries,1),true,field=enabled)
+  match parameters.validate_loras(entries) { ok(_) => { return false },err(_) => {}, }
+  struct.set(array.borrow(entries,1),false,field=enabled)
+  let legacy: str = "{\"schema\":\"mm-air.krea2.parameters\",\"version\":1,\"model\":\"krea2-turbo\",\"prompt\":\"robot\",\"seed\":42,\"width\":1024,\"height\":1024,\"steps\":8,\"precision\":\"bf16\",\"output\":\"/tmp/robot.png\"}"
+  var old = match parameters.decode_krea(legacy) { ok(v) => v,err(_) => { return false }, }
+  if array.len(struct.borrow(old,field=loras)) != 0 { return false }
+  let invalid_path = text.replace(encoded,"robot.safetensors","robot.ckpt")
+  match parameters.decode_krea(invalid_path) { ok(_) => { return false },err(_) => {}, }
+  let invalid_scale = text.replace(encoded,"0.75","1e100")
+  match parameters.decode_krea(invalid_scale) { ok(_) => { return false },err(_) => {}, }
+  let outside_ui = text.replace(encoded,"0.75","25")
+  match parameters.decode_krea(outside_ui) { ok(_) => { return false },err(_) => {}, }
+  let below_ui = text.replace(encoded,"0.75","-10.01")
+  match parameters.decode_krea(below_ui) { ok(_) => { return false },err(_) => {}, }
+  let minimum_ui = text.replace(encoded,"0.75","-10")
+  match parameters.decode_krea(minimum_ui) { ok(_) => {},err(_) => { return false }, }
+  let maximum_ui = text.replace(encoded,"0.75","10")
+  match parameters.decode_krea(maximum_ui) { ok(_) => {},err(_) => { return false }, }
+  let invalid_toggle = text.replace(encoded,"\"enabled\":true","\"enabled\":1")
+  match parameters.decode_krea(invalid_toggle) { ok(_) => { return false },err(_) => {}, }
+  let malformed = text.replace(legacy,"\"output\":","\"loras\":{},\"output\":")
+  match parameters.decode_krea(malformed) { ok(_) => { return false },err(_) => {}, }
+  let null_loras = text.replace(legacy,"\"output\":","\"loras\":null,\"output\":")
+  match parameters.decode_krea(null_loras) { ok(_) => { return false },err(_) => {}, }
+  let missing_strength = text.replace(encoded,"\"strength\":0.75,","")
+  match parameters.decode_krea(missing_strength) { ok(_) => { return false },err(_) => {}, }
+  let infinity_bits: u64 = 9218868437227405312
+  let infinity: f64 = cast.bits(infinity_bits)
+  struct.set(array.borrow(entries,0),infinity,field=strength)
+  match parameters.validate_loras(entries) { ok(_) => { return false },err(_) => {}, }
+  true
+}
+
 fn geometry_round_trip(width: u64, height: u64, seconds: f64,
                        frames: u64) -> bool effects {alloc} {
   var refs: array<string> = []
@@ -27,8 +83,9 @@ fn geometry_round_trip(width: u64, height: u64, seconds: f64,
 }
 
 pub fn main(args: view<str>) -> i32 effects {alloc} {
+  if not lora_round_trip() { return 1 }
   var krea = parameters.KreaRequest {prompt:"mechanical robot reference",seed:9007199254740993,
-    width:1024,height:1024,output:"/tmp/mm-air-krea.png"}
+    width:1024,height:1024,output:"/tmp/mm-air-krea.png",loras:[]}
   let krea_json = match parameters.encode_krea(krea) { ok(value) => value,err(_) => { return 1 }, }
   if not parameters.is_krea(krea_json) or parameters.is_krea("{}") { return 1 }
   var krea_restored = match parameters.decode_krea(krea_json) { ok(value) => value,err(_) => { return 1 }, }

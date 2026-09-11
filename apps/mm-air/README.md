@@ -103,3 +103,22 @@ Supported modes:
 
 The opt-in generation test follows the application's automatic output path.
 Only run one model-generation test at a time on a shared GPU.
+
+## Reference removal and Krea LoRAs
+
+Select a reference thumbnail and click Remove selected, or use Clear all references.
+These actions detach request entries; they never delete source media.
+
+Krea supports one active plain PEFT main-block LoRA overlay. Add LoRA opens the
+local LoRA folder; select the row to enable/disable it or edit strength (-10 to10),
+then remove it or clear the list when no longer wanted. Unsupported adapter
+formats are rejected explicitly. Existing parameter files remain compatible.
+
+Generation saves a parameter sidecar beside each result and links the request
+in history. Save parameters also uses an automatic filename in output/parameters;
+no filename dialog remains in Generate. Movie-project naming is separate.
+
+Native 4K/2x UI tests cover individual/all reference removal, LoRA strength/toggle/
+removal and saved-state reuse. The supplied rank64 Krea adapter completed a native
+1024x1024,8-step Generate in about55seconds with a valid PNG and parameter sidecar.
+This is execution evidence, not full-model numerical parity. The H3 Prompter is deferred.
