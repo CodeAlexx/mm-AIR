@@ -257,6 +257,16 @@ Focused native regressions (from the MM-Air repository):
 
 ```sh
 AIR_ROOT="$(cd "${AIR_ROOT:-../AIR}" && pwd)"
+"$AIR_ROOT/build-gcc15/bin/airproj" --project apps/mm-air \
+  --toolchain "$AIR_ROOT/build-gcc15" test
+
+# The library/history check accepts an owned scratch directory and optional
+# existing video/audio fixtures, so it is an explicit binary rather than an
+# argument-free airproj test target.
+"$AIR_ROOT/build-gcc15/bin/airc" run apps/mm-air/tests/library.ai \
+  --mode release --cc gcc-15 -- /tmp/mm-air-library-check \
+  /path/to/video.mp4 /path/to/audio.wav
+
 "$AIR_ROOT/build-gcc15/bin/airc" run apps/mm-air/tests/parameters.ai \
   --mode release --cc gcc-15
 

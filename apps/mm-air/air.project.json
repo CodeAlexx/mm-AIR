@@ -11,6 +11,10 @@
   "targets": {
     "bin": [
       {
+        "name": "mm-air-library-check",
+        "entry": "tests/library.ai"
+      },
+      {
         "name": "prompt-lab-8b-smoke",
         "entry": "tests/prompt_lab_8b_smoke.ai"
       },
@@ -27,10 +31,6 @@
       {
         "name": "h3-library-import",
         "entry": "tests/h3_library_import.ai"
-      },
-      {
-        "name": "library",
-        "entry": "tests/library.ai"
       },
       {
         "name": "parameters",
