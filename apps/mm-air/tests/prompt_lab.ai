@@ -1,0 +1,34 @@
+module app.mm_air.tests.prompt_lab
+import "../prompt_lab.ai" as lab
+import "../.air/deps/prompt/types.ai" as prompt
+import std.files as files
+
+fn expect(value: bool) -> unit effects {io.write} {
+  if not value { panic "MM-Air Prompt Lab contract failed" }
+}
+
+pub fn main(args: view<str>) -> i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,process} {
+  expect(lab.model(0) == prompt.ModelChoice.Qwen3VL4B)
+  expect(lab.model(1) == prompt.ModelChoice.Qwen3VL8B)
+  expect(lab.model(2) == prompt.ModelChoice.Qwen3VL32B)
+  expect(lab.task(2) == prompt.Task.ImageCaption)
+  expect(lab.task(3) == prompt.Task.VideoCaption)
+  expect(lab.task(4) == prompt.Task.ShotList)
+  expect(lab.route_generate("old","new",false) == "new")
+  expect(lab.route_generate("old","new",true) == "old\n\nnew")
+  expect(lab.route_movie("[Shot 1] Wide") == "[Shot 1] Wide")
+  let cancel_path="/tmp/mm-air-prompt-cancel-contract.signal"
+  let absent=result.is_ok(files.remove(cancel_path))
+  expect(lab.cancel(cancel_path))
+  var cancelled=prompt.request(prompt.ModelChoice.Qwen3VL4B,prompt.Task.Prompt,
+    prompt.Transform.None,"do not run",[],[])
+  let old_path:string=ref.swap(struct.borrow(cancelled,field=cancel_path),
+    string.copy(cancel_path))
+  var job=lab.Job {request:cancelled,manifest_directory:string.copy("/tmp/none")}
+  var outcome=lab.run(job)
+  expect(not outcome.succeeded and outcome.message=="Qwen request cancelled before load")
+  let cleaned=result.is_ok(files.remove(cancel_path))
+  io.write("MM-Air Prompt Lab routing and cancellation PASS\n")
+  0
+}

@@ -27,7 +27,8 @@ if [[ ${1:-} != --inside ]]; then
     rm -rf -- "$scratch"
   }
   trap cleanup EXIT
-  mkdir -p "$scratch/data/mm-air" "$scratch/cache"
+  mkdir -p "$scratch/data/mm-air" "$scratch/cache" "$scratch/config"
+  printf 'XDG_DOWNLOAD_DIR="%s/downloads"\n' "$scratch" > "$scratch/config/user-dirs.dirs"
   jq -n --arg first "$6" --arg second "$7" \
     '{schema:"mm-air.generate.history",version:1,items:[
       {path:$first,thumbnail:"",parameters:"{}"},
@@ -42,7 +43,7 @@ if [[ ${1:-} != --inside ]]; then
   env DISPLAY=":$display_number" GDK_BACKEND=x11 \
     GDK_SCALE="${MM_AIR_TEST_SCALE:-1}" GSK_RENDERER=cairo LIBGL_ALWAYS_SOFTWARE=1 GDK_DEBUG=no-portals \
     GTK_A11Y=atspi GIO_USE_VFS=local \
-    XDG_DATA_HOME="$scratch/data" XDG_CACHE_HOME="$scratch/cache" \
+    XDG_DATA_HOME="$scratch/data" XDG_CACHE_HOME="$scratch/cache" XDG_CONFIG_HOME="$scratch/config" \
     bash "$0" --inside "$scratch" "$1" "$2" "$4" "$5" "$6" "$7"
   exit
 fi
@@ -517,3 +518,24 @@ sleep 0.3
 }
 [[ $(preview_path) == "$second_path" ]] || { echo "FAIL: click did not update the native preview clip" >&2; exit 1; }
 echo "PASS: pointer hover preserves selection and preview; one click selects and previews the other clip"
+if [[ ${MM_AIR_TEST_COPY_DOWNLOADS:-0} == 1 ]]; then
+  cache=$(call /org/a11y/atspi/cache org.a11y.atspi.Cache GetItems)
+  copy_button=$(jq -r '.data[0][] | select(.[6] == "Copy to Downloads" and .[7] == 43) | .[0][1]' <<< "$cache")
+  [[ -n $copy_button ]]
+  for click in 1 2; do
+    call "$copy_button" org.a11y.atspi.Action DoAction i 0 >/dev/null
+    for ((attempt=0;attempt<100;attempt++)); do
+      [[ $(rg -c '^mm-air copied=' "$scratch/app.out" || true) -ge $click ]] && break
+      sleep 0.1
+    done
+  done
+  mapfile -t copied < <(sed -n 's/^mm-air copied=//p' "$scratch/app.out")
+  [[ ${#copied[@]} == 2 && ${copied[0]} != "${copied[1]}" ]]
+  for destination in "${copied[@]}"; do
+    [[ $destination == "$scratch/downloads/"* ]]
+    cmp "$second_path" "$destination"
+  done
+  [[ -f $second_path ]]
+  [[ $(preview_path) == "$second_path" ]]
+  echo "PASS: Copy to Downloads action copies exact selected media bytes twice, preserves original/preview and avoids overwrite"
+fi

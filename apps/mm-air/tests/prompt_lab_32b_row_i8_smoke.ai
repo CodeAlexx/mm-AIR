@@ -1,0 +1,28 @@
+module app.mm_air.tests.prompt_lab_32b_row_i8_smoke
+import "../prompt_lab.ai" as lab
+import "../.air/deps/prompt/types.ai" as prompt
+import std.text as text
+
+pub fn main(args:view<str>) -> i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,process} {
+  if view.len(args)!=2 {
+    io.ewrite("usage: prompt-lab-32b-row-i8-smoke MANIFEST_DIRECTORY\n")
+    return 2
+  }
+  var request=prompt.request(lab.model(2),prompt.Task.Prompt,prompt.Transform.None,
+    "Reply with exactly one word: READY",[],[])
+  let old_max:u64=ref.swap(struct.borrow(request,field=maximum_new_tokens),8)
+  let old_temperature:f32=ref.swap(struct.borrow(request,field=temperature),0.0)
+  var job=lab.Job {request:request,manifest_directory:string.copy(view.get(args,1))}
+  var outcome=lab.run(job)
+  io.write(text.concat("succeeded=",if outcome.succeeded{"true\n"}else{"false\n"}))
+  io.write(text.concat("response=",text.concat(struct.borrow(outcome,field=response),"\n")))
+  io.write(text.concat("message=",text.concat(struct.borrow(outcome,field=message),"\n")))
+  io.write(text.concat("input_tokens=",text.concat(str.view(string.from_int(outcome.input_tokens)),"\n")))
+  io.write(text.concat("output_tokens=",text.concat(str.view(string.from_int(outcome.output_tokens)),"\n")))
+  io.write(text.concat("peak_device_bytes=",text.concat(str.view(string.from_int(outcome.peak_device_bytes)),"\n")))
+  io.write(text.concat("fully_unloaded=",if outcome.fully_unloaded{"true\n"}else{"false\n"}))
+  if not outcome.succeeded or not outcome.fully_unloaded or
+     outcome.response!="READY" or outcome.output_tokens!=1{return 1}
+  0
+}

@@ -113,6 +113,48 @@ add_custom_command(OUTPUT ${MM_AIR_H3_MANIFEST_OUTPUTS}
   VERBATIM)
 add_custom_target(mm_air_h3_manifests DEPENDS ${MM_AIR_H3_MANIFEST_OUTPUTS})
 
+# Prompt Lab manifests are produced by its reusable AIR toolkit, beside the
+# chosen compiler/runtime so the desktop worker can load exactly that ABI.
+string(JSON MM_AIR_PROMPT_DEPENDENCY_PATH ERROR_VARIABLE MM_AIR_PROMPT_PATH_ERROR
+  GET "${MM_AIR_PROJECT_JSON}" dependencies prompt path)
+if(NOT MM_AIR_PROMPT_PATH_ERROR STREQUAL "NOTFOUND")
+  message(FATAL_ERROR
+    "Cannot read dependencies.prompt.path from ${MM_AIR_PROJECT_FILE}: ${MM_AIR_PROMPT_PATH_ERROR}")
+endif()
+get_filename_component(MM_AIR_PROMPT_SOURCE_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/${MM_AIR_PROMPT_DEPENDENCY_PATH}" ABSOLUTE)
+if(NOT EXISTS "${MM_AIR_PROMPT_SOURCE_DIR}/write_manifests.ai")
+  message(FATAL_ERROR "MM-Air's prompt dependency must provide write_manifests.ai")
+endif()
+if(MM_AIR_TOOLCHAIN)
+  set(MM_AIR_PROMPT_MANIFEST_DIR_DEFAULT "${MM_AIR_TOOLCHAIN}/prompt-manifests")
+else()
+  set(MM_AIR_PROMPT_MANIFEST_DIR_DEFAULT "${CMAKE_BINARY_DIR}/prompt-manifests")
+endif()
+set(MM_AIR_PROMPT_MANIFEST_DIR "${MM_AIR_PROMPT_MANIFEST_DIR_DEFAULT}" CACHE PATH
+  "Generated Qwen3-VL Prompt Engine manifest directory")
+set(MM_AIR_PROMPT_MANIFEST_OUTPUTS
+  "${MM_AIR_PROMPT_MANIFEST_DIR}/qwen-static.json"
+  "${MM_AIR_PROMPT_MANIFEST_DIR}/qwen-static-8b.json"
+  "${MM_AIR_PROMPT_MANIFEST_DIR}/qwen-static-32b.json"
+  "${MM_AIR_PROMPT_MANIFEST_DIR}/qwen-layers.json"
+  "${MM_AIR_PROMPT_MANIFEST_DIR}/qwen-layers-32b-i8.json"
+  "${MM_AIR_PROMPT_MANIFEST_DIR}/qwen-vision-static.json"
+  "${MM_AIR_PROMPT_MANIFEST_DIR}/qwen-vision-layers.json"
+  "${MM_AIR_PROMPT_MANIFEST_DIR}/qwen-vision-layers-8b.json"
+  "${MM_AIR_PROMPT_MANIFEST_DIR}/qwen-vision-layers-32b.json")
+file(GLOB MM_AIR_PROMPT_MANIFEST_SOURCES CONFIGURE_DEPENDS
+  "${MM_AIR_PROMPT_SOURCE_DIR}/*.ai")
+add_custom_command(OUTPUT ${MM_AIR_PROMPT_MANIFEST_OUTPUTS}
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${MM_AIR_PROMPT_MANIFEST_DIR}"
+  COMMAND "${MM_AIR_AIRC}" run
+    "${MM_AIR_PROMPT_SOURCE_DIR}/write_manifests.ai"
+    --mode release --cc "${CMAKE_C_COMPILER}" --
+    "${MM_AIR_PROMPT_MANIFEST_DIR}"
+  DEPENDS ${MM_AIR_TOOL_DEPS} ${MM_AIR_PROMPT_MANIFEST_SOURCES}
+  VERBATIM)
+add_custom_target(mm_air_prompt_manifests DEPENDS ${MM_AIR_PROMPT_MANIFEST_OUTPUTS})
+
 add_custom_command(OUTPUT "${MM_AIR_BIN}"
   COMMAND ${CMAKE_COMMAND} -E make_directory "${MM_AIR_BUILD_DIR}"
   COMMAND "${MM_AIR_AIRPROJ}" --project "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -127,6 +169,7 @@ add_custom_command(OUTPUT "${MM_AIR_BIN}"
           "${CMAKE_CURRENT_SOURCE_DIR}/air.lock.json"
           "${CMAKE_CURRENT_SOURCE_DIR}/main.ai"
           "${CMAKE_CURRENT_SOURCE_DIR}/generate.ai"
+          "${CMAKE_CURRENT_SOURCE_DIR}/prompt_lab.ai"
   DEPFILE "${MM_AIR_BUILD_DIR}/main.d"
   BYPRODUCTS "${MM_AIR_BUILD_DIR}/build.json"
   VERBATIM)
@@ -145,6 +188,7 @@ add_custom_target(mm_air_desktop DEPENDS "${MM_AIR_BIN}"
   "${MM_AIR_SHARE}/desktop.ui" "${MM_AIR_SHARE}/desktop.css")
 add_dependencies(mm_air_desktop air_ui)
 add_dependencies(mm_air_desktop mm_air_h3_manifests)
+add_dependencies(mm_air_desktop mm_air_prompt_manifests)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME mm_air_contract

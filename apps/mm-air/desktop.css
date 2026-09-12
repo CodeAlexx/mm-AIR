@@ -27,6 +27,7 @@ window.mm-air-window,
 .control-page {
   background: @carbon;
 }
+.prompt-page { background: @carbon; }
 
 headerbar {
   min-height: 50px;
@@ -267,3 +268,38 @@ button { box-shadow: none; }
 scrollbar slider { min-width: 5px; min-height: 5px; background: #41494a; border-radius: 999px; }
 separator { background: @rule; }
 .generation-status { font-size: 14px; font-weight: 600; color: #efc078; padding-top: 6px; }
+
+.prompt-header {
+  background: #101415;
+  border: 1px solid @rule;
+  border-radius: 7px;
+  padding: 10px 12px;
+}
+.prompt-eyebrow { color: @cyan; font-size: 10px; font-weight: 850; letter-spacing: 1.5px; }
+.prompt-title { font-size: 21px; font-weight: 780; }
+.prompt-model-chip {
+  padding: 6px 10px;
+  border-radius: 999px;
+  color: @amber;
+  background: alpha(@amber, .13);
+  border: 1px solid alpha(@amber, .48);
+  font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+  font-size: 10px;
+  font-weight: 850;
+}
+.prompt-conversation, .prompt-workprint { background: @deck; }
+.prompt-transcript, .prompt-output, .prompt-compose, .prompt-controls {
+  background: @panel;
+  border: 1px solid @rule;
+  border-radius: 7px;
+}
+.prompt-compose > border { border: 0; }
+.prompt-output textview { font-family: "JetBrains Mono", "Cascadia Mono", monospace; }
+.prompt-controls { padding: 10px; }
+.prompt-transform {
+  background: alpha(@cyan, .08);
+  border: 1px solid alpha(@cyan, .35);
+  border-radius: 5px;
+  color: @cyan;
+}
+.prompt-transform:hover { background: alpha(@cyan, .15); }

@@ -1,0 +1,82 @@
+// Tab-specific worker around the reusable AIR Prompt Engine. It owns no UI
+// state and returns only after Qwen's context, stream and weights are closed.
+module app.mm_air.prompt_lab
+import ".air/deps/prompt/engine.ai" as engine
+import ".air/deps/prompt/runtime.ai" as runtime
+import ".air/deps/prompt/types.ai" as prompt
+import std.files as files
+
+pub type Job = struct { request: prompt.Request, manifest_directory: string }
+pub type Outcome = struct {
+  succeeded: bool,
+  response: string,
+  message: string,
+  input_tokens: u64,
+  output_tokens: u64,
+  peak_device_bytes: u64,
+  fully_unloaded: bool
+}
+
+fn failure(message: str) -> Outcome effects {alloc} {
+  Outcome {succeeded:false,response:string.new(),message:string.copy(message),
+    input_tokens:0,output_tokens:0,peak_device_bytes:0,fully_unloaded:true}
+}
+
+pub fn model(index: u32) -> prompt.ModelChoice effects {} {
+  if index == 1 { return prompt.ModelChoice.Qwen3VL8B }
+  if index == 2 { return prompt.ModelChoice.Qwen3VL32B }
+  prompt.ModelChoice.Qwen3VL4B
+}
+
+pub fn task(index: u32) -> prompt.Task effects {} {
+  if index == 1 { return prompt.Task.Variations }
+  if index == 2 { return prompt.Task.ImageCaption }
+  if index == 3 { return prompt.Task.VideoCaption }
+  if index == 4 { return prompt.Task.ShotList }
+  if index == 5 { return prompt.Task.ContinuityNotes }
+  if index == 6 { return prompt.Task.ScenePlan }
+  if index == 7 { return prompt.Task.DirectorNotes }
+  prompt.Task.Prompt
+}
+
+// Pure routing helpers keep Generate/Movie integration testable without GTK.
+pub fn route_generate(current: str, produced: str, append: bool) -> string effects {alloc} {
+  if not append or str.len(current) == 0 { return string.copy(produced) }
+  var output = string.copy(current)
+  string.append(output,"\n\n")
+  string.append(output,produced)
+  output
+}
+
+pub fn route_movie(produced: str) -> string effects {alloc} {
+  string.copy(produced)
+}
+
+pub fn cancel(path:str) -> bool effects {alloc,fs.write} {
+  result.is_ok(files.write_text(path,"cancelled\n"))
+}
+
+pub fn run(job: Job own) -> Outcome
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,process} {
+  var owned = job
+  let manifest_directory = string.copy(struct.borrow(owned,field=manifest_directory))
+  let request = struct.borrow(owned,field=request)
+  var availability = runtime.discover(request.model)
+  if not availability.available {
+    return failure(struct.borrow(availability,field=reason))
+  }
+  var sources = engine.sources(availability,
+    str.view(manifest_directory))
+  match engine.generate(sources,request) {
+    err(message) => failure(str.view(message)),
+    ok(value) => {
+      var response = value
+      Outcome {succeeded:true,
+        response:string.copy(struct.borrow(response,field=content)),
+        message:string.copy("Qwen response complete; model synchronized and unloaded"),
+        input_tokens:response.input_tokens,output_tokens:response.output_tokens,
+        peak_device_bytes:response.peak_device_bytes,
+        fully_unloaded:response.fully_unloaded}
+    },
+  }
+}

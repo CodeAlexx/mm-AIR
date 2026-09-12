@@ -2,6 +2,7 @@
 module app.mm_air.main
 import "../../toolkits/desktop/ui.ai" as desk
 import std.files as files
+import std.desktop as desktop
 import std.path as path
 import std.text as text
 import std.json as json
@@ -16,6 +17,91 @@ import ".air/deps/h3/media.ai" as h3_media
 import "generate.ai" as generation
 import "parameters.ai" as parameters
 import "library.ai" as library
+import "prompt_lab.ai" as prompt_lab
+import ".air/deps/prompt/types.ai" as prompt_types
+import ".air/deps/prompt/session.ai" as prompt_session
+import ".air/deps/prompt/persistence.ai" as prompt_persistence
+import ".air/deps/prompt/runtime.ai" as prompt_runtime
+
+fn prompt_role(role: prompt_types.Role) -> string effects {alloc} {
+  string.copy(match role { System => "SYSTEM", User => "YOU", Assistant => "QWEN" })
+}
+
+fn show_prompt_session(session: ref<desk.Session>, state: ref<prompt_session.Session>)
+    -> unit effects {alloc,net,time} {
+  var transcript = string.new()
+  let turns = struct.borrow(state,field=conversation)
+  var index: u64 = 0
+  loop {
+    if index >= array.len(turns) { break }
+    let turn = array.borrow(turns,index)
+    if index != 0 { string.append(transcript,"\n\n") }
+    var role_name = prompt_role(turn.role)
+    string.append(transcript,str.view(role_name))
+    string.append(transcript,"  ·  ")
+    string.append(transcript,struct.borrow(turn,field=content))
+    index = index + 1
+  }
+  if array.len(turns) == 0 {
+    string.append(transcript,"Start with a rough idea, then ask Qwen to refine it. Conversation context stays in this session.")
+  }
+  let _ = desk.set_text(session,"prompt_chat_buffer",str.view(transcript))
+  let attachments = struct.borrow(state,field=attachments)
+  var summary = string.new()
+  index = 0
+  loop {
+    if index >= array.len(attachments) { break }
+    let item = array.borrow(attachments,index)
+    if index != 0 { string.append(summary,"  ·  ") }
+    string.append(summary,"#")
+    string.append(summary,str.view(string.from_int(item.ordinal)))
+    string.append(summary,if item.kind == prompt_types.AttachmentKind.Image {" image · "} else {" video · "})
+    string.append(summary,str.view(path.basename(struct.borrow(item,field=path))))
+    index = index + 1
+  }
+  if array.len(attachments) == 0 { string.append(summary,"No references") }
+  let _ = desk.set_text(session,"prompt_attachment_summary",str.view(summary))
+  let _ = desk.set_bool(session,"prompt_clear_attachments","sensitive",array.len(attachments) != 0)
+  ()
+}
+
+fn show_prompt_model(session: ref<desk.Session>, index: u32)
+    -> unit effects {alloc,env,fs.meta,fs.read,net,time} {
+  let selected = prompt_lab.model(index)
+  var availability = prompt_runtime.discover(selected)
+  let _ = desk.set_text(session,"prompt_model_badge",
+    if index == 0 {"QWEN3-VL 4B"} else if index == 1 {"QWEN3-VL 8B"} else {"QWEN3-VL 32B"})
+  var status = if availability.available {
+    string.copy(struct.borrow(availability,field=strategy))
+  } else { string.copy(struct.borrow(availability,field=reason)) }
+  let _ = desk.set_text(session,"prompt_availability",str.view(status))
+  let _ = desk.set_bool(session,"prompt_run","sensitive",availability.available)
+  ()
+}
+
+fn save_prompt_state(state: ref<prompt_session.Session>, directory: str, unique: bool)
+    -> result<string,string> effects {alloc,fs.meta,fs.write,time} {
+  let folder = path.join(directory,"prompt-history")
+  match files.mkdirs(str.view(folder)) {
+    ok(_) => {}, err(problem) => { return result.err(string.copy(fs.error.message(problem))) },
+  }
+  var filename = path.join(str.view(folder),"latest.json")
+  if unique {
+    filename = path.join(str.view(folder),text.concat("prompt-",text.concat(
+      str.view(string.from_int(time.monotonic_ns())),".json")))
+  }
+  let encoded = try prompt_persistence.encode(state)
+  match files.write_atomic(str.view(filename),text.concat(str.view(filename),".tmp"),str.view(encoded)) {
+    ok(_) => result.ok(filename),
+    err(problem) => result.err(string.copy(fs.error.message(problem))),
+  }
+}
+
+fn copy_result(source: string own) -> result<string, string>
+    effects {alloc,env,fs.read,fs.write,fs.meta} {
+  let owned: string = source
+  desktop.copy_to_downloads(owned)
+}
 
 fn item_paths(source: ref<array<library.Item>>) -> array<string> effects {alloc} {
   var out: array<string> = []
@@ -325,6 +411,7 @@ fn show_result(session: ref<desk.Session>, filename: str) -> unit effects {alloc
   let _ = desk.set_text(session, "gen_batch_detail", filename)
   let _ = desk.set_text(session, "gen_selected_result", path.basename(filename))
   let _ = desk.set_bool(session, "gen_reuse_parameters", "sensitive", true)
+  let _ = desk.set_bool(session, "gen_copy_downloads", "sensitive", true)
   let _ = desk.set_bool(session, "gen_use_image_reference", "sensitive", is_image)
 }
 
@@ -343,6 +430,7 @@ fn show_source(session: ref<desk.Session>, filename: str) -> unit
         let _ = desk.set_bool(session, "result_empty_title", "visible", false)
       } else { show_result(session, filename) }
       let _ = desk.set_bool(session, "gen_reuse_parameters", "sensitive", false)
+      let _ = desk.set_bool(session, "gen_copy_downloads", "sensitive", false)
       let _ = desk.set_bool(session, "gen_use_image_reference", "sensitive", false)
       let _ = desk.set_text(session, "gen_selected_result", path.basename(filename))
     },
@@ -395,8 +483,10 @@ fn select_mode(session: ref<desk.Session>, mode: str) -> unit effects {alloc,net
   let _ = desk.set_bool(session, "nav_generate", "active", mode == "generate")
   let _ = desk.set_bool(session, "nav_movie", "active", mode == "movie")
   let _ = desk.set_bool(session, "nav_control", "active", mode == "control")
+  let _ = desk.set_bool(session, "nav_prompt", "active", mode == "prompt")
   let title: str = if mode == "movie" { "Movie Maker" }
     else if mode == "control" { "H3 ControlNet" }
+    else if mode == "prompt" { "Prompt Lab / Director" }
     else { "Generate" }
   let _ = desk.set_text(session, "active_mode", title)
   let _ = desk.set_text(session, "status", text.concat(title, " ready"))
@@ -554,6 +644,17 @@ pub fn main(args: view<str>) -> i32
   var generation_started: u64 = 0
   var seed: i64 = 42
   var seed_valid: bool = true
+  var prompt_state = prompt_session.create(prompt_types.ModelChoice.Qwen3VL4B)
+  var prompt_instruction: string = string.copy("Expand this into a cinematic H3 prompt.")
+  var prompt_model_index: u32 = 0
+  var prompt_task_index: u32 = 0
+  var prompt_transform: prompt_types.Transform = prompt_types.Transform.ExpandH3
+  var prompt_started: u64 = 0
+  var prompt_cancel_path: string = string.new()
+  let prompt_manifest_directory: string = match env.get("MM_AIR_PROMPT_MANIFEST_ROOT") {
+    some(value) => string.copy(value),
+    none => path.join(path.dirname(bindir),"prompt-manifests"),
+  }
 
   var session: desk.Session = match desk.prepare(helper, layout, css) {
     ok(found) => found,
@@ -563,6 +664,8 @@ pub fn main(args: view<str>) -> i32
   task.scope {
     var hosts: array<task<proc.Exit>> = [task.spawn(desk.plan(session), fn=proc.start)]
     var generations: array<task<generation.Outcome>> = array.new()
+    var copies: array<task<result<string, string>>> = array.new()
+    var prompt_jobs: array<task<prompt_lab.Outcome>> = array.new()
     var progress_receivers: array<channel.Receiver> = array.new()
     match desk.connect(session) {
       err(problem) => { result_code = fail(problem) },
@@ -570,6 +673,7 @@ pub fn main(args: view<str>) -> i32
         let _ = desk.shortcut(session, "<Control>1", "show_generate")
         let _ = desk.shortcut(session, "<Control>2", "show_movie")
         let _ = desk.shortcut(session, "<Control>3", "show_control")
+        let _ = desk.shortcut(session, "<Control>4", "show_prompt")
         let _ = desk.shortcut(session, "<Control>o", "choose_reference")
         let _ = desk.shortcut(session, "<Control>l", "choose_last_reference")
         let _ = desk.shortcut(session, "<Control><Shift>o", "choose_control")
@@ -584,6 +688,8 @@ pub fn main(args: view<str>) -> i32
         select_mode(session, "generate")
         source_widgets(session, task_index)
         show_items(session, "gen_history", history)
+        show_prompt_session(session,prompt_state)
+        show_prompt_model(session,prompt_model_index)
         let _ = desk.set_bool(session, "gen_history_empty", "visible", array.len(history) == 0)
         loop {
           if pending_parameters != "" {
@@ -700,6 +806,21 @@ pub fn main(args: view<str>) -> i32
             }
             pending_parameters = string.new()
           }
+          if array.len(copies) != 0 {
+            match task.wait_any(copies, 0) {
+              some(_) => {
+                match task.join(option.unwrap(array.pop(copies))) {
+                  ok(destination) => {
+                    let _ = desk.set_text(session, "status", text.concat("Copied to: ", destination))
+                    io.write(text.concat("mm-air copied=", text.concat(destination, "\n")))
+                  },
+                  err(message) => { let _ = desk.set_text(session, "status", message)
+                    io.ewrite(text.concat(message, "\n")) },
+                }
+              },
+              none => {},
+            }
+          }
           if array.len(progress_receivers) != 0 {
             var drained: u64 = 0
             loop {
@@ -776,6 +897,46 @@ pub fn main(args: view<str>) -> i32
                   let _ = desk.set_text(session, "gen_run_state", "Failed")
                   io.ewrite(text.concat("mm-air generation failed: ",
                     text.concat(str.view(struct.borrow(completed, field=message)), "\n")))
+                }
+              },
+              none => {},
+            }
+          }
+          if array.len(prompt_jobs) != 0 {
+            let elapsed = (time.monotonic_ns() - prompt_started) / 1000000000
+            let _ = desk.set_text(session,"prompt_metrics",text.concat(
+              "Qwen running · ",text.concat(str.view(string.from_int(elapsed))," s")))
+            match task.wait_any(prompt_jobs,0) {
+              some(_) => {
+                var completed = task.join(option.unwrap(array.pop(prompt_jobs)))
+                let _ = desk.set_bool(session,"prompt_cancel","sensitive",false)
+                if str.len(str.view(prompt_cancel_path)) != 0 {
+                  let removed=result.is_ok(files.remove(str.view(prompt_cancel_path)))
+                  prompt_cancel_path=string.new()
+                }
+                show_prompt_model(session,prompt_model_index)
+                if completed.succeeded and completed.fully_unloaded {
+                  let _ = ref.swap(struct.borrow(prompt_state,field=current_result),
+                    string.copy(struct.borrow(completed,field=response)))
+                  prompt_session.add_turn(prompt_state,prompt_types.Role.Assistant,
+                    struct.borrow(completed,field=response))
+                  let _ = desk.set_text(session,"prompt_output_buffer",
+                    struct.borrow(completed,field=response))
+                  show_prompt_session(session,prompt_state)
+                  let mebibytes: u64 = completed.peak_device_bytes / 1048576
+                  let _ = desk.set_text(session,"prompt_metrics",text.concat(
+                    str.view(string.from_int(completed.input_tokens)),text.concat(
+                    " in · ",text.concat(str.view(string.from_int(completed.output_tokens)),
+                    text.concat(" out · peak ",text.concat(str.view(string.from_int(mebibytes))," MiB"))))))
+                  let _ = desk.set_text(session,"prompt_residency","UNLOADED · H3 SAFE")
+                  let _ = desk.set_text(session,"status",struct.borrow(completed,field=message))
+                  match save_prompt_state(prompt_state,str.view(output_directory),false) {
+                    ok(_) => {}, err(message) => { io.ewrite(text.concat(message,"\n")) },
+                  }
+                } else {
+                  let _ = desk.set_text(session,"prompt_residency","UNLOADED · REQUEST FAILED")
+                  let _ = desk.set_text(session,"prompt_metrics","No result admitted")
+                  let _ = desk.set_text(session,"status",struct.borrow(completed,field=message))
                 }
               },
               none => {},
@@ -873,6 +1034,41 @@ pub fn main(args: view<str>) -> i32
                 }
                 }
               }
+              if id == "prompt_attach" {
+                var chosen = desk.dialog_paths(event)
+                var choice: u64 = 0
+                loop {
+                  if choice >= array.len(chosen) { break }
+                  if array.len(struct.borrow(prompt_state,field=attachments)) >= 8 {
+                    let _ = desk.set_text(session,"status","Prompt Lab accepts at most eight ordered references")
+                    break
+                  }
+                  let filename = array.borrow(chosen,choice)
+                  choice = choice + 1
+                  match media.inspect(str.view(filename),8589934592) {
+                    err(problem) => { var held: media.Error = problem
+                      let _ = desk.set_text(session,"status",media_error(held)) },
+                    ok(info) => {
+                      if info.kind == media.Kind.Image {
+                        prompt_session.attach(prompt_state,str.view(filename),
+                          prompt_types.AttachmentKind.Image)
+                        prompt_task_index = 2
+                      } else if info.kind == media.Kind.Video {
+                        prompt_session.attach(prompt_state,str.view(filename),
+                          prompt_types.AttachmentKind.Video)
+                        prompt_task_index = 3
+                      } else {
+                        let _ = desk.set_text(session,"status","Prompt Lab accepts image and video references")
+                      }
+                    },
+                  }
+                }
+                let _ = ref.swap(struct.borrow(prompt_state,field=task),
+                  prompt_lab.task(prompt_task_index))
+                let _ = desk.set_number(session,"prompt_task","selected",
+                  cast.float(prompt_task_index))
+                show_prompt_session(session,prompt_state)
+              }
               if id == "choose_reference" {
                 if accept_media(session, id, str.view(selected)) {
                   reference_media = text.copy(str.view(selected))
@@ -937,6 +1133,8 @@ pub fn main(args: view<str>) -> i32
             continue }
           if id == "show_control" { select_mode(session, "control")
             continue }
+          if id == "show_prompt" { select_mode(session, "prompt")
+            continue }
           if kind == "change" and desk.boolean(event, "value") {
             if id == "nav_generate" { select_mode(session, "generate")
               continue }
@@ -944,8 +1142,28 @@ pub fn main(args: view<str>) -> i32
               continue }
             if id == "nav_control" { select_mode(session, "control")
               continue }
+            if id == "nav_prompt" { select_mode(session, "prompt")
+              continue }
           }
           if kind == "change" {
+            if id == "prompt_input" {
+              prompt_instruction = desk.field(event,"value")
+            }
+            if id == "prompt_output" {
+              let _ = ref.swap(struct.borrow(prompt_state,field=current_result),
+                desk.field(event,"value"))
+            }
+            if id == "prompt_model" {
+              prompt_model_index = cast.sat(desk.number(event,"value"))
+              let _ = ref.swap(struct.borrow(prompt_state,field=model),
+                prompt_lab.model(prompt_model_index))
+              show_prompt_model(session,prompt_model_index)
+            }
+            if id == "prompt_task" {
+              prompt_task_index = cast.sat(desk.number(event,"value"))
+              let _ = ref.swap(struct.borrow(prompt_state,field=task),
+                prompt_lab.task(prompt_task_index))
+            }
             if id == "gen_lora_strength" and selected_lora < array.len(krea_loras) {
               struct.set(array.borrow(krea_loras,selected_lora),desk.number(event,"value"),field=strength)
             }
@@ -1062,6 +1280,146 @@ pub fn main(args: view<str>) -> i32
             continue
           }
           if kind == "action" {
+            if id == "prompt_cancel" {
+              if array.len(prompt_jobs) == 0 or str.len(str.view(prompt_cancel_path)) == 0 {
+                let _ = desk.set_text(session,"status","No Qwen request is running")
+              } else if prompt_lab.cancel(str.view(prompt_cancel_path)) {
+                let _ = desk.set_bool(session,"prompt_cancel","sensitive",false)
+                let _ = desk.set_text(session,"prompt_metrics","Cancellation requested · unloading at the next safe phase boundary")
+                let _ = desk.set_text(session,"status","Cancelling Qwen; H3 remains blocked until teardown completes")
+              } else {
+                let _ = desk.set_text(session,"status","Qwen cancellation was already requested")
+              }
+              continue
+            }
+            if id == "prompt_attach" {
+              let _ = desk.dialog_multiple(session,id,"Add ordered image or video references","")
+              continue
+            }
+            if id == "prompt_clear_attachments" {
+              prompt_session.clear_attachments(prompt_state)
+              show_prompt_session(session,prompt_state)
+              let _ = desk.set_text(session,"status","Prompt Lab references cleared; source files kept")
+              continue
+            }
+            if id == "prompt_new_session" {
+              prompt_state = prompt_session.create(prompt_lab.model(prompt_model_index))
+              let _ = ref.swap(struct.borrow(prompt_state,field=task),
+                prompt_lab.task(prompt_task_index))
+              prompt_instruction = string.new()
+              let _ = desk.set_text(session,"prompt_input_buffer","")
+              let _ = desk.set_text(session,"prompt_output_buffer","Your current production-ready result will appear here.")
+              show_prompt_session(session,prompt_state)
+              let _ = desk.set_text(session,"status","New Prompt Lab session")
+              continue
+            }
+            if id == "prompt_preserve" {
+              prompt_session.preserve(prompt_state)
+              let _ = desk.set_text(session,"status",text.concat("Variant preserved · ",
+                str.view(string.from_int(array.len(struct.borrow(prompt_state,field=saved_results))))))
+              continue
+            }
+            if id == "prompt_save" {
+              prompt_session.preserve(prompt_state)
+              match save_prompt_state(prompt_state,str.view(output_directory),true) {
+                ok(filename) => { let _ = desk.set_text(session,"status",text.concat("Prompt session saved: ",str.view(filename))) },
+                err(message) => { let _ = desk.set_text(session,"status",message) },
+              }
+              continue
+            }
+            if id == "prompt_send_generate" or id == "prompt_replace" or
+               id == "prompt_append" {
+              let result = struct.borrow(prompt_state,field=current_result)
+              if str.len(result) == 0 {
+                let _ = desk.set_text(session,"status","Prompt Lab has no current result to send")
+                continue
+              }
+              prompt = prompt_lab.route_generate(str.view(prompt),result,
+                id == "prompt_append")
+              let _ = desk.set_text(session,"gen_prompt_buffer",str.view(prompt))
+              let _ = desk.set_text(session,"status",if id == "prompt_append" {
+                "Prompt Lab result appended to Generate"} else {"Prompt Lab result replaced the Generate prompt"})
+              if id == "prompt_send_generate" { select_mode(session,"generate") }
+              continue
+            }
+            if id == "prompt_send_movie" {
+              let result = struct.borrow(prompt_state,field=current_result)
+              if str.len(result) == 0 {
+                let _ = desk.set_text(session,"status","Prompt Lab has no current result to send")
+              } else {
+                var movie_prompt = prompt_lab.route_movie(result)
+                let _ = desk.set_text(session,"director_input_buffer",str.view(movie_prompt))
+                select_mode(session,"movie")
+                let _ = desk.set_text(session,"status","Prompt Lab result sent to Movie Maker Director")
+              }
+              continue
+            }
+            if id == "prepare_director" {
+              select_mode(session,"prompt")
+              prompt_task_index = 7
+              let _ = ref.swap(struct.borrow(prompt_state,field=task),prompt_types.Task.DirectorNotes)
+              let _ = desk.set_number(session,"prompt_task","selected",7.0)
+              let _ = desk.set_text(session,"status","Movie Director opened in Prompt Lab with Qwen3-VL 4B")
+              continue
+            }
+            if id == "prompt_expand" or id == "prompt_shorten" or
+               id == "prompt_cinematic" or id == "prompt_shot_list" {
+              prompt_transform = if id == "prompt_expand" {prompt_types.Transform.ExpandH3}
+                else if id == "prompt_shorten" {prompt_types.Transform.Shorten}
+                else if id == "prompt_cinematic" {prompt_types.Transform.Cinematic}
+                else {prompt_types.Transform.None}
+              if id == "prompt_shot_list" {
+                prompt_task_index = 4
+                let _ = ref.swap(struct.borrow(prompt_state,field=task),prompt_types.Task.ShotList)
+                let _ = desk.set_number(session,"prompt_task","selected",4.0)
+              }
+            }
+            if id == "prompt_run" or id == "prompt_expand" or
+               id == "prompt_shorten" or id == "prompt_cinematic" or
+               id == "prompt_shot_list" {
+              if array.len(prompt_jobs) != 0 {
+                let _ = desk.set_text(session,"status","A Qwen request is already running")
+                continue
+              }
+              if array.len(generations) != 0 {
+                let _ = desk.set_text(session,"status","Wait for H3/Krea generation before loading Qwen")
+                continue
+              }
+              if str.len(str.view(prompt_instruction)) == 0 {
+                let _ = desk.set_text(session,"status","Write a Prompt Lab instruction first")
+                continue
+              }
+              let selected_model = prompt_lab.model(prompt_model_index)
+              var availability = prompt_runtime.discover(selected_model)
+              if not availability.available {
+                let _ = desk.set_text(session,"status",struct.borrow(availability,field=reason))
+                continue
+              }
+              let _ = ref.swap(struct.borrow(prompt_state,field=model),selected_model)
+              let _ = ref.swap(struct.borrow(prompt_state,field=task),
+                prompt_lab.task(prompt_task_index))
+              var request = prompt_session.build_request(prompt_state,prompt_transform,
+                str.view(prompt_instruction))
+              prompt_cancel_path=text.concat("/tmp/mm-air-prompt-cancel-",text.concat(
+                str.view(string.from_int(time.monotonic_ns())),".signal"))
+              let old_cancel:string=ref.swap(struct.borrow(request,field=cancel_path),
+                string.copy(str.view(prompt_cancel_path)))
+              prompt_session.add_turn(prompt_state,prompt_types.Role.User,
+                str.view(prompt_instruction))
+              show_prompt_session(session,prompt_state)
+              prompt_started = time.monotonic_ns()
+              var work = prompt_lab.Job {request:request,
+                manifest_directory:string.copy(str.view(prompt_manifest_directory))}
+              array.push(prompt_jobs,task.spawn(work,fn=prompt_lab.run))
+              prompt_transform = prompt_types.Transform.None
+              let _ = desk.set_bool(session,"prompt_run","sensitive",false)
+              let _ = desk.set_bool(session,"prompt_cancel","sensitive",true)
+              let _ = desk.set_text(session,"prompt_residency","LOADING QWEN · H3 BLOCKED")
+              let _ = desk.set_text(session,"prompt_metrics","Checking VRAM and loading one AIR model")
+              let _ = desk.set_text(session,"status",text.concat("Starting ",
+                str.view(prompt_types.model_name(selected_model))))
+              continue
+            }
             if id == "gen_add_lora" {
               let folder = match env.get("HOME") {
                 some(value) => path.join(value,".serenity/models/loras"), none => string.new(),
@@ -1120,6 +1478,16 @@ pub fn main(args: view<str>) -> i32
             }
             if id == "gen_reuse_parameters" {
               pending_parameters = string.copy(saved_parameters)
+              continue
+            }
+            if id == "gen_copy_downloads" {
+              if str.len(selected_result) == 0 { continue }
+              if array.len(copies) != 0 {
+                let _ = desk.set_text(session, "status", "Copy to Downloads is still running")
+                continue
+              }
+              let _ = desk.set_text(session, "status", "Copying to Downloads…")
+              array.push(copies, task.spawn(string.copy(selected_result), fn=copy_result))
               continue
             }
             if id == "gen_use_image_reference" {
@@ -1241,6 +1609,10 @@ pub fn main(args: view<str>) -> i32
               continue
             }
             if id == "generate_action" or id == "gen_save_parameters" {
+              if id == "generate_action" and array.len(prompt_jobs) != 0 {
+                generation_status(session,"Wait for Qwen teardown before starting H3/Krea")
+                continue
+              }
               if not seed_valid {
                 generation_status(session,"Seed must be an integer (-1 for random)")
                 continue

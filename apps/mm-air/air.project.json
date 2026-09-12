@@ -9,6 +9,20 @@
     "namespace": "app.mm_air"
   },
   "targets": {
+    "bin": [
+      {
+        "name": "prompt-lab-8b-smoke",
+        "entry": "tests/prompt_lab_8b_smoke.ai"
+      },
+      {
+        "name": "prompt-lab-32b-row-i8-smoke",
+        "entry": "tests/prompt_lab_32b_row_i8_smoke.ai"
+      },
+      {
+        "name": "prompt-lab-32b-row-i8-video-smoke",
+        "entry": "tests/prompt_lab_32b_row_i8_video_smoke.ai"
+      }
+    ],
     "test": [
       {
         "name": "h3-library-import",
@@ -25,11 +39,16 @@
       {
         "name": "reference-preprocess",
         "entry": "tests/reference_preprocess.ai"
+      },
+      {
+        "name": "prompt-lab",
+        "entry": "tests/prompt_lab.ai"
       }
     ]
   },
   "sources": [
     "generate.ai",
+    "prompt_lab.ai",
     "library.ai",
     "parameters.ai",
     "tests"
@@ -40,6 +59,7 @@
     "airc": ">=0.1.0"
   },
   "dependencies": {
+    "prompt": {"path":"../../../AIR/toolkits/prompt","version":">=0.1.0"},
     "krea2": {"path":"../../../AIR/models/krea2","version":">=0.1.0"},
     "h3": {
       "path": "../../../AIR/models/h3",

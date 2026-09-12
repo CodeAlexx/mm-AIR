@@ -39,6 +39,15 @@
   <object class="GtkTextBuffer" id="control_prompt_buffer">
     <property name="text">A cinematic shot following the prepared motion map, with coherent subject movement, camera motion, ambience, and synchronized audio.</property>
   </object>
+  <object class="GtkTextBuffer" id="prompt_chat_buffer">
+    <property name="text">Start with a rough idea, then ask Qwen to refine it. Conversation context stays in this session.</property>
+  </object>
+  <object class="GtkTextBuffer" id="prompt_input_buffer">
+    <property name="text">Expand this into a cinematic H3 prompt.</property>
+  </object>
+  <object class="GtkTextBuffer" id="prompt_output_buffer">
+    <property name="text">Your current production-ready result will appear here.</property>
+  </object>
 
   <object class="GtkStringList" id="gen_model_list">
     <items><item>MiniMax H3 Base</item><item>MiniMax H3 Reference</item><item>Krea 2 Turbo</item></items>
@@ -75,6 +84,12 @@
   </object>
   <object class="GtkStringList" id="fit_list">
     <items><item>Center crop</item><item>Fit + pad</item><item>Stretch</item></items>
+  </object>
+  <object class="GtkStringList" id="prompt_model_list">
+    <items><item>Qwen3-VL 4B · ready</item><item>Qwen3-VL 8B · ready</item><item>Qwen3-VL 32B · ready · approximate row-I8</item></items>
+  </object>
+  <object class="GtkStringList" id="prompt_task_list">
+    <items><item>Final H3 prompt</item><item>Prompt variations</item><item>Image caption / prompt</item><item>Video caption / prompt</item><item>Shot list</item><item>Continuity notes</item><item>Scene plan</item><item>Director notes</item></items>
   </object>
 
   <object class="GtkWindow" id="window">
@@ -127,6 +142,12 @@
             <child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">5</property>
               <child><object class="GtkLabel"><property name="label">⌗</property><style><class name="mode-icon"/></style></object></child>
               <child><object class="GtkLabel"><property name="label">Control</property></object></child>
+            </object></child>
+          </object></child>
+          <child><object class="GtkToggleButton" id="nav_prompt"><property name="group">nav_generate</property><property name="tooltip-text">Prompt Lab · Ctrl+4</property><style><class name="mode-button"/></style>
+            <child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">5</property>
+              <child><object class="GtkLabel"><property name="label">⌁</property><style><class name="mode-icon"/></style></object></child>
+              <child><object class="GtkLabel"><property name="label">Prompt</property></object></child>
             </object></child>
           </object></child>
           <child><object class="GtkBox"><property name="vexpand">true</property></object></child>
@@ -286,6 +307,7 @@
                 <child><object class="GtkFrame"><property name="margin-start">11</property><property name="margin-end">11</property><property name="margin-bottom">11</property><style><class name="metadata-card"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">4</property><property name="margin-start">10</property><property name="margin-end">10</property><property name="margin-top">9</property><property name="margin-bottom">9</property>
                   <child><object class="GtkLabel"><property name="label">Selected result</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child>
                   <child><object class="GtkLabel" id="gen_selected_result"><property name="label">No result selected</property><property name="xalign">0</property><property name="ellipsize">middle</property><property name="max-width-chars">28</property><style><class name="muted"/></style></object></child>
+                  <child><object class="GtkButton" id="gen_copy_downloads"><style><class name="quiet-button"/></style><property name="label">Copy to Downloads</property><property name="sensitive">false</property></object></child>
                   <child><object class="GtkButton" id="gen_reuse_parameters"><style><class name="quiet-button"/></style><property name="label">Reuse parameters</property><property name="sensitive">false</property></object></child>
                   <child><object class="GtkButton" id="gen_use_image_reference"><style><class name="quiet-button"/></style><property name="label">Use image as H3 reference</property><property name="sensitive">false</property></object></child>
                 </object></child></object></child>
@@ -486,6 +508,62 @@
                     <child><object class="GtkBox"><property name="spacing">8</property><child><object class="GtkButton" id="control_action"><property name="label">Stage H3 CT Request</property><style><class name="control-primary"/></style></object></child><child><object class="GtkButton" id="cancel_control"><property name="label">Cancel</property><property name="sensitive">false</property><style><class name="quiet-button"/></style></object></child></object></child>
                   </object></child></object></child>
                 <layout><property name="column">1</property><property name="row">0</property></layout></object></child>
+              </object></child>
+            </object>
+          </property></object></child>
+
+          <!-- Prompt Lab: AIR-native Qwen conversation and production workprint -->
+          <child><object class="GtkStackPage"><property name="name">prompt</property><property name="child">
+            <object class="GtkBox"><property name="orientation">vertical</property><property name="vexpand">true</property><style><class name="prompt-page"/></style>
+              <child><object class="GtkBox"><property name="spacing">12</property><property name="margin-start">18</property><property name="margin-end">18</property><property name="margin-top">15</property><property name="margin-bottom">12</property><style><class name="prompt-header"/></style>
+                <child><object class="GtkBox"><property name="orientation">vertical</property><property name="hexpand">true</property>
+                  <child><object class="GtkLabel"><property name="label">PROMPT LAB / DIRECTOR</property><property name="xalign">0</property><style><class name="prompt-eyebrow"/></style></object></child>
+                  <child><object class="GtkLabel"><property name="label">Turn an idea or reference into an H3-ready workprint</property><property name="xalign">0</property><style><class name="prompt-title"/></style></object></child>
+                </object></child>
+                <child><object class="GtkLabel" id="prompt_model_badge"><property name="label">QWEN3-VL 4B</property><style><class name="prompt-model-chip"/></style></object></child>
+                <child><object class="GtkLabel" id="prompt_residency"><property name="label">UNLOADED · H3 SAFE</property><style><class name="ready-chip"/></style></object></child>
+              </object></child>
+              <child><object class="GtkPaned"><property name="orientation">horizontal</property><property name="vexpand">true</property><property name="position">650</property><property name="wide-handle">true</property>
+                <child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">10</property><property name="margin-start">16</property><property name="margin-end">12</property><property name="margin-bottom">14</property><style><class name="prompt-conversation"/></style>
+                  <child><object class="GtkBox"><child><object class="GtkLabel"><property name="label">CONVERSATION</property><property name="hexpand">true</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child><child><object class="GtkButton" id="prompt_new_session"><property name="label">New session</property><style><class name="quiet-button"/></style></object></child></object></child>
+                  <child><object class="GtkScrolledWindow"><property name="vexpand">true</property><style><class name="prompt-transcript"/></style><child><object class="GtkTextView" id="prompt_chat"><property name="buffer">prompt_chat_buffer</property><property name="editable">false</property><property name="cursor-visible">false</property><property name="wrap-mode">word-char</property><property name="top-margin">14</property><property name="bottom-margin">14</property><property name="left-margin">14</property><property name="right-margin">14</property></object></child></object></child>
+                  <child><object class="GtkFrame"><style><class name="prompt-compose"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">8</property><property name="margin-start">10</property><property name="margin-end">10</property><property name="margin-top">10</property><property name="margin-bottom">10</property>
+                    <child><object class="GtkScrolledWindow"><property name="min-content-height">88</property><child><object class="GtkTextView" id="prompt_input"><property name="buffer">prompt_input_buffer</property><property name="wrap-mode">word-char</property><property name="top-margin">8</property><property name="bottom-margin">8</property><property name="left-margin">8</property><property name="right-margin">8</property></object></child></object></child>
+                    <child><object class="GtkBox"><property name="spacing">7</property>
+                      <child><object class="GtkButton" id="prompt_attach"><property name="label">＋ Image / video</property><style><class name="dashed-button"/></style></object></child>
+                      <child><object class="GtkLabel" id="prompt_attachment_summary"><property name="label">No references</property><property name="hexpand">true</property><property name="xalign">0</property><property name="ellipsize">middle</property><style><class name="muted"/></style></object></child>
+                      <child><object class="GtkButton" id="prompt_clear_attachments"><property name="label">Clear</property><property name="sensitive">false</property><style><class name="quiet-button"/></style></object></child>
+                      <child><object class="GtkButton" id="prompt_cancel"><property name="label">Cancel</property><property name="sensitive">false</property><style><class name="quiet-button"/></style></object></child>
+                      <child><object class="GtkButton" id="prompt_run"><property name="label">Run Qwen</property><style><class name="primary-action"/></style></object></child>
+                    </object></child>
+                  </object></child></object></child>
+                </object></child>
+                <child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">10</property><property name="margin-start">12</property><property name="margin-end">16</property><property name="margin-bottom">14</property><style><class name="prompt-workprint"/></style>
+                  <child><object class="GtkBox"><child><object class="GtkLabel"><property name="label">CURRENT WORKPRINT</property><property name="hexpand">true</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child><child><object class="GtkButton" id="prompt_preserve"><property name="label">Preserve variant</property><style><class name="quiet-button"/></style></object></child></object></child>
+                  <child><object class="GtkScrolledWindow"><property name="vexpand">true</property><style><class name="prompt-output"/></style><child><object class="GtkTextView" id="prompt_output"><property name="buffer">prompt_output_buffer</property><property name="wrap-mode">word-char</property><property name="top-margin">16</property><property name="bottom-margin">16</property><property name="left-margin">16</property><property name="right-margin">16</property></object></child></object></child>
+                  <child><object class="GtkBox"><property name="spacing">7</property><property name="homogeneous">true</property>
+                    <child><object class="GtkButton" id="prompt_send_generate"><property name="label">Send to Generate</property><style><class name="primary-action"/></style></object></child>
+                    <child><object class="GtkButton" id="prompt_send_movie"><property name="label">Send to Movie Maker</property><style><class name="movie-primary"/></style></object></child>
+                    <child><object class="GtkButton" id="prompt_save"><property name="label">Save to History</property><style><class name="quiet-button"/></style></object></child>
+                  </object></child>
+                  <child><object class="GtkBox"><property name="spacing">7</property>
+                    <child><object class="GtkButton" id="prompt_replace"><property name="label">Replace current prompt</property><style><class name="quiet-button"/></style></object></child>
+                    <child><object class="GtkButton" id="prompt_append"><property name="label">Append to current prompt</property><style><class name="quiet-button"/></style></object></child>
+                  </object></child>
+                </object></child>
+              </object></child>
+              <child><object class="GtkBox"><property name="spacing">10</property><property name="margin-start">16</property><property name="margin-end">16</property><property name="margin-bottom">14</property><style><class name="prompt-controls"/></style>
+                <child><object class="GtkBox"><property name="orientation">vertical</property><property name="width-request">245</property><child><object class="GtkLabel"><property name="label">MODEL</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child><child><object class="GtkDropDown" id="prompt_model"><property name="model">prompt_model_list</property><property name="selected">0</property></object></child></object></child>
+                <child><object class="GtkBox"><property name="orientation">vertical</property><property name="width-request">250</property><child><object class="GtkLabel"><property name="label">OUTPUT MODE</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child><child><object class="GtkDropDown" id="prompt_task"><property name="model">prompt_task_list</property><property name="selected">0</property></object></child></object></child>
+                <child><object class="GtkBox"><property name="hexpand">true</property></object></child>
+                <child><object class="GtkButton" id="prompt_expand"><property name="label">Expand H3</property><style><class name="prompt-transform"/></style></object></child>
+                <child><object class="GtkButton" id="prompt_shorten"><property name="label">Shorten</property><style><class name="prompt-transform"/></style></object></child>
+                <child><object class="GtkButton" id="prompt_cinematic"><property name="label">Cinematic</property><style><class name="prompt-transform"/></style></object></child>
+                <child><object class="GtkButton" id="prompt_shot_list"><property name="label">Shot list</property><style><class name="prompt-transform"/></style></object></child>
+              </object></child>
+              <child><object class="GtkBox"><property name="spacing">9</property><property name="margin-start">16</property><property name="margin-end">16</property><property name="margin-bottom">10</property>
+                <child><object class="GtkLabel" id="prompt_availability"><property name="label">4B local · resident BF16 · one request at a time</property><property name="hexpand">true</property><property name="xalign">0</property><style><class name="capability-note"/></style></object></child>
+                <child><object class="GtkLabel" id="prompt_metrics"><property name="label">No request measured</property><style><class name="timecode-cyan"/></style></object></child>
               </object></child>
             </object>
           </property></object></child>
