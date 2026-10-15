@@ -43,7 +43,6 @@ import "movie_project.ai" as movie
 import ".air/deps/prompt/types.ai" as prompt_types
 import ".air/deps/prompt/session.ai" as prompt_session
 import ".air/deps/prompt/persistence.ai" as prompt_persistence
-import ".air/deps/prompt/media.ai" as prompt_media
 
 fn repair_cuts(value:str)->result<array<u64>,string> effects{alloc}{
   var out:array<u64> = []
@@ -418,6 +417,17 @@ fn geometry_preset(selected: u32, width: u64, height: u64) -> u32 effects {} {
   else { h3.resolution_custom() }
 }
 
+// Turbo runs its fixed 8 steps; show that in both Steps fields, and return to
+// the creator default when another schedule is chosen again.
+fn qwen_turbo_steps(session:ref<desk.Session>,scheduler:u32,steps:u64)->u64 effects{alloc,net,time}{
+  let turbo:bool=scheduler==qwen_image_contract.scheduler_turbo()
+  let next:u64=if turbo{qwen_image_contract.turbo_steps()}
+    else if steps==qwen_image_contract.turbo_steps(){qwen_image_contract.default_steps()}else{steps}
+  let _=desk.set_number(session,"qwen_image_steps","value",cast.float(next))
+  let _=desk.set_number(session,"qwen_edit_steps","value",cast.float(next))
+  next
+}
+
 fn show_qwen_recipe(session:ref<desk.Session>,scheduler:u32,sampler:u32)
     ->unit effects{alloc,net,time}{
   // Scheduler and sampler are already visible in their controls.
@@ -429,7 +439,8 @@ fn filter_parameters(session:ref<desk.Session>,query:str,model:u32,swap_mode:u32
   let wanted = text.lower_ascii(query)
   let krea:bool=model==parameters.krea_model_index()
   let qwen_image:bool=model==parameters.qwen_image_model_index()
-  let image_model:bool=krea or qwen_image
+  let flux:bool=model==parameters.flux3_model_index()
+  let image_model:bool=krea or qwen_image or flux
   let swap:bool=not image_model and character_swap.is_swap(swap_mode)
   let _ = desk.set_bool(session, "gen_model_group", "visible", wanted == "" or
     text.contains("model checkpoint base reference", wanted))
@@ -441,6 +452,8 @@ fn filter_parameters(session:ref<desk.Session>,query:str,model:u32,swap_mode:u32
       "h3 mode character swap source video replacement target identity qwen prompt",wanted)))
   let _ = desk.set_bool(session,"gen_lora_group","visible",krea and
     (wanted == "" or text.contains("krea lora overlay strength",wanted)))
+  let _=desk.set_bool(session,"gen_enhance_group","visible",(flux or qwen_image) and
+    (wanted=="" or text.contains("prompt enhance enhancer upsample upsampler rewrite",wanted)))
   let _=desk.set_bool(session,"gen_krea_sampling","visible",krea and
     (wanted=="" or text.contains("krea resolution schedule scheduler solver sampler steps",wanted)))
   let _ = desk.set_bool(session,"gen_seed_group","visible",wanted == "" or
@@ -455,10 +468,11 @@ fn filter_parameters(session:ref<desk.Session>,query:str,model:u32,swap_mode:u32
     text.contains("resolution width height duration seconds frames fps size geometry custom",wanted)))
   let _=desk.set_bool(session,"gen_resolution","visible",not image_model)
   let _=desk.set_bool(session,"gen_duration_row","visible",not image_model)
-  let _=desk.set_number(session,"gen_width_adjustment","lower",if krea{16.0}else{32.0})
-  let _=desk.set_number(session,"gen_height_adjustment","lower",if krea{16.0}else{32.0})
-  let _=desk.set_number(session,"gen_width_adjustment","step-increment",if krea{16.0}else{32.0})
-  let _=desk.set_number(session,"gen_height_adjustment","step-increment",if krea{16.0}else{32.0})
+  let sixteen:bool=krea or flux
+  let _=desk.set_number(session,"gen_width_adjustment","lower",if sixteen{16.0}else{32.0})
+  let _=desk.set_number(session,"gen_height_adjustment","lower",if sixteen{16.0}else{32.0})
+  let _=desk.set_number(session,"gen_width_adjustment","step-increment",if sixteen{16.0}else{32.0})
+  let _=desk.set_number(session,"gen_height_adjustment","step-increment",if sixteen{16.0}else{32.0})
   let _ = desk.set_bool(session,"gen_output_summary_group","visible",wanted == "" or
     text.contains("current output resolution image video fps",wanted))
   let _ = desk.set_bool(session,"gen_sources_group","visible",not image_model and
@@ -497,18 +511,23 @@ fn model_widgets(session: ref<desk.Session>, model:u32, sheet_mode: u32,
                  swap_mode: u32) -> unit effects {alloc,net,time} {
   let krea:bool=model==parameters.krea_model_index()
   let qwen_image:bool=model==parameters.qwen_image_model_index()
-  let image_model:bool=krea or qwen_image
+  let flux:bool=model==parameters.flux3_model_index()
+  let image_model:bool=krea or qwen_image or flux
   let swap: bool = not image_model and character_swap.is_swap(swap_mode)
   let masked: bool = not image_model and character_swap.is_masked(swap_mode)
   filter_parameters(session,"",model,swap_mode)
   let _ = desk.set_bool(session,"gen_swap_fields","visible",swap)
   let _ = desk.set_bool(session,"gen_masked_fields","visible",masked)
+  // Only Masked Swap asks Qwen for a prompt; unmasked Build Prompt writes
+  // the direct swap instruction without it.
+  let _ = desk.set_bool(session,"gen_swap_qwen_fields","visible",masked)
+  let _ = desk.set_bool(session,"gen_swap_qwen_note","visible",masked)
   let _ = desk.set_bool(session,"gen_sources_group","sensitive",not image_model and not swap)
   let sheet: bool = character_sheet.valid(sheet_mode)
-  let _ = desk.set_text(session,"generate_action",if qwen_image {"Generate Qwen PNG"} else if krea {"Generate Krea PNG"} else if sheet {"Generate H3 Character Sheet"} else if masked {"Generate Masked H3 Swap"} else if swap {"Generate H3 Character Swap"} else {"Generate H3 MP4"})
+  let _ = desk.set_text(session,"generate_action",if flux {"Generate FLUX 3 PNG"} else if qwen_image {"Generate Qwen PNG"} else if krea {"Generate Krea PNG"} else if sheet {"Generate H3 Character Sheet"} else if masked {"Generate Masked H3 Swap"} else if swap {"Generate H3 Character Swap"} else {"Generate H3 MP4"})
   let _ = desk.set_text(session,"gen_media_badge",if image_model {"Image"} else if sheet {"Sheet"} else if masked {"Masked"} else if swap {"Swap"} else {"Video"})
-  let _ = desk.set_text(session,"gen_stage_badge",if qwen_image {"Q21"} else if krea {"K2"} else {"H3"})
-  let _ = desk.set_text(session,"gen_stage_model",if qwen_image {"Qwen-Image-2.1 · native AIR session"} else if krea {"Krea 2 Turbo · native AIR session"} else {"MiniMax H3 · native AIR session"})
+  let _ = desk.set_text(session,"gen_stage_badge",if flux {"F3"} else if qwen_image {"Q21"} else if krea {"K2"} else {"H3"})
+  let _ = desk.set_text(session,"gen_stage_model",if flux {"FLUX 3 Image Klein · native AIR session"} else if qwen_image {"Qwen-Image-2.1 · native AIR session"} else if krea {"Krea 2 Turbo · native AIR session"} else {"MiniMax H3 · native AIR session"})
   let _ = desk.set_text(session,"gen_fps_badge",if image_model {"PNG"} else {"24 FPS"})
   let _ = desk.set_text(session,"gen_prompt_label",if swap {"Built Prompt · editable before Generate"} else {"Prompt"})
 }
@@ -517,8 +536,7 @@ fn clear_swap_source_ui(session: ref<desk.Session>) -> unit effects {alloc,net,t
   let _ = desk.picture(session,"gen_swap_source_preview","")
   let _ = desk.set_bool(session,"gen_swap_source_preview","visible",false)
   let _ = desk.set_text(session,"gen_swap_source_name","＋ Choose source video")
-  let _ = desk.set_text(session,"gen_swap_source_metadata",
-    "Required · Qwen samples at most 8 ordered frames")
+  let _ = desk.set_text(session,"gen_swap_source_metadata","Required")
   let _ = desk.set_bool(session,"gen_swap_clear_source","sensitive",false)
 }
 
@@ -532,7 +550,7 @@ fn show_swap_source(session: ref<desk.Session>, item: ref<library.Item>,
   let _ = desk.set_bool(session,"gen_swap_clear_source","sensitive",true)
   let work = path.join(system.temp_directory(),text.concat(
     "mm-air-character-swap-probe-",string.from_int(time.monotonic_ns())))
-  var detail = string.copy("Video selected · bounded ordered frame analysis")
+  var detail = string.copy("Video selected")
   match media_io.probe("/nonexistent/air-image-provider",filename,str.view(work)) {
     ok(info) => {
       let info_width: u64 = cast.sat(info.width)
@@ -546,14 +564,6 @@ fn show_swap_source(session: ref<desk.Session>, item: ref<library.Item>,
           string.append(detail," · ")
           string.append(detail,str.view(string.from_int(duration)))
           string.append(detail," ms")
-          match prompt_media.video(filename,duration) {
-            ok(plan) => { var held_plan = plan
-              string.append(detail," · Qwen ")
-              string.append(detail,str.view(string.from_int(prompt_media.sampled_frames(held_plan))))
-              string.append(detail," frames")
-            },
-            err(_) => {},
-          }
         },
         none => {},
       }
@@ -1312,6 +1322,12 @@ pub fn main(args: view<str>) -> i32
   var qwen_edit_selected:u64=0
   var qwen_edit_seed:u64=cast.wrap(random_seed())
   var qwen_edit_seed_locked:bool=false
+  // Image Edit model: false = Qwen-Image-2.1, true = FLUX 3 Image Klein.
+  var qwen_edit_flux:bool=false
+  var qwen_edit_match_source:bool=true
+  var qwen_edit_enhance:bool=true
+  // "Enhance prompt" on Generate: FLUX 3's upsampler or Qwen-Image's enhancer.
+  var enhance_prompt:bool=true
   var qwen_edit_prompt:string=text.copy(
     "Describe the requested change while preserving the source composition and identity.")
   var qwen_edit_width:u64=qwen_image_contract.default_width()
@@ -1838,7 +1854,7 @@ pub fn main(args: view<str>) -> i32
                       struct.borrow(completed,field=output))
                     let _=desk.set_bool(session,"qwen_edit_result_empty","visible",false)
                     let _=desk.set_text(session,"qwen_edit_status",
-                      "Qwen Image Edit completed · PNG saved and displayed")
+                      if qwen_edit_flux{"FLUX 3 Klein edit completed · PNG saved and displayed"}else{"Qwen Image Edit completed · PNG saved and displayed"})
                   }
                   let _ = desk.set_text(session, "gen_batch_status", "Completed")
                   let _ = desk.set_text(session, "gen_run_state", "Ready")
@@ -2075,6 +2091,31 @@ pub fn main(args: view<str>) -> i32
                 prompt_target = 0
               },
               none => {},
+            }
+          }
+          // Unmasked swap needs no model to write its prompt, so keep the
+          // direct instruction current instead of waiting for Build Prompt.
+          if character_swap.is_swap(generation_mode) and
+             not character_swap.is_masked(generation_mode) and
+             not swap_prompt_built and str.len(str.view(swap_source_video)) != 0 and
+             array.len(swap_character_references) != 0 {
+            var auto_options = character_swap.settings(swap_target_mode,
+              str.view(swap_target_notes),str.view(swap_notes),
+              swap_preserve_environment,swap_preserve_camera,swap_strong_identity)
+            match character_swap.direct_prompt(auto_options,
+                array.len(swap_character_references)) {
+              err(message) => {
+                let _ = desk.set_text(session,"gen_swap_status",message)
+              },
+              ok(built) => {
+                swap_built_prompt = string.copy(str.view(built))
+                prompt = built
+                let _ = desk.set_text(session,"gen_prompt_buffer",str.view(prompt))
+                let _ = desk.set_bool(session,"gen_swap_open_prompt","sensitive",true)
+                let _ = desk.set_text(session,"gen_swap_status",
+                  "Swap prompt filled in automatically · edit it before Generate if needed")
+                swap_prompt_built = true
+              },
             }
           }
           var event: json.Document = match desk.next(session, 1000) {
@@ -3033,6 +3074,7 @@ pub fn main(args: view<str>) -> i32
             }
             if id=="qwen_edit_scheduler"{
               qwen_image_scheduler=cast.sat(desk.number(event,"value"))
+              qwen_image_steps=qwen_turbo_steps(session,qwen_image_scheduler,qwen_image_steps)
               continue
             }
             if id=="qwen_edit_sampler"{
@@ -3328,9 +3370,9 @@ pub fn main(args: view<str>) -> i32
                 let _ = desk.set_number(session,"gen_mode","selected",0.0)
               }
               let current_image_model:bool=model_index==parameters.krea_model_index() or
-                model_index==parameters.qwen_image_model_index()
+                parameters.qwen_like(model_index)
               let previous_image_model:bool=previous_model==parameters.krea_model_index() or
-                previous_model==parameters.qwen_image_model_index()
+                parameters.qwen_like(previous_model)
               if current_image_model {
                 character_sheet_mode = character_sheet.off()
                 let _ = desk.set_number(session,"gen_character_sheet_mode","selected",0.0)
@@ -3367,7 +3409,7 @@ pub fn main(args: view<str>) -> i32
                 let _ = desk.set_number(session,"gen_resolution","selected",cast.float(resolution_index))
                 geometry_widgets(session,width,height,seconds,
                   model_index==parameters.krea_model_index(),
-                  model_index==parameters.qwen_image_model_index())
+                  parameters.qwen_like(model_index))
                 continue
               }
               if previous_image_model {
@@ -3397,7 +3439,7 @@ pub fn main(args: view<str>) -> i32
             }
             if id == "gen_task" {
               if model_index==parameters.krea_model_index() or
-                 model_index==parameters.qwen_image_model_index(){continue}
+                 parameters.qwen_like(model_index){continue}
               task_index = cast.sat(desk.number(event, "value"))
               model_index = if task_index == h3.task_ref2va() { h3.model_reference() } else { h3.model_base() }
               let _ = desk.set_number(session, "gen_model", "selected", cast.float(model_index))
@@ -3429,7 +3471,7 @@ pub fn main(args: view<str>) -> i32
             }
 
             if id == "gen_resolution" {
-              if model_index==parameters.krea_model_index() or model_index==parameters.qwen_image_model_index(){continue}
+              if model_index==parameters.krea_model_index() or parameters.qwen_like(model_index){continue}
               let selected_index: u32 = cast.sat(desk.number(event, "value"))
               if selected_index == resolution_index { continue }
               resolution_index = selected_index
@@ -3442,7 +3484,7 @@ pub fn main(args: view<str>) -> i32
               }
               geometry_widgets(session,width,height,seconds,
                 model_index==parameters.krea_model_index(),
-                model_index==parameters.qwen_image_model_index())
+                parameters.qwen_like(model_index))
             }
             if id=="krea_resolution" {
               if model_index!=parameters.krea_model_index(){continue}
@@ -3474,11 +3516,33 @@ pub fn main(args: view<str>) -> i32
                 geometry_widgets(session,width,height,seconds,false,true)
               }
             }
+            if id=="qwen_edit_match_source"{
+              qwen_edit_match_source=desk.boolean(event,"value")
+              continue
+            }
+            if id=="qwen_edit_enhance"{
+              qwen_edit_enhance=desk.boolean(event,"value")
+              continue
+            }
+            if id=="gen_enhance_prompt"{
+              enhance_prompt=desk.boolean(event,"value")
+              continue
+            }
+            if id=="qwen_edit_model"{
+              qwen_edit_flux=desk.number(event,"value")==1.0
+              let _=desk.set_text(session,"qwen_edit_chip",
+                if qwen_edit_flux{"FLUX 3 IMAGE KLEIN · NATIVE AIR"}else{"QWEN-IMAGE-2.1 · NATIVE AIR"})
+              let _=desk.set_text(session,"qwen_edit_status",
+                if qwen_edit_flux{"FLUX 3 Klein: 16 steps, any size up to 4096 (multiples of 16); write the prompt as a full caption of the edited image"}
+                else{"Qwen-Image-2.1 edit selected"})
+              continue
+            }
             if id=="qwen_image_steps"{
               qwen_image_steps=cast.sat(desk.number(event,"value"))
             }
             if id=="qwen_image_scheduler"{
               qwen_image_scheduler=cast.sat(desk.number(event,"value"))
+              qwen_image_steps=qwen_turbo_steps(session,qwen_image_scheduler,qwen_image_steps)
               show_qwen_recipe(session,qwen_image_scheduler,qwen_image_sampler)
             }
             if id=="qwen_image_sampler"{
@@ -3490,7 +3554,7 @@ pub fn main(args: view<str>) -> i32
                 saved_krea_width=width
                 saved_krea_height=height
               }
-              if model_index==parameters.qwen_image_model_index(){
+              if parameters.qwen_like(model_index){
                 saved_qwen_width=width
                 saved_qwen_height=height
                 qwen_image_resolution_index=match qwen_image_contract.resolution_index(width,height){
@@ -3501,13 +3565,13 @@ pub fn main(args: view<str>) -> i32
               let _ = desk.set_number(session, "gen_resolution", "selected", cast.float(resolution_index))
               geometry_widgets(session,width,height,seconds,
                 model_index==parameters.krea_model_index(),
-                model_index==parameters.qwen_image_model_index()) }
+                parameters.qwen_like(model_index)) }
             if id == "gen_height" { height = cast.sat(desk.number(event, "value"))
               if model_index==parameters.krea_model_index(){
                 saved_krea_width=width
                 saved_krea_height=height
               }
-              if model_index==parameters.qwen_image_model_index(){
+              if parameters.qwen_like(model_index){
                 saved_qwen_width=width
                 saved_qwen_height=height
                 qwen_image_resolution_index=match qwen_image_contract.resolution_index(width,height){
@@ -3518,11 +3582,11 @@ pub fn main(args: view<str>) -> i32
               let _ = desk.set_number(session, "gen_resolution", "selected", cast.float(resolution_index))
               geometry_widgets(session,width,height,seconds,
                 model_index==parameters.krea_model_index(),
-                model_index==parameters.qwen_image_model_index()) }
+                parameters.qwen_like(model_index)) }
             if id == "gen_duration" { seconds = desk.number(event, "value")
               geometry_widgets(session,width,height,seconds,
                 model_index==parameters.krea_model_index(),
-                model_index==parameters.qwen_image_model_index()) }
+                parameters.qwen_like(model_index)) }
             if id == "gen_seed" {
               // The field starts as "Random" (Generate draws a seed unless locked), and
               // programmatic updates send an empty value first; neither is a typing mistake.
@@ -3636,13 +3700,57 @@ pub fn main(args: view<str>) -> i32
                   qwen_edit_references,edit_source_index))))
                 edit_source_index=edit_source_index+1
               }
+              if qwen_edit_flux{
+                var flux_sources:array<string>=array.new()
+                var flux_index:u64=0
+                loop{
+                  if flux_index>=array.len(qwen_edit_references){break}
+                  array.push(flux_sources,string.copy(str.view(array.borrow(qwen_edit_references,flux_index))))
+                  flux_index=flux_index+1
+                }
+                var flux_request=parameters.Flux3Request{
+                  prompt:string.copy(str.view(qwen_edit_prompt)),output:string.new(),
+                  references:flux_sources,
+                  width:if qwen_edit_match_source{0}else{qwen_edit_width},
+                  height:if qwen_edit_match_source{0}else{qwen_edit_height},
+                  steps:16,seed:qwen_edit_seed,upsample:qwen_edit_enhance}
+                let flux_folder=path.join(output_directory,"flux3-klein/edit")
+                let flux_stem=text.concat("flux3-edit-",string.from_int(time.monotonic_ns()))
+                let flux_output=match library.unused_output(str.view(flux_folder),str.view(flux_stem),".png"){
+                  ok(value)=>value,
+                  err(message)=>{let _=desk.set_text(session,"qwen_edit_status",message)
+                    continue},
+                }
+                let _=ref.swap(struct.borrow(flux_request,field=output),flux_output)
+                match parameters.validate_flux3(flux_request){
+                  err(message)=>{let _=desk.set_text(session,"qwen_edit_status",message)
+                    continue},ok(_)=>{},
+                }
+                running_parameters=parameters.encode_flux3(flux_request)
+                var flux_receiver=match channel.open(128,1024){
+                  ok(value)=>value,
+                  err(problem)=>{var held=problem
+                    let _=desk.set_text(session,"qwen_edit_status",channel.message(held))
+                    continue},
+                }
+                generation_started=time.monotonic_ns()
+                qwen_edit_active=true
+                var flux_work=generation.Flux3Job{request:flux_request,progress:channel.ticket(flux_receiver)}
+                array.push(progress_receivers,flux_receiver)
+                array.push(generations,task.spawn(flux_work,fn=generation.run_flux3))
+                let _=desk.set_bool(session,"qwen_edit_run","sensitive",false)
+                let _=desk.set_text(session,"qwen_edit_status","Starting native FLUX 3 Image Klein edit")
+                let _=desk.set_text(session,"gen_run_state","Generating")
+                continue
+              }
               var request=parameters.QwenImageRequest{
                 prompt:string.copy(str.view(qwen_edit_prompt)),output:string.new(),
                 source:string.copy(str.view(array.borrow(qwen_edit_references,0))),
                 references:additional_sources,
                 width:qwen_edit_width,height:qwen_edit_height,
-                steps:qwen_image_steps,seed:qwen_edit_seed,
-                scheduler:qwen_image_scheduler,sampler:qwen_image_sampler}
+                steps:if qwen_image_scheduler==qwen_image_contract.scheduler_turbo(){
+                  qwen_image_contract.turbo_steps()}else{qwen_image_steps},seed:qwen_edit_seed,
+                scheduler:qwen_image_scheduler,sampler:qwen_image_sampler,enhance:qwen_edit_enhance}
               let folder=path.join(output_directory,"qwen-image-2.1/edit")
               let stem=text.concat("qwen-edit-",string.from_int(time.monotonic_ns()))
               let allocated=match library.unused_output(str.view(folder),str.view(stem),".png"){
@@ -4853,7 +4961,7 @@ pub fn main(args: view<str>) -> i32
                   selected_swap_character = string.new()
                   swap_prompt_built = false
                   if model_index == parameters.krea_model_index() or
-                     model_index == parameters.qwen_image_model_index() {
+                     parameters.qwen_like(model_index) {
                     if model_index == parameters.krea_model_index() {
                       saved_krea_output = string.copy(output_media)
                     } else {
@@ -4911,7 +5019,7 @@ pub fn main(args: view<str>) -> i32
                   array.push(visual_references, item)
                   selected_visual = string.from_int(array.len(visual_references) - 1)
                   if model_index == parameters.krea_model_index() or
-                     model_index == parameters.qwen_image_model_index() {
+                     parameters.qwen_like(model_index) {
                     if model_index == parameters.krea_model_index() {
                       saved_krea_output = string.copy(output_media)
                     } else {
@@ -5418,7 +5526,7 @@ pub fn main(args: view<str>) -> i32
               let sheet: bool = character_sheet.valid(character_sheet_mode)
               if seedvr2_enabled and seedvr2_run_after and
                   (model_index==parameters.krea_model_index() or
-                   model_index==parameters.qwen_image_model_index()){
+                   parameters.qwen_like(model_index)){
                 generation_status(session,
                   "SeedVR2 post-processing requires a generated video; the selected model outputs PNG")
                 continue
@@ -5460,7 +5568,8 @@ pub fn main(args: view<str>) -> i32
               }
               if swap and not swap_prompt_built {
                 generation_status(session,
-                  "Build Prompt with Qwen after selecting the current source and character media")
+                  if masked {"Build Prompt with Qwen after selecting the current source and character media"}
+                  else {"Character Swap needs a source video, a character picture, and a description when replacing a selected subject"})
                 continue
               }
               if swap {
@@ -5494,16 +5603,18 @@ pub fn main(args: view<str>) -> i32
                 generation_started = time.monotonic_ns()
                 let krea: bool = model_index == parameters.krea_model_index()
                 let qwen_image:bool=model_index==parameters.qwen_image_model_index()
+                let flux:bool=model_index==parameters.flux3_model_index()
                 let folder: str = if id=="queue_take"{"movies/takes"}
+                  else if flux{"flux3-klein/generate"}
                   else if qwen_image{"qwen-image-2.1/generate"}
                   else if krea {"krea"} else if sheet {"character-sheets"}
                   else if outpaint_active {"outpaint"}
                   else if masked {"masked-edits"} else {"h3"}
                 let stem: string = text.concat(if id=="queue_take"{"take"}
-                  else if qwen_image{"generate"}
+                  else if qwen_image or flux{"generate"}
                   else if sheet {"character-sheet"} else {folder},
                   text.concat("-",string.from_int(time.monotonic_ns())))
-                let extension: str = if qwen_image or krea or sheet or
+                let extension: str = if qwen_image or krea or flux or sheet or
                   (id=="edit_run" and not edit_source_video) {".png"} else {".mp4"}
                 let output_folder: string = path.join(output_directory,folder)
                 var allocated = match library.unused_output(str.view(output_folder),
@@ -5523,13 +5634,44 @@ pub fn main(args: view<str>) -> i32
                 io.write(text.concat(if qwen_image{"mm-air automatic Qwen-Image-2.1 output="} else if krea {"mm-air automatic Krea output="} else if sheet {"mm-air automatic H3 character-sheet source="} else if swap {"mm-air automatic H3 character-swap output="} else {"mm-air automatic H3 output="},
                   text.concat(output_media,"\n")))
               }
+              if model_index==parameters.flux3_model_index(){
+                var request=parameters.Flux3Request{prompt:string.copy(prompt),
+                  output:string.copy(output_media),references:array.new(),
+                  width:width,height:height,steps:16,
+                  seed:if seed<0{time.monotonic_ns()}else{cast.wrap(seed)},upsample:enhance_prompt}
+                if id=="gen_save_parameters"{
+                  save_parameter_snapshot(session,output_directory,parameters.encode_flux3(request))
+                  continue
+                }
+                match parameters.validate_flux3(request){
+                  err(message)=>{generation_status(session,message)
+                    continue},ok(_)=>{},
+                }
+                running_parameters=parameters.encode_flux3(request)
+                var receiver=match channel.open(128,1024){
+                  ok(value)=>value,
+                  err(problem)=>{var held=problem
+                    generation_status(session,channel.message(held))
+                    continue},
+                }
+                var work=generation.Flux3Job{request:request,progress:channel.ticket(receiver)}
+                array.push(progress_receivers,receiver)
+                array.push(generations,task.spawn(work,fn=generation.run_flux3))
+                let _=desk.set_bool(session,"generate_action","sensitive",false)
+                let _=desk.set_text(session,"gen_run_state","Generating")
+                let _=desk.set_text(session,"gen_batch_status","Running")
+                generation_status(session,"Starting native AIR FLUX 3 Image Klein")
+                io.write("mm-air started native AIR FLUX 3 Image Klein generation\n")
+                continue
+              }
               if model_index==parameters.qwen_image_model_index(){
                 var request=parameters.QwenImageRequest{prompt:string.copy(prompt),
                   output:string.copy(output_media),source:string.new(),references:array.new(),
                   width:width,height:height,
-                  steps:qwen_image_steps,
+                  steps:if qwen_image_scheduler==qwen_image_contract.scheduler_turbo(){
+                    qwen_image_contract.turbo_steps()}else{qwen_image_steps},
                   seed:if seed<0{time.monotonic_ns()}else{cast.wrap(seed)},
-                  scheduler:qwen_image_scheduler,sampler:qwen_image_sampler}
+                  scheduler:qwen_image_scheduler,sampler:qwen_image_sampler,enhance:enhance_prompt}
                 if id=="gen_save_parameters"{
                   match parameters.encode_qwen_image(request){
                     ok(value)=>{save_parameter_snapshot(session,output_directory,value)},

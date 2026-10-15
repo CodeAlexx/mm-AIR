@@ -42,6 +42,8 @@ import ".air/deps/qwenimage21/session.ai" as qwen_image_session
 import ".air/deps/qwenimage21/generate.ai" as qwen_image_generate
 import ".air/deps/qwenimage21/contract.ai" as qwen_image_contract
 import ".air/deps/qwenimage21/attention.ai" as qwen_image_attention
+import ".air/deps/qwenimage21/prompt_enhancer.ai" as qwen_prompt_enhancer
+import ".air/deps/flux3/generate.ai" as flux3_generate
 import "character_sheet.ai" as character_sheet
 import "masked_runtime.ai" as masked_runtime
 import "outpaint.ai" as outpaint
@@ -74,6 +76,76 @@ pub type KreaJob = struct {sources:krea_session.Sources,request:parameters.KreaR
 pub type KreaCancelableJob = struct {job:KreaJob,cancel_path:string}
 pub type QwenImageJob = struct {request:parameters.QwenImageRequest,progress:channel.Ticket}
 pub type QwenImageCancelableJob = struct {job:QwenImageJob,cancel_path:string}
+pub type Flux3Job = struct {request:parameters.Flux3Request,progress:channel.Ticket}
+
+// FLUX 3 Image Klein through the native AIR pipeline (models/flux3). Weights:
+// FLUX3_KLEIN_ROOT (the downloaded black-forest-labs/flux-3-image-klein folder
+// with air-int8/ from tools/quantize_int8.py). The INT8 DiT stays resident on
+// the GPU for every step. With request.upsample the prompt first goes through
+// BFL's upsampler, FLUX3_PUP_ROOT (black-forest-labs/flux-3-image-klein-pup with
+// air-int8/ and air-tokenizer/); the expanded prompt is saved beside the PNG.
+pub fn run_flux3(job:Flux3Job own)->Outcome
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+  var owned=job
+  var ticket=ref.swap(struct.borrow(owned,field=progress),no_progress())
+  var connection=match channel.connect(ticket,time.monotonic_ns()+30000000000){
+    ok(value)=>value,
+    err(_)=>{return outcome(false,struct.borrow(struct.borrow(owned,field=request),field=output),
+      "Cannot connect the MM-Air FLUX 3 progress channel")},
+  }
+  var sender:option<channel.Sender> = option.some(connection)
+  let started=time.monotonic_ns()
+  let request=struct.borrow(owned,field=request)
+  var finished=match parameters.validate_flux3(request){
+    err(message)=>outcome(false,struct.borrow(request,field=output),message),
+    ok(_)=>{
+      let root=match runtime_config.value("FLUX3_KLEIN_ROOT"){
+        ok(value)=>match value{some(found)=>found,none=>string.copy("D:/Models/FLUX-3-Image-Klein"),},
+        err(message)=>{return outcome(false,struct.borrow(request,field=output),message)},}
+      let edit:bool=array.len(struct.borrow(request,field=references))!=0
+      let upsampler=if request.upsample{
+        match runtime_config.value("FLUX3_PUP_ROOT"){
+          ok(value)=>match value{some(found)=>found,none=>string.copy("D:/Models/FLUX-3-Image-Klein-PUP"),},
+          err(message)=>{return outcome(false,struct.borrow(request,field=output),message)},}
+      }else{string.new()}
+      if upsampler!=""{report(sender,"Upsampling the prompt with the native AIR FLUX 3 upsampler")}
+      report(sender,if edit{"Running native AIR FLUX 3 Image Klein edit"}
+        else{"Running native AIR FLUX 3 Image Klein text-to-image"})
+      var references:array<string>=array.new()
+      var index:u64=0
+      loop{
+        if index>=array.len(struct.borrow(request,field=references)){break}
+        array.push(references,string.copy(str.view(array.borrow(struct.borrow(request,field=references),index))))
+        index=index+1
+      }
+      let scratch=path.join(system.temp_directory(),"mm-air-flux3")
+      let _made=files.mkdirs(str.view(scratch))
+      var options=flux3_generate.Options{root:root,
+        prompt:string.copy(struct.borrow(request,field=prompt)),references:references,
+        width:request.width,height:request.height,steps:request.steps,seed:request.seed,
+        output:string.copy(struct.borrow(request,field=output)),scratch:scratch,
+        int8:true,reference_budget:0,upsampler:upsampler}
+      match flux3_generate.run(options){
+        ok(report_value)=>{
+          var done=report_value
+          var message=string.copy("Native AIR FLUX 3 Image Klein PNG completed")
+          if request.upsample{
+            let sidecar=text.concat(str.view(struct.borrow(request,field=output)),".prompt.txt")
+            let _saved=files.write_text(str.view(sidecar),str.view(struct.borrow(done,field=prompt)))
+            message=text.concat(str.view(message),text.concat(" with upsampled prompt (",
+              text.concat(str.view(string.from_int(cast.sat(done.seconds_upsample))),
+              text.concat(" s), saved as ",str.view(sidecar)))))
+          }
+          outcome_metrics(true,struct.borrow(request,field=output),str.view(message),
+            (time.monotonic_ns()-started)/1000000,0)
+        },
+        err(message)=>outcome(false,struct.borrow(request,field=output),message),
+      }
+    },
+  }
+  finish_progress(sender,finished)
+  finished
+}
 
 pub fn run_qwen_image(job:QwenImageJob own)->Outcome
     effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
@@ -109,10 +181,71 @@ fn run_qwen_image_policy(owned:ref<QwenImageJob>,policy:qwen_image_attention.Pol
   var finished=match parameters.validate_qwen_image(request){
     err(message)=>outcome(false,struct.borrow(request,field=output),message),
     ok(_)=>{
-      report(sender,"Loading Qwen-Image-2.1 once into pinned host residency")
       let condition_count=parameters.qwen_condition_count(request)
+      // Prompt enhancement runs first, on its own GPU context, and frees its
+      // weights before the image model loads. For text-to-image the enhancer's
+      // aspect ratio picks the size, as in Qwen-Image-2.1-PE-T2I's model card.
+      var prompt=string.copy(struct.borrow(request,field=prompt))
+      var width=request.width
+      var height=request.height
+      var enhanced_note=string.new()
+      if request.enhance{
+        let edit:bool=condition_count!=0
+        let pe_root=match runtime_config.value(if edit{"QWEN_IMAGE21_PE_I2I_ROOT"}else{"QWEN_IMAGE21_PE_T2I_ROOT"}){
+          ok(value)=>match value{some(found)=>found,none=>string.copy(if edit{"E:/Models/Qwen-Image-2.1-PE-I2I"}
+            else{"E:/Models/Qwen-Image-2.1-PE-T2I"}),},
+          err(message)=>{return outcome(false,struct.borrow(request,field=output),message)},}
+        report(sender,if edit{"Enhancing the edit request with the native AIR Qwen-Image-2.1 edit prompt enhancer (looks at the sources, then thinks)"}
+          else{"Enhancing the prompt with the native AIR Qwen-Image-2.1 prompt enhancer (thinking)"})
+        let pe_scratch=path.join(system.temp_directory(),"mm-air-qwen-pe")
+        let _made=files.mkdirs(str.view(pe_scratch))
+        let pe_started=time.monotonic_ns()
+        var pe_sources:array<string>=array.new()
+        if edit{
+          if struct.borrow(request,field=source)!=""{
+            array.push(pe_sources,string.copy(struct.borrow(request,field=source)))
+          }
+          var pe_index:u64=0
+          loop{
+            if pe_index>=array.len(struct.borrow(request,field=references)){break}
+            array.push(pe_sources,string.copy(str.view(array.borrow(struct.borrow(request,field=references),pe_index))))
+            pe_index=pe_index+1
+          }
+        }
+        var enhanced=match (if edit{qwen_prompt_enhancer.enhance_edit_standalone(str.view(pe_root),str.view(pe_scratch),
+            str.view(prompt),pe_sources,request.seed)}else{qwen_prompt_enhancer.enhance_standalone(str.view(pe_root),
+            str.view(pe_scratch),str.view(prompt),request.seed)}){
+          ok(value)=>value,
+          err(message)=>{var failed=outcome(false,struct.borrow(request,field=output),
+              str.view(text.concat("Prompt enhancer: ",str.view(message))))
+            finish_progress(sender,failed)
+            return failed},
+        }
+        prompt=string.copy(struct.borrow(enhanced,field=prompt))
+        // wh_ratio picks a preset; an edit's ratio_follow ("<imageN>") keeps the
+        // preset nearest that source's aspect ratio.
+        let size=match qwen_prompt_enhancer.size_for_answer(enhanced,pe_sources,str.view(pe_scratch)){
+          ok(value)=>value,
+          err(message)=>{var failed=outcome(false,struct.borrow(request,field=output),
+              str.view(text.concat("Prompt enhancer: ",str.view(message))))
+            finish_progress(sender,failed)
+            return failed},
+        }
+        width=size.width
+        height=size.height
+        let sidecar=text.concat(str.view(struct.borrow(request,field=output)),".prompt.txt")
+        let _saved=files.write_text(str.view(sidecar),str.view(prompt))
+        enhanced_note=text.concat(" · prompt enhanced in ",
+          text.concat(str.view(string.from_int(cast.sat((time.monotonic_ns()-pe_started)/1000000000))),
+          text.concat(" s, ratio ",text.concat(str.view(qwen_prompt_enhancer.ratio_label(enhanced)),
+          text.concat(" → ",text.concat(str.view(string.from_int(cast.sat(width))),
+          text.concat("×",text.concat(str.view(string.from_int(cast.sat(height))),
+          text.concat(", saved as ",str.view(sidecar))))))))))
+        report(sender,str.view(text.concat("Prompt enhanced",str.view(enhanced_note))))
+      }
+      report(sender,"Loading Qwen-Image-2.1 once into pinned host residency")
       var session=match qwen_image_session.open_with_attention(qwen_image_contract.Request{
-          width:request.width,height:request.height,
+          width:width,height:height,
           steps:request.steps,seed:request.seed,
           true_cfg_scale:qwen_image_contract.default_true_cfg_scale(),
           condition_images:condition_count,
@@ -139,9 +272,14 @@ fn run_qwen_image_policy(owned:ref<QwenImageJob>,policy:qwen_image_attention.Pol
           source_index=source_index+1
         }
       }
-      let root=match runtime_config.value("QWEN_IMAGE21_ROOT"){
+      // Turbo is its own checkpoint (QWEN_IMAGE21_TURBO_ROOT, a snapshot that
+      // shares 2.1's text encoder, processor and VAE through hardlinks).
+      let turbo:bool=request.scheduler==qwen_image_contract.scheduler_turbo()
+      let root=match runtime_config.value(if turbo{"QWEN_IMAGE21_TURBO_ROOT"}else{"QWEN_IMAGE21_ROOT"}){
         ok(value)=>match value{some(path)=>path,none=>string.new(),},
         err(message)=>{return outcome(false,struct.borrow(request,field=output),message)},}
+      if turbo and root==""{return outcome(false,struct.borrow(request,field=output),
+        "Set QWEN_IMAGE21_TURBO_ROOT to the Qwen-Image-2.1-Turbo snapshot")}
       let manifests=match runtime_config.value("QWEN_IMAGE21_MANIFEST_DIR"){
         ok(value)=>match value{some(path)=>path,none=>string.new(),},
         err(message)=>{return outcome(false,struct.borrow(request,field=output),message)},}
@@ -150,11 +288,12 @@ fn run_qwen_image_policy(owned:ref<QwenImageJob>,policy:qwen_image_attention.Pol
         err(message)=>{return outcome(false,struct.borrow(request,field=output),message)},}
       let result=qwen_image_generate.run_request_images_configured(
         if condition_count==0{"t2i"}else{"edit"},
-        struct.borrow(request,field=prompt),struct.borrow(request,field=output),sources,
+        str.view(prompt),struct.borrow(request,field=output),sources,
         session.request,sender,policy,cancel_path,root,manifests,residency)
       match result{
         ok(_)=>outcome_metrics(true,struct.borrow(request,field=output),
-          "Native AIR Qwen-Image-2.1 PNG completed",
+          str.view(text.concat(if turbo{"Native AIR Qwen-Image-2.1-Turbo PNG completed"}
+            else{"Native AIR Qwen-Image-2.1 PNG completed"},str.view(enhanced_note))),
           (time.monotonic_ns()-started)/1000000,0),
         err(message)=>outcome(false,struct.borrow(request,field=output),message),
       }

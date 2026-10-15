@@ -86,7 +86,7 @@ fn save(ui:ref<w.Ui>,prior:ref<parameters.QwenImageRequest>,krea_prior:ref<param
 pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write,gpu,io.write,net,process,random,thread,time,ui} {
  task.scope {
   var request=parameters.QwenImageRequest{prompt:"",seed:42,width:2048,height:2048,
-    steps:40,scheduler:0,sampler:0,source:"",references:[],output:"result.png"}
+    steps:40,scheduler:0,sampler:0,source:"",references:[],output:"result.png",enhance:false}
   var krea_request=parameters.KreaRequest{prompt:"",seed:42,width:1024,height:1024,
     output:"krea-result.png",loras:[]}
   var h3_state=parameters.H3Parameters{request:h3.request("",0,0,3,1,2,4,42,6,[],"movie.mp4"),loras:[]}

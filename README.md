@@ -2,8 +2,9 @@
 
 MM-Air is a native desktop application for AI media generation, written in AIR:
 MiniMax H3 video with audio (text, image, first/last-frame and reference
-conditioned, Character Swap with a turbo path), Krea 2 Turbo and Qwen-Image
-images, a Qwen3-VL Prompt Lab, editing, and a Movie workspace.
+conditioned, Character Swap with a turbo path), Krea 2 Turbo, Qwen-Image-2.1
+(and its Turbo) and FLUX 3 Image Klein images and edits with the models' own
+prompt enhancers, a Qwen3-VL Prompt Lab, editing, and a Movie workspace.
 
 This repository publishes the **MM-Air application source only**. **AIR itself
 is private, under development, and not ready for public release.** This is a
@@ -19,15 +20,16 @@ Copies run on a native worker; originals/history stay intact and repeated copies
 receive non-overwriting numbered filenames. No save dialog is opened.
 
 MM-AIR is the native AIR desktop application for generation. Generate links
-MiniMax H3, Krea 2 Turbo, and Qwen-Image-2.1 AIR-language sessions directly.
+MiniMax H3, Krea 2 Turbo, Qwen-Image-2.1 and FLUX 3 Image Klein AIR-language
+sessions directly.
 Its six main surfaces are:
 
 - Generate, based on SerenityFlow's three-column Generate workspace with the
   MiniMax H3 model selected.
 - Edit, a localized source-preserving image/video workspace with authored masks,
   tracked crops, references, Qwen analysis, and H3 video execution.
-- Image Edit, a dedicated Qwen-Image-2.1 source-PNG and edit-instruction
-  workspace with side-by-side source/result previews.
+- Image Edit, a dedicated Qwen-Image-2.1 / FLUX 3 Image Klein source-image and
+  edit-instruction workspace with side-by-side source/result previews.
 - Movie Maker, based on Mojo Serenity's H3 Studio project, shot, inspector and
   continuity-spine workspace.
 - H3 ControlNet, based on SerenityFlow's dedicated dense Union ControlNet screen.
@@ -157,6 +159,43 @@ the denoise loop. The 2026-09-20 bounded T2I and edit smokes both completed at
 2048x2048 and reported exactly `0 bytes after load`; their two-step PNGs prove
 the direct runtime and edit route, not the visual quality of the required
 40-step production recipe.
+
+### FLUX 3 Image Klein, Qwen-Image Turbo and prompt enhancers (2026-10-15)
+
+**FLUX 3 Image Klein** is model 4 on Generate and an entry in Image Edit's
+**EDIT MODEL** dropdown. It runs the native AIR pipeline in `models/flux3`:
+- the 16-step flow-map sampler;
+- an INT8 DiT that stays resident on the GPU for every step;
+- any size from 64 to 4096 px in multiples of 16, sampled natively (tiled decode above 2 MP);
+- 1-10 ordered references for edits. "FLUX 3: match first source size" uses the
+  first prepared reference's size; untick it to use Width/Height.
+
+A 1024² image takes about 15 s and a 1 MP edit about 22 s. Weights come from
+`FLUX3_KLEIN_ROOT` (the downloaded folder plus its `air-int8/` DiT).
+
+**Qwen-Image-2.1-Turbo** is the third Qwen scheduler choice, "Turbo · 8 steps
+(Qwen-Image-2.1-Turbo weights)", on Generate and Image Edit:
+- it loads the Turbo transformer from `QWEN_IMAGE21_TURBO_ROOT`;
+- the Steps fields switch to 8;
+- it uses the checkpoint's own sigma schedule.
+
+A two-reference 2048² edit drops from 6.5 min to under 2 min. The Turbo folder
+hardlinks 2.1's text encoder, processor and VAE.
+
+**Enhance prompt** checkboxes on Generate and Image Edit (both on by default) run
+the model's own 9B prompt rewriter first:
+- **FLUX 3:** BFL's prompt upsampler (`FLUX3_PUP_ROOT`), about 15 s. For edits it
+  looks at the references.
+- **Qwen-Image:** Qwen-Image-2.1-PE-T2I (`QWEN_IMAGE21_PE_T2I_ROOT`) or PE-I2I for
+  edits (`QWEN_IMAGE21_PE_I2I_ROOT`). These think before answering, so they take
+  about 1-2 min. They also choose the aspect ratio (text-to-image) or which source's
+  aspect to keep (edits), and the status line reports the size used.
+
+The rewriter loads, runs and is freed before the image model loads. The
+rewritten prompt is saved next to the PNG as `<name>.png.prompt.txt`. Untick the
+box to send the prompt exactly as typed at the size you set. All of this runs
+natively in AIR (`models/qwen35`); see AIR's `docs/models/FLUX3_KLEIN.md`,
+`docs/models/QWEN35.md` and `docs/models/QWEN_IMAGE_2_1.md` for parity evidence.
 
 ### SeedVR2 Generate post-processing
 

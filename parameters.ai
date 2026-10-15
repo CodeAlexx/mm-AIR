@@ -10,6 +10,59 @@ import "./.air/deps/krea2/config.ai" as krea_config
 
 pub fn krea_model_index() -> u32 effects {} { 2 }
 pub fn qwen_image_model_index() -> u32 effects {} { 3 }
+pub fn flux3_model_index() -> u32 effects {} { 4 }
+// Qwen-Image-2.1 and FLUX 3 Image Klein share the PNG geometry and saved sizes.
+pub fn qwen_like(model:u32) -> bool effects {} { model==3 or model==4 }
+
+// FLUX 3 Image Klein: text-to-image, or an edit with 1..10 ordered references.
+// width/height 0 means the creator default (the first prepared reference, or
+// 1024x1024 for text-to-image).
+pub type Flux3Request = struct {
+  prompt:string,output:string,references:array<string>,
+  width:u64,height:u64,steps:u64,seed:u64,
+  // Run BFL's prompt upsampler (flux-3-image-klein-pup) before generating.
+  upsample:bool
+}
+
+pub fn validate_flux3(request:ref<Flux3Request>)->result<unit,string> effects {alloc}{
+  if request.prompt==""{return result.err("FLUX 3 prompt must not be empty")}
+  if array.len(struct.borrow(request,field=references))>10{
+    return result.err("FLUX 3 Image Klein accepts at most ten references")
+  }
+  if (request.width==0)!=(request.height==0){return result.err("Set both FLUX 3 width and height, or neither")}
+  if request.width!=0 and (request.width<64 or request.height<64 or request.width>4096 or
+      request.height>4096 or request.width%16!=0 or request.height%16!=0){
+    return result.err("FLUX 3 size must be 64..4096 px with both sides divisible by 16")
+  }
+  if request.steps<1 or request.steps>64{return result.err("FLUX 3 steps must be between 1 and 64")}
+  if not text.ends_with(text.lower_ascii(struct.borrow(request,field=output)),".png"){
+    return result.err("FLUX 3 output must be a PNG")
+  }
+  result.ok(())
+}
+
+pub fn encode_flux3(request:ref<Flux3Request>)->string effects {alloc}{
+  var refs:string=string.copy("[")
+  var index:u64=0
+  loop{
+    if index>=array.len(struct.borrow(request,field=references)){break}
+    if index>0{string.append(refs,",")}
+    string.append(refs,str.view(json.quote(str.view(array.borrow(struct.borrow(request,field=references),index)))))
+    index=index+1
+  }
+  string.append(refs,"]")
+  var out:string=string.copy("{\"schema\":\"mm-air.flux3-klein.parameters\",\"prompt\":")
+  string.append(out,str.view(json.quote(str.view(struct.borrow(request,field=prompt)))))
+  string.append(out,",\"references\":")
+  string.append(out,str.view(refs))
+  string.append(out,str.view(text.concat(",\"width\":",str.view(string.from_int(cast.sat(request.width))))))
+  string.append(out,str.view(text.concat(",\"height\":",str.view(string.from_int(cast.sat(request.height))))))
+  string.append(out,str.view(text.concat(",\"steps\":",str.view(string.from_int(cast.sat(request.steps))))))
+  string.append(out,str.view(text.concat(",\"seed\":",str.view(string.from_int(cast.sat(request.seed))))))
+  string.append(out,if request.upsample{",\"upsample\":true"}else{",\"upsample\":false"})
+  string.append(out,"}")
+  out
+}
 pub type LoraEntry = struct {path:string,strength:f64,enabled:bool}
 pub type KreaRequest = struct {
   prompt:string,seed:i64,width:u64,height:u64,output:string,loras:array<LoraEntry>
@@ -17,7 +70,10 @@ pub type KreaRequest = struct {
 pub type QwenImageRequest = struct {
   prompt:string,output:string,source:string,references:array<string>,
   width:u64,height:u64,steps:u64,seed:u64,
-  scheduler:u32,sampler:u32
+  scheduler:u32,sampler:u32,
+  // Text-to-image: rewrite the prompt first with Qwen-Image-2.1-PE-T2I, which
+  // also picks the aspect ratio (width/height follow it, as in its model card).
+  enhance:bool
 }
 
 pub fn qwen_condition_count(request:ref<QwenImageRequest>)->u64 effects {} {
@@ -48,6 +104,9 @@ pub fn validate_qwen_image(request:ref<QwenImageRequest>)->result<unit,string>
   }
   if request.steps<2 or request.steps>100{
     return result.err("Qwen-Image-2.1 steps must be between 2 and 100")
+  }
+  if request.scheduler==qwen_contract.scheduler_turbo() and request.steps!=qwen_contract.turbo_steps(){
+    return result.err("Qwen-Image-2.1-Turbo uses its fixed 8-step schedule")
   }
   if not qwen_contract.supported_scheduler(request.scheduler){
     return result.err("Choose a supported Qwen-Image-2.1 scheduler")
@@ -109,6 +168,7 @@ pub fn encode_qwen_image(request:ref<QwenImageRequest>)->result<string,string>
   codec.field_text(out,"noise_schedule",str.view(schedule_name))
   codec.field_text(out,"solver",str.view(solver_name))
   codec.field_u64(out,"seed",request.seed)
+  codec.field_bool(out,"enhance",request.enhance)
   codec.end_object(out)
   match codec.finish(out){ok(value)=>result.ok(value),err(error)=>result.err(codec.describe(error))}
 }
@@ -163,7 +223,9 @@ pub fn decode_qwen_image(source:str)->result<QwenImageRequest,string>
     references:if version==1{array.new()}else{try decode_text_array(document,"references")},
     output:try string_field(document,"output"),
     width:width,height:height,steps:steps,seed:seed,
-    scheduler:cast.sat(scheduler),sampler:cast.sat(sampler)}
+    scheduler:cast.sat(scheduler),sampler:cast.sat(sampler),
+    enhance:match json.get(document,json.root(),"enhance"){
+      some(node)=>match json.as_bool(document,node){some(value)=>value,none=>false},none=>false}}
   try validate_qwen_image(request)
   result.ok(request)
 }

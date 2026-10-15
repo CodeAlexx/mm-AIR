@@ -234,6 +234,7 @@
       "path": "../../AIR/models/h3",
       "version": ">=0.1.0"
     },
-    "h3_repair": {"path":"../../AIR/toolkits/h3-repair","version":">=0.1.0"}
+    "h3_repair": {"path":"../../AIR/toolkits/h3-repair","version":">=0.1.0"},
+    "flux3": {"path":"../../AIR/models/flux3","version":">=0.1.0"}
   }
 }

@@ -131,7 +131,7 @@ pub fn qwen_request(ui:ref<w.Ui>,base:u64,prior:ref<parameters.QwenImageRequest>
   var references=reference_paths(paths)
   var request=parameters.QwenImageRequest{prompt:prompt,seed:seed,width:width,height:height,
     steps:steps,scheduler:if linear{1}else{0},sampler:if dpm{1}else{0},
-    source:source,references:references,output:output}
+    source:source,references:references,output:output,enhance:false}
   try parameters.validate_qwen_image(request)
   result.ok(request)
 }
