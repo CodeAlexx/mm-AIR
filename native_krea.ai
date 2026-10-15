@@ -1,0 +1,124 @@
+// Native Krea form using the same validated requests as the Linux controller.
+module app.mm_air.native_krea
+import std.widgets as w
+import std.text as text
+import "native_seed.ai" as seed
+import "parameters.ai" as parameters
+
+pub fn add_lora(request:ref<parameters.KreaRequest>,file:str)->result<unit,string> effects {alloc} {
+  var candidate:array<parameters.LoraEntry> = [parameters.LoraEntry{
+    path:string.copy(file),strength:1.0,enabled:false}]
+  try parameters.validate_loras(candidate)
+  let entries=struct.borrow(request,field=loras)
+  var enabled=false
+  var index:u64=0
+  loop{if index>=array.len(entries){break}
+    if array.borrow(entries,index).enabled{enabled=true}
+    index=index+1
+  }
+  array.push(entries,parameters.LoraEntry{path:string.copy(file),strength:1.0,enabled:not enabled})
+  result.ok(())
+}
+
+pub fn remove_lora(request:ref<parameters.KreaRequest>,removed:u64)->bool effects {alloc} {
+  let entries=struct.borrow(request,field=loras)
+  if removed>=array.len(entries){return false}
+  var kept:array<parameters.LoraEntry> = []
+  var index:u64=0
+  loop{if index>=array.len(entries){break}
+    let entry=array.borrow(entries,index)
+    if index!=removed{array.push(kept,parameters.LoraEntry{
+      path:string.copy(struct.borrow(entry,field=path)),strength:entry.strength,enabled:entry.enabled})}
+    index=index+1
+  }
+  let old=ref.swap(entries,kept)
+  true
+}
+
+pub fn resolve_seed(request:ref<parameters.KreaRequest>)->result<unit,string> effects {alloc,random} {
+  struct.set(request,try seed.resolve(request.seed),field=seed)
+  result.ok(())
+}
+
+pub fn restore(ui:ref<w.Ui>,base:u64,request:ref<parameters.KreaRequest>)->unit effects {alloc} {
+  w.set_text(ui,w.find(ui,base+1),struct.borrow(request,field=prompt))
+  w.set_text(ui,w.find(ui,base+3),string.from_int(request.seed))
+  w.set_text(ui,w.find(ui,base+6),struct.borrow(request,field=output))
+  var index:u64=0
+  loop{if index>=array.len(struct.borrow(request,field=loras)){break}
+    let entry=array.borrow(struct.borrow(request,field=loras),index)
+    let key=base+32+index*5
+    w.check(ui,w.find(ui,key+1),entry.enabled)
+    w.set_text(ui,w.find(ui,key+2),struct.borrow(entry,field=path))
+    w.set_text(ui,w.find(ui,key+3),string.from_float(entry.strength))
+    index=index+1
+  }
+}
+
+// The caller reserves base..base+32 and five additional keys per LoRA row.
+pub fn fields(ui:ref<w.Ui>,parent:u64,base:u64,request:ref<parameters.KreaRequest>)->unit effects {alloc} {
+  fields_page(ui,parent,base,request,0)
+}
+
+pub fn fields_page(ui:ref<w.Ui>,parent:u64,base:u64,request:ref<parameters.KreaRequest>,page:u64)->unit effects {alloc} {
+  let _=w.label(ui,base,parent,24,"Prompt")
+  let _=w.textarea(ui,base+1,parent,140,struct.borrow(request,field=prompt))
+  let _=w.label(ui,base+2,parent,24,"Seed (-1 chooses a new random seed)")
+  let _=w.field(ui,base+3,parent,30,string.from_int(request.seed))
+  let _=w.label(ui,base+4,parent,24,"Krea 2 Turbo · 1024 × 1024 · 8 steps")
+  let _=w.label(ui,base+5,parent,24,"Output PNG")
+  let _=w.field(ui,base+6,parent,30,struct.borrow(request,field=output))
+  let _=w.label(ui,base+7,parent,24,"LoRAs: enabled, checkpoint path, strength")
+  let controls=w.toolbar(ui,base+8,parent,30,8,0)
+  let _=w.button(ui,base+9,controls,120,"Add LoRA")
+  let _=w.button(ui,base+10,controls,100,"Previous")
+  let _=w.button(ui,base+11,controls,100,"Next")
+  let _=w.label(ui,base+12,controls,190,text.concat("Page ",string.from_int(page+1)))
+  let entries=struct.borrow(request,field=loras)
+  w.enable(ui,w.find(ui,base+10),page!=0)
+  w.enable(ui,w.find(ui,base+11),(page+1)*3<array.len(entries))
+  var index:u64=page*3
+  loop{if index>=array.len(entries) or index>=page*3+3{break}
+    let item=array.borrow(entries,index)
+    let key=base+32+index*5
+    let row=w.panel(ui,key,parent,false,30,0,8,0)
+    let _=w.checkbox(ui,key+1,row,28,"",item.enabled)
+    let _=w.field(ui,key+2,row,310,struct.borrow(item,field=path))
+    let _=w.field(ui,key+3,row,80,string.from_float(item.strength))
+    let _=w.button(ui,key+4,row,90,"Remove")
+    index=index+1
+  }
+}
+
+pub fn request(ui:ref<w.Ui>,base:u64,prior:ref<parameters.KreaRequest>)->result<parameters.KreaRequest,string> effects {alloc} {
+  var proposed=try snapshot(ui,base,prior)
+  try parameters.validate_krea(proposed)
+  result.ok(proposed)
+}
+
+// Capture edits before changing pages or rows, even while the prompt is incomplete.
+pub fn snapshot(ui:ref<w.Ui>,base:u64,prior:ref<parameters.KreaRequest>)->result<parameters.KreaRequest,string> effects {alloc} {
+  let seed=match text.parse_i64(w.text_of(ui,w.find(ui,base+3))){
+    some(value)=>value,none=>{return result.err("Krea seed must be a signed whole number")},}
+  var entries:array<parameters.LoraEntry> = []
+  var index:u64=0
+  loop{if index>=array.len(struct.borrow(prior,field=loras)){break}
+    let key=base+32+index*5
+    if w.find(ui,key+2)==0{
+      let entry=array.borrow(struct.borrow(prior,field=loras),index)
+      array.push(entries,parameters.LoraEntry{path:string.copy(struct.borrow(entry,field=path)),
+        strength:entry.strength,enabled:entry.enabled})
+      index=index+1
+      continue
+    }
+    let strength=match text.parse_f64(w.text_of(ui,w.find(ui,key+3))){
+      some(value)=>value,none=>{return result.err("LoRA strength must be a finite number")},}
+    array.push(entries,parameters.LoraEntry{
+      path:w.text_of(ui,w.find(ui,key+2)),strength:strength,
+      enabled:w.checked_of(ui,w.find(ui,key+1))})
+    index=index+1
+  }
+  var proposed=parameters.KreaRequest{prompt:w.text_of(ui,w.find(ui,base+1)),seed:seed,
+    width:prior.width,height:prior.height,output:w.text_of(ui,w.find(ui,base+6)),loras:entries}
+  result.ok(proposed)
+}

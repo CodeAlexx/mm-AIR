@@ -1,0 +1,653 @@
+// Native Windows presenter under construction. Shared requests remain in parameters.ai.
+module app.mm_air.native
+import std.widgets as w
+import std.shell as shell
+import std.image as image
+import std.draw as draw
+import std.files as files
+import std.text as text
+import std.channel as channel
+import std.tasks as tasks
+import std.system as system
+import std.path as path
+import "generate.ai" as generation
+import "../../AIR/toolkits/portable/fonts.ai" as fonts
+import "../../AIR/toolkits/portable/dialogs.ai" as dialogs
+import "native_generate.ai" as form
+import "native_krea.ai" as krea_form
+import "native_h3.ai" as h3_form
+import "native_seed.ai" as seed
+import "native_view.ai" as presenter
+import ".air/deps/h3/request.ai" as h3
+import "parameters.ai" as parameters
+import "library.ai" as library
+import "movie_project.ai" as movie
+import "native_movie.ai" as movie_view
+import "native_commands.ai" as app_commands
+
+fn preview_file(ui:ref<w.Ui>,file:str)->result<unit,string> effects {alloc,fs.read} {
+  let encoded=match files.read_bytes(file){ok(value)=>value,
+    err(problem)=>{return result.err(string.copy(problem.message))},}
+  var decoded=match image.decode_png(encoded){ok(value)=>value,
+    err(problem)=>{return result.err(image.message(problem))},}
+  w.image_picture(ui,w.find(ui,34),decoded)
+  w.set_text(ui,w.find(ui,35),file)
+  result.ok(())
+}
+fn restore(ui:ref<w.Ui>,request:ref<parameters.QwenImageRequest>)->unit effects {alloc} {
+  form.restore_methods(ui,100,request.scheduler,request.sampler)
+  w.set_text(ui,w.find(ui,101),struct.borrow(request,field=prompt))
+  w.set_text(ui,w.find(ui,103),string.from_int(request.seed))
+  w.set_text(ui,w.find(ui,105),string.from_int(request.width))
+  w.set_text(ui,w.find(ui,107),string.from_int(request.height))
+  w.set_text(ui,w.find(ui,109),string.from_int(request.steps))
+  w.set_text(ui,w.find(ui,111),struct.borrow(request,field=source))
+  w.set_text(ui,w.find(ui,113),form.reference_text(request))
+  w.set_text(ui,w.find(ui,115),struct.borrow(request,field=output))
+  if struct.borrow(request,field=source)!="" or array.len(struct.borrow(request,field=references))!=0{presenter.select_image_edit(ui)}
+  ()
+}
+fn load(file:str,qwen:ref<parameters.QwenImageRequest>,krea:ref<parameters.KreaRequest>,h3_state:ref<parameters.H3Parameters>,h3_active:ref<bool>)->result<bool,string> effects {alloc,fs.read} {
+  let source=match files.read_text(file){ok(value)=>value,err(problem)=>{return result.err(string.copy(problem.message))},}
+  load_text(source,qwen,krea,h3_state,h3_active)
+}
+fn load_text(source:str,qwen:ref<parameters.QwenImageRequest>,krea:ref<parameters.KreaRequest>,h3_state:ref<parameters.H3Parameters>,h3_active:ref<bool>)->result<bool,string> effects {alloc} {
+  if parameters.is_h3(source){
+    let decoded=try parameters.decode_h3(source)
+    let old=ref.swap(h3_state,decoded)
+    let prior=ref.swap(h3_active,true)
+    return result.ok(false)
+  }
+  if parameters.is_krea(source){
+    let decoded=try parameters.decode_krea(source)
+    let old=ref.swap(krea,decoded)
+    let previous=ref.swap(h3_active,false)
+    return result.ok(true)
+  }
+  let decoded=try parameters.decode_qwen_image(source)
+  let old=ref.swap(qwen,decoded)
+  let previous=ref.swap(h3_active,false)
+  result.ok(false)
+}
+fn save(ui:ref<w.Ui>,prior:ref<parameters.QwenImageRequest>,krea_prior:ref<parameters.KreaRequest>,krea:bool,file:str,h3_state:ref<parameters.H3Parameters>,h3_active:bool)->result<unit,string> effects {alloc,fs.write} {
+  let encoded=if h3_active{
+    var value=try h3_form.request(ui,700)
+    try parameters.encode_h3(value,struct.borrow(h3_state,field=loras))
+  }else{if krea{
+    var request=try krea_form.request(ui,300,krea_prior)
+    try parameters.encode_krea(request)
+  }else{
+    var request=try presenter.qwen_request(ui,prior)
+    try parameters.encode_qwen_image(request)
+  }}
+  let temporary=text.concat(file,".tmp")
+  match files.write_atomic(file,temporary,encoded){ok(_)=>result.ok(()),err(problem)=>result.err(string.copy(problem.message)),}
+}
+pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write,gpu,io.write,net,process,random,thread,time,ui} {
+ task.scope {
+  var request=parameters.QwenImageRequest{prompt:"",seed:42,width:2048,height:2048,
+    steps:40,scheduler:0,sampler:0,source:"",references:[],output:"result.png"}
+  var krea_request=parameters.KreaRequest{prompt:"",seed:42,width:1024,height:1024,
+    output:"krea-result.png",loras:[]}
+  var h3_state=parameters.H3Parameters{request:h3.request("",0,0,3,1,2,4,42,6,[],"movie.mp4"),loras:[]}
+  var h3_active=true
+  var krea=false
+  var generate_h3=true
+  var generate_krea=false
+  var krea_page:u64=0
+  var movie_state=movie.create()
+  var render:string=""
+  var saved:string=""
+  var preview:string=""
+  var index:u64=1
+  loop{if index>=view.len(args){break}
+    let option=view.get(args,index)
+    if index+1>=view.len(args){io.ewrite("Missing option value\n")
+      return 2}
+    let value=view.get(args,index+1)
+    if option=="--parameters"{
+      krea=match load(value,request,krea_request,h3_state,h3_active){ok(loaded)=>loaded,err(problem)=>{io.ewrite(problem)
+        return 2},}
+    }else{if option=="--render"{render=string.copy(value)}else{
+      if option=="--save"{saved=string.copy(value)}else{
+        if option=="--preview"{preview=string.copy(value)}else{io.ewrite("Unknown native MM-Air option\n")
+        return 2}}}}
+    index=index+2
+  }
+  var ui=w.new(1600,1000)
+  presenter.configure(ui)
+  var history_error:string=""
+  var history:array<library.Item> = match library.load_history(){ok(value)=>value,err(problem)=>{
+    history_error=string.copy(problem)
+    io.ewrite(text.concat("History: ",text.concat(problem,"\n")))
+    array.new()},}
+  var history_selected:u64=0
+  let _=fonts.configure(ui,14)
+  var app=match if render!=""{shell.offscreen("MM-Air · MiniMax H3 Studio",1600,1000)}else{shell.open("MM-Air · MiniMax H3 Studio",1600,1000,"")}{
+    ok(value)=>value,err(problem)=>{io.ewrite(problem)
+      return 1},}
+  presenter.layout(ui,request,krea_request,krea,krea_page,history,h3_state,h3_active)
+  if not krea and not h3_active{restore(ui,request)}
+  if preview!=""{match preview_file(ui,preview){ok(_)=>{},err(problem)=>{
+    io.ewrite(problem)
+    shell.close(app)
+    return 6},}}
+  var outcome:i32=0
+  if saved!=""{match save(ui,request,krea_request,krea,saved,h3_state,h3_active){ok(_)=>{},err(problem)=>{io.ewrite(problem)
+    shell.close(app)
+    return 3},}}
+  var closed=false
+  var jobs:array<task<generation.Outcome>> = []
+  var exports:array<task<movie_view.ExportOutcome>> = []
+  var receivers:array<channel.Receiver> = []
+  var running_parameters:string=""
+  var running_movie=false
+  var running_movie_shot:u64=0
+  var running_movie_seed:u64=0
+  var cancellations:array<tasks.Cancel> = []
+  loop{if closed and array.len(jobs)==0 and array.len(exports)==0{break}
+    if array.len(exports)!=0{
+      match task.wait_any(exports,0){some(_)=>{
+        var completed=task.join(option.unwrap(array.pop(exports)))
+        if not closed{
+          w.enable(ui,w.find(ui,9034),true)
+          w.set_text(ui,w.find(ui,20),struct.borrow(completed,field=message))
+        }
+      },none=>{},}
+    }
+    if array.len(receivers)!=0{
+      var drained:u64=0
+      loop{if drained>=128{break}
+        drained=drained+1
+        match channel.recv_now(array.borrow(receivers,0),time.monotonic_ns()){
+          ok(message)=>match message{
+            some(item)=>{var update=item
+              match channel.text_of(update){some(note)=>{
+                if not closed{w.set_text(ui,w.find(ui,20),note)}
+              },none=>{},}
+            },none=>{break},
+          },err(_)=>{break},
+        }
+      }
+    }
+    if array.len(jobs)!=0{
+      match task.wait_any(jobs,0){some(_)=>{
+        var completed=task.join(option.unwrap(array.pop(jobs)))
+        match array.pop(receivers){some(receiver)=>{let _=channel.close(receiver)},none=>{},}
+        w.enable(ui,w.find(ui,14),true)
+        w.enable(ui,w.find(ui,15),false)
+        match array.pop(cancellations){some(token)=>{let _=tasks.release(token)},none=>{},}
+        w.set_text(ui,w.find(ui,20),struct.borrow(completed,field=message))
+        if running_movie{
+          movie.record_take_at(movie_state,running_movie_shot,struct.borrow(completed,field=output),
+            running_movie_seed,completed.succeeded)
+          match movie.save(movie_state,text.concat(struct.borrow(completed,field=output),".movie.json")){
+            ok(_)=>{},err(problem)=>w.set_text(ui,w.find(ui,20),text.concat("Take finished; project save failed: ",problem)),}
+          movie_view.generating(ui,false)
+          if movie_view.active(ui){movie_view.restore(ui,movie_state)}
+          running_movie=false
+        }
+        if completed.succeeded{
+          preview=string.copy(struct.borrow(completed,field=output))
+          match library.prep_output(struct.borrow(completed,field=output),running_parameters){
+            ok(entry)=>{var added=entry
+              preview=string.copy(struct.borrow(added,field=thumbnail))
+              array.push(history,added)
+              presenter.history_rows(ui,history)
+              if history_error==""{
+                match library.save_history(history){ok(_)=>{},err(problem)=>{
+                  w.set_text(ui,w.find(ui,20),text.concat("Media saved; history save failed: ",problem))
+                  io.ewrite(text.concat("History: ",text.concat(problem,"\n")))},}
+              }else{w.set_text(ui,w.find(ui,20),text.concat("Media saved; existing history could not be loaded: ",history_error))}
+            },err(problem)=>{io.ewrite(text.concat("History: ",text.concat(problem,"\n")))},
+          }
+          match preview_file(ui,preview){
+            ok(_)=>w.set_text(ui,w.find(ui,35),struct.borrow(completed,field=output)),err(problem)=>w.set_text(ui,w.find(ui,20),
+              text.concat("Media saved; preview failed: ",problem)),
+          }
+          let sidecar=text.concat(struct.borrow(completed,field=output),".json")
+          match files.write_atomic(sidecar,text.concat(sidecar,".tmp"),running_parameters){
+            ok(_)=>{},err(problem)=>w.set_text(ui,w.find(ui,20),
+              text.concat("Media saved; parameter sidecar failed: ",problem.message)),
+          }
+        }
+      },none=>{},}
+    }
+    // A close request drains progress until the owned worker has released its
+    // GPU resources. Do not block in task.join while its channel needs draining.
+    if closed{time.sleep_ms(20)
+      continue}
+    if movie_view.active(ui) and not running_movie{
+      let row=w.selected_of(ui,w.find(ui,9012))
+      if row!=0 and row<=array.len(struct.borrow(movie_state,field=shots)) and row!=movie_state.selected_shot+1{
+        match movie_view.commit(ui,movie_state){
+          ok(_)=>{struct.set(movie_state,row-1,field=selected_shot)
+            movie_view.restore(ui,movie_state)},
+          err(problem)=>{w.set_text(ui,w.find(ui,20),problem)
+            w.select_row(ui,w.find(ui,9012),movie_state.selected_shot,0)},
+        }
+      }
+    }
+    let selected=w.selected_of(ui,w.find(ui,41))
+    if selected!=history_selected{
+      history_selected=selected
+      if selected!=0 and selected<=array.len(history){
+        let entry=array.borrow(history,selected-1)
+        match preview_file(ui,struct.borrow(entry,field=thumbnail)){
+          ok(_)=>{preview=string.copy(struct.borrow(entry,field=thumbnail))
+            w.set_text(ui,w.find(ui,35),struct.borrow(entry,field=path))},
+          err(problem)=>w.set_text(ui,w.find(ui,20),problem),
+        }
+      }
+    }
+    if shell.needs_paint(app) or w.dirty(ui){
+      shell.paint(app,ui)
+      match shell.present(app){ok(_)=>{},err(problem)=>{io.ewrite(problem)
+        outcome=4
+        closed=true
+        if array.len(cancellations)!=0{let _=tasks.request(array.borrow(cancellations,0))}
+      },}
+    }
+    if render!=""{
+      let png=image.encode_png(struct.borrow(struct.borrow(app,field=canvas),field=surface))
+      match files.write_bytes(render,bytes.view(png)){ok(_)=>{},err(_)=>{outcome=5},}
+      break
+    }
+    match shell.wait(app,ui,50){
+      Closing=>{closed=true
+        if array.len(cancellations)!=0{let _=tasks.request(array.borrow(cancellations,0))}
+      },Event(event)=>{let _=shell.dispatch(app,ui,event)},
+      Handled=>{},Idle=>{},Command(_)=>{},
+    }
+    var commands=app_commands.take(ui)
+    var command_index:u64=0
+    loop{if command_index>=array.len(commands){break}
+      let command=array.borrow(commands,command_index)
+      command_index=command_index+1
+      if closed{break}
+      if running_movie and command.key>=9002 and command.key<=9059{
+        w.set_text(ui,w.find(ui,20),"Wait for the current H3 take to finish")
+        continue}
+      if command.key==63{
+        if movie_view.active(ui){continue}
+        if array.len(jobs)!=0{w.set_text(ui,w.find(ui,20),"Wait for generation to finish before editing a Movie project")
+          continue}
+        movie_view.select(ui,movie_state)
+        w.set_text(ui,w.find(ui,20),"Movie project editor")
+        continue
+      }
+      if command.key>=9002 and command.key<=9006{
+        match movie_view.commit(ui,movie_state){ok(_)=>{},err(problem)=>{w.set_text(ui,w.find(ui,20),problem)
+          continue},}
+        if command.key==9002{
+          match dialogs.open("","Open Movie project","JSON\t*.json"){
+            ok(selection)=>match selection{some(file)=>{
+              match movie.load(file){ok(loaded)=>{movie_state=loaded},err(problem)=>w.set_text(ui,w.find(ui,20),problem),}
+            },none=>{},},err(problem)=>w.set_text(ui,w.find(ui,20),dialogs.message(problem)),}
+        }
+        if command.key==9003{
+          match dialogs.save("","movie-project.json","Save Movie project","JSON\t*.json","json"){
+            ok(selection)=>match selection{some(file)=>{
+              match movie.save(movie_state,file){ok(_)=>w.set_text(ui,w.find(ui,20),"Movie project saved"),err(problem)=>w.set_text(ui,w.find(ui,20),problem),}
+            },none=>{},},err(problem)=>w.set_text(ui,w.find(ui,20),dialogs.message(problem)),}
+        }
+        if command.key==9004{movie.add_shot(movie_state)}
+        if command.key==9005{movie.duplicate_shot(movie_state)}
+        if command.key==9006{let _=movie.delete_shot(movie_state)}
+        movie_view.restore(ui,movie_state)
+        continue
+      }
+      if command.key>=9032 and command.key<=9034{
+        match movie_view.commit(ui,movie_state){ok(_)=>{},err(problem)=>{
+          w.set_text(ui,w.find(ui,20),problem)
+          continue},}
+        if command.key==9032{
+          match dialogs.open("","Import finished take","Video\t*.mp4;*.mov;*.mkv;*.webm"){
+            ok(selection)=>match selection{some(file)=>{
+              movie.record_take_at(movie_state,movie_state.selected_shot,file,0,true)
+              movie_view.restore(ui,movie_state)
+              w.set_text(ui,w.find(ui,20),"Take imported; shot duration controls the exported cut")
+            },none=>{},},err(problem)=>w.set_text(ui,w.find(ui,20),dialogs.message(problem)),}
+        }
+        if command.key==9033{
+          match movie_view.choose_take(ui,movie_state){
+            ok(_)=>w.set_text(ui,w.find(ui,20),"Selected take will be used in the exported movie"),
+            err(problem)=>w.set_text(ui,w.find(ui,20),problem),}
+        }
+        if command.key==9034 and array.len(exports)==0{
+          var outputs=movie.selected_outputs(movie_state)
+          if array.len(outputs)==0{w.set_text(ui,w.find(ui,20),"Select at least one finished take before exporting")
+            continue}
+          let snapshot=match movie.encode(movie_state){ok(value)=>value,err(problem)=>{
+            w.set_text(ui,w.find(ui,20),problem)
+            continue},}
+          match dialogs.save("","movie.mp4","Export Movie","MP4\t*.mp4","mp4"){
+            ok(selection)=>match selection{some(file)=>{
+              var work=movie_view.ExportJob{project:snapshot,output:file,scratch:system.temp_directory()}
+              array.push(exports,task.spawn(work,fn=movie_view.export_movie))
+              w.enable(ui,w.find(ui,9034),false)
+              w.set_text(ui,w.find(ui,20),"Exporting selected takes in shot order")
+            },none=>{},},err(problem)=>w.set_text(ui,w.find(ui,20),dialogs.message(problem)),}
+        }
+        continue
+      }
+      if command.key>=9035 and command.key<=9039{
+        match movie_view.commit(ui,movie_state){ok(_)=>{},err(problem)=>{
+          w.set_text(ui,w.find(ui,20),problem)
+          continue},}
+        if command.key==9036 or command.key==9037{
+          match dialogs.open("",if command.key==9036{"Choose first frame"}else{"Choose last frame"},"Images\t*.png;*.jpg;*.jpeg;*.webp"){
+            ok(selection)=>match selection{some(file)=>{
+              movie.set_frame(movie_state,movie_state.selected_shot,file,command.key==9036)
+              movie_view.restore(ui,movie_state)
+            },none=>{},},err(problem)=>w.set_text(ui,w.find(ui,20),dialogs.message(problem)),}
+          continue
+        }
+        if command.key==9038{
+          movie.set_frame(movie_state,movie_state.selected_shot,"",true)
+          movie.set_frame(movie_state,movie_state.selected_shot,"",false)
+          movie_view.restore(ui,movie_state)
+          continue
+        }
+        if command.key==9039{
+          match movie.create_continuation(movie_state,movie_state.selected_shot){
+            ok(_)=>movie_view.restore(ui,movie_state),err(problem)=>w.set_text(ui,w.find(ui,20),problem),}
+          continue
+        }
+        if array.len(jobs)!=0{w.set_text(ui,w.find(ui,20),"Wait for generation to finish")
+          continue}
+        var proposed=match movie_view.request(movie_state,movie_state.selected_shot,"take.mp4"){
+          ok(value)=>value,err(problem)=>{w.set_text(ui,w.find(ui,20),problem)
+            continue},}
+        let output=match dialogs.save("","take.mp4","Save H3 take","MP4\t*.mp4","mp4"){
+          ok(selection)=>match selection{some(file)=>file,none=>{continue},},
+          err(problem)=>{w.set_text(ui,w.find(ui,20),dialogs.message(problem))
+            continue},}
+        let _=ref.swap(struct.borrow(proposed,field=output),output)
+        let resolved=match seed.resolve(proposed.seed){ok(value)=>value,err(problem)=>{
+          w.set_text(ui,w.find(ui,20),problem)
+          continue},}
+        struct.set(proposed,resolved,field=seed)
+        var configuration=match generation.configuration(){ok(value)=>value,err(problem)=>{
+          w.set_text(ui,w.find(ui,20),problem)
+          continue},}
+        var loras:array<parameters.LoraEntry> = []
+        running_parameters=match parameters.encode_h3(proposed,loras){ok(value)=>value,err(problem)=>{
+          w.set_text(ui,w.find(ui,20),problem)
+          continue},}
+        var receiver=match channel.open(128,1024){ok(value)=>value,err(problem)=>{
+          w.set_text(ui,w.find(ui,20),problem.message)
+          continue},}
+        var work=match generation.h3_job(configuration,proposed,loras,channel.ticket(receiver)){
+          ok(value)=>value,err(problem)=>{let _=channel.close(receiver)
+            w.set_text(ui,w.find(ui,20),problem)
+            continue},}
+        var shot=movie.snapshot_shot(movie_state,movie_state.selected_shot)
+        if struct.borrow(shot,field=continue_from)!=""{
+          let output_frames=movie.output_frames(shot)
+          match generation.enable_motion_context(work,struct.borrow(shot,field=continue_from),
+              shot.motion_context_frames,output_frames){
+            ok(_)=>{},err(problem)=>{let _=channel.close(receiver)
+              w.set_text(ui,w.find(ui,20),problem)
+              continue},}
+        }
+        running_movie=true
+        running_movie_shot=movie_state.selected_shot
+        running_movie_seed=cast.sat(resolved)
+        struct.set(array.borrow(struct.borrow(movie_state,field=shots),running_movie_shot),resolved,field=seed)
+        match movie.save(movie_state,text.concat(struct.borrow(proposed,field=output),".movie.json")){
+          ok(_)=>{},err(problem)=>{let _=channel.close(receiver)
+            running_movie=false
+            w.set_text(ui,w.find(ui,20),problem)
+            continue},}
+        movie_view.restore(ui,movie_state)
+        array.push(receivers,receiver)
+        array.push(jobs,task.spawn(work,fn=generation.run))
+        movie_view.generating(ui,true)
+        w.enable(ui,w.find(ui,14),false)
+        w.enable(ui,w.find(ui,15),false)
+        w.set_text(ui,w.find(ui,20),"Generating Movie take with H3 · CK INT8")
+        continue
+      }
+      if command.key==43{
+        match library.clear_history(){ok(_)=>{
+          history=array.new()
+          history_error=""
+          history_selected=0
+          presenter.history_rows(ui,history)
+          w.set_text(ui,w.find(ui,20),"History cleared; media files retained")
+        },err(problem)=>w.set_text(ui,w.find(ui,20),problem),}
+        continue
+      }
+      if command.key==42{
+        let selected=w.selected_of(ui,w.find(ui,41))
+        if selected==0 or selected>array.len(history){continue}
+        let entry=array.borrow(history,selected-1)
+        krea=match load_text(struct.borrow(entry,field=parameters),request,krea_request,h3_state,h3_active){
+          ok(value)=>value,err(problem)=>{w.set_text(ui,w.find(ui,20),problem)
+            continue},}
+        krea_page=0
+        presenter.layout(ui,request,krea_request,krea,krea_page,history,h3_state,h3_active)
+        if h3_active{h3_form.restore(ui,700,struct.borrow(h3_state,field=request))}else{if krea{krea_form.restore(ui,300,krea_request)}else{restore(ui,request)}}
+        w.enable(ui,w.find(ui,14),array.len(jobs)==0)
+        w.enable(ui,w.find(ui,15),array.len(cancellations)!=0)
+        if preview!=""{let _=preview_file(ui,preview)}
+        w.set_text(ui,w.find(ui,20),"Selected result parameters restored")
+        continue
+      }
+      if command.key==60 or command.key==62{
+        if movie_view.active(ui){match movie_view.commit(ui,movie_state){ok(_)=>{},err(problem)=>{w.set_text(ui,w.find(ui,20),problem)
+          continue},}}
+        if command.key==62{
+          if not presenter.image_edit(ui){generate_h3=h3_active
+            generate_krea=krea}
+          h3_active=false
+          krea=false
+          presenter.select_image_edit(ui)
+        }else{
+          if presenter.image_edit(ui){h3_active=generate_h3
+            krea=generate_krea}
+          presenter.select_model(ui,krea,h3_active)
+        }
+        w.enable(ui,w.find(ui,14),array.len(jobs)==0)
+        continue
+      }
+      if command.key==16 or command.key==17 or command.key==18{
+        h3_active=command.key==18
+        krea=command.key==17
+        presenter.select_model(ui,krea,h3_active)
+        w.enable(ui,w.find(ui,14),array.len(jobs)==0)
+        w.set_text(ui,w.find(ui,20),if h3_active{"H3 video and audio generation"}else{""})
+        continue
+      }
+      if h3_active and (command.key==717 or command.key==719){
+        let audio=command.key==719
+        match dialogs.open_multiple("",if audio{"Add H3 audio references"}else{"Add H3 visual references"},
+            if audio{"Audio\t*.wav;*.mp3;*.flac;*.m4a;*.ogg"}else{"Images and video\t*.png;*.jpg;*.jpeg;*.webp;*.mp4;*.mov;*.mkv"}){
+          ok(selection)=>match selection{some(files)=>{var chosen=files
+            match h3_form.add_references(ui,700,chosen,audio){
+              ok(_)=>w.set_text(ui,w.find(ui,20),"H3 references added in selection order"),
+              err(problem)=>w.set_text(ui,w.find(ui,20),problem),}
+          },none=>{},},err(problem)=>w.set_text(ui,w.find(ui,20),dialogs.message(problem)),}
+        continue
+      }
+      if h3_active and (command.key==725 or command.key==726){
+        w.set_text(ui,w.find(ui,if command.key==725{711}else{713}),"")
+        continue
+      }
+      if h3_form.select(ui,700,command.key){continue}
+      if form.select_method(ui,100,command.key){continue}
+      if command.key==130 and not krea {
+        match dialogs.open_multiple("","Add ordered reference images","Images\t*.png;*.jpg;*.jpeg;*.webp"){
+          ok(selection)=>match selection{some(paths)=>{var selected=paths
+            match form.add_references(ui,100,selected){
+              ok(_)=>w.set_text(ui,w.find(ui,20),"References added in selection order"),
+              err(problem)=>w.set_text(ui,w.find(ui,20),problem),
+            }
+          },none=>{},},
+          err(problem)=>w.set_text(ui,w.find(ui,20),dialogs.message(problem)),
+        }
+        continue
+      }
+      let remove_row=command.key>=336 and (command.key-336)%5==0 and
+        (command.key-336)/5<array.len(struct.borrow(krea_request,field=loras))
+      if krea and (command.key==309 or command.key==310 or command.key==311 or remove_row){
+        var edited=match krea_form.snapshot(ui,300,krea_request){ok(value)=>value,err(problem)=>{
+          w.set_text(ui,w.find(ui,20),problem)
+          continue},}
+        if command.key==309{
+          let file=match dialogs.open("","Add Krea LoRA","SafeTensors\t*.safetensors"){
+            ok(value)=>match value{some(selected)=>selected,none=>{continue},},
+            err(problem)=>{w.set_text(ui,w.find(ui,20),dialogs.message(problem))
+              continue},}
+          match krea_form.add_lora(edited,file){ok(_)=>{},err(problem)=>{
+            w.set_text(ui,w.find(ui,20),problem)
+            continue},}
+          krea_page=(array.len(struct.borrow(edited,field=loras))-1)/3
+        }
+        if command.key==310 and krea_page!=0{krea_page=krea_page-1}
+        if command.key==311 and (krea_page+1)*3<array.len(struct.borrow(edited,field=loras)){krea_page=krea_page+1}
+        if remove_row{
+          let _=krea_form.remove_lora(edited,(command.key-336)/5)
+          let count=array.len(struct.borrow(edited,field=loras))
+          if count==0{krea_page=0}else{if krea_page*3>=count{krea_page=(count-1)/3}}
+        }
+        krea_request=edited
+        presenter.layout(ui,request,krea_request,krea,krea_page,history,h3_state,h3_active)
+        krea_form.restore(ui,300,krea_request)
+        w.enable(ui,w.find(ui,14),array.len(jobs)==0)
+        w.enable(ui,w.find(ui,15),array.len(cancellations)!=0)
+        if preview!=""{let _=preview_file(ui,preview)}
+        continue
+      }
+      if command.key==10{
+        match dialogs.open("","Load MM-Air parameters","JSON\t*.json"){
+          ok(selection)=>match selection{some(file)=>match load(file,request,krea_request,h3_state,h3_active){
+            ok(loaded)=>{krea=loaded
+              krea_page=0
+              presenter.layout(ui,request,krea_request,krea,krea_page,history,h3_state,h3_active)
+              w.enable(ui,w.find(ui,14),array.len(jobs)==0)
+              w.enable(ui,w.find(ui,15),array.len(cancellations)!=0)
+              if h3_active{h3_form.restore(ui,700,struct.borrow(h3_state,field=request))}else{if krea{krea_form.restore(ui,300,krea_request)}else{restore(ui,request)}}
+              if preview!=""{let _=preview_file(ui,preview)}
+              w.set_text(ui,w.find(ui,20),"Parameters loaded")},
+            err(problem)=>w.set_text(ui,w.find(ui,20),problem),},none=>{},},
+          err(problem)=>w.set_text(ui,w.find(ui,20),dialogs.message(problem)),}
+      }
+      if command.key==11{
+        match dialogs.save("","parameters.json","Save MM-Air parameters","JSON\t*.json","json"){
+          ok(selection)=>match selection{some(file)=>match save(ui,request,krea_request,krea,file,h3_state,h3_active){
+            ok(_)=>w.set_text(ui,w.find(ui,20),"Parameters saved"),
+            err(problem)=>w.set_text(ui,w.find(ui,20),problem),},none=>{},},
+          err(problem)=>w.set_text(ui,w.find(ui,20),dialogs.message(problem)),}
+      }
+      if command.key==12{
+        match dialogs.open("","Choose source image","Images\t*.png;*.jpg;*.jpeg;*.webp"){
+          ok(selection)=>match selection{some(file)=>w.set_text(ui,w.find(ui,111),file),none=>{},},
+          err(problem)=>w.set_text(ui,w.find(ui,20),dialogs.message(problem)),}
+      }
+      if command.key==13{
+        match dialogs.save("",if h3_active{"movie.mp4"}else{"result.png"},"Save generated media",if h3_active{"MP4\t*.mp4"}else{"PNG\t*.png"},if h3_active{"mp4"}else{"png"}){
+          ok(selection)=>match selection{some(file)=>w.set_text(ui,w.find(ui,if h3_active{715}else{if krea{306}else{115}}),file),none=>{},},
+          err(problem)=>w.set_text(ui,w.find(ui,20),dialogs.message(problem)),}
+      }
+      if command.key==14 and array.len(jobs)==0{
+        if h3_active{
+          var proposed=match h3_form.request(ui,700){ok(value)=>value,err(problem)=>{
+            w.set_text(ui,w.find(ui,20),problem)
+            continue},}
+          let resolved=match seed.resolve(proposed.seed){ok(value)=>value,err(problem)=>{
+            w.set_text(ui,w.find(ui,20),problem)
+            continue},}
+          struct.set(proposed,resolved,field=seed)
+          w.set_text(ui,w.find(ui,703),string.from_int(resolved))
+          var configuration=match generation.configuration(){ok(value)=>value,err(problem)=>{
+            w.set_text(ui,w.find(ui,20),problem)
+            continue},}
+          running_parameters=match parameters.encode_h3(proposed,struct.borrow(h3_state,field=loras)){
+            ok(value)=>value,err(problem)=>{w.set_text(ui,w.find(ui,20),problem)
+              continue},}
+          var receiver=match channel.open(128,1024){ok(value)=>value,err(problem)=>{
+            w.set_text(ui,w.find(ui,20),problem.message)
+            continue},}
+          var work=match generation.h3_job(configuration,proposed,struct.borrow(h3_state,field=loras),channel.ticket(receiver)){
+            ok(value)=>value,err(problem)=>{let _=channel.close(receiver)
+              w.set_text(ui,w.find(ui,20),problem)
+              continue},}
+          array.push(receivers,receiver)
+          array.push(jobs,task.spawn(work,fn=generation.run))
+          w.enable(ui,w.find(ui,14),false)
+          w.enable(ui,w.find(ui,15),false)
+          w.set_text(ui,w.find(ui,20),"Starting MiniMax H3")
+          continue
+        }
+        if krea{
+          var proposed=match krea_form.request(ui,300,krea_request){
+            ok(value)=>value,err(problem)=>{w.set_text(ui,w.find(ui,20),problem)
+              continue},}
+          match krea_form.resolve_seed(proposed){ok(_)=>{},err(problem)=>{
+            w.set_text(ui,w.find(ui,20),problem)
+            continue},}
+          w.set_text(ui,w.find(ui,303),string.from_int(proposed.seed))
+          let sources=match generation.krea_sources(){ok(value)=>value,err(problem)=>{
+            w.set_text(ui,w.find(ui,20),problem)
+            continue},}
+          running_parameters=match parameters.encode_krea(proposed){ok(value)=>value,err(problem)=>{
+            w.set_text(ui,w.find(ui,20),problem)
+            continue},}
+          var receiver=match channel.open(128,1024){ok(value)=>value,err(problem)=>{
+            w.set_text(ui,w.find(ui,20),problem.message)
+            continue},}
+          let cancel_path=path.join(system.temp_directory(),text.concat("mm-air-krea-cancel-",
+            string.from_int(time.monotonic_ns())))
+          var cancellation=match tasks.token(cancel_path){ok(value)=>value,err(problem)=>{
+            let _=channel.close(receiver)
+            w.set_text(ui,w.find(ui,20),problem)
+            continue},}
+          var work=generation.KreaCancelableJob{
+            job:generation.KreaJob{sources:sources,request:proposed,progress:channel.ticket(receiver)},
+            cancel_path:cancel_path}
+          array.push(receivers,receiver)
+          array.push(cancellations,cancellation)
+          array.push(jobs,task.spawn(work,fn=generation.run_krea_ck_cancelable))
+          w.enable(ui,w.find(ui,14),false)
+          w.enable(ui,w.find(ui,15),true)
+          w.set_text(ui,w.find(ui,20),"Starting Krea 2 Turbo with CK INT8")
+          continue
+        }
+        var proposed=match presenter.qwen_request(ui,request){
+          ok(value)=>value,err(problem)=>{w.set_text(ui,w.find(ui,20),problem)
+            continue},}
+        running_parameters=match parameters.encode_qwen_image(proposed){
+          ok(value)=>value,err(problem)=>{w.set_text(ui,w.find(ui,20),problem)
+            continue},}
+        let cancel_path=path.join(system.temp_directory(),text.concat("mm-air-cancel-",
+          string.from_int(time.monotonic_ns())))
+        var cancellation=match tasks.token(cancel_path){ok(value)=>value,
+          err(problem)=>{w.set_text(ui,w.find(ui,20),problem)
+            continue},}
+        var receiver=match channel.open(128,1024){ok(value)=>value,
+          err(problem)=>{w.set_text(ui,w.find(ui,20),problem.message)
+            continue},}
+        var work=generation.QwenImageCancelableJob{
+          job:generation.QwenImageJob{request:proposed,progress:channel.ticket(receiver)},
+          cancel_path:cancel_path}
+        array.push(receivers,receiver)
+        array.push(cancellations,cancellation)
+        array.push(jobs,task.spawn(work,fn=generation.run_qwen_image_ck_cancelable))
+        w.enable(ui,w.find(ui,14),false)
+        w.enable(ui,w.find(ui,15),true)
+        w.set_text(ui,w.find(ui,20),"Starting Qwen-Image-2.1 with CK INT8")
+      }
+      if command.key==15 and array.len(cancellations)!=0{
+        if tasks.request(array.borrow(cancellations,0)){
+          w.set_text(ui,w.find(ui,20),"Cancelling at the next safe phase boundary")
+          w.enable(ui,w.find(ui,15),false)
+        }
+      }
+    }
+  }
+  shell.close(app)
+  outcome
+ }
+}

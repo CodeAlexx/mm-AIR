@@ -1,0 +1,51 @@
+module app.mm_air.tests.repair_runtime
+import std.files as files
+import std.process as proc
+import std.path as path
+import std.system as system
+import std.text as text
+import "../repair_runtime.ai" as runtime
+import "../.air/deps/h3_repair/plan.ai" as plan
+import "../.air/deps/h3_repair/motion.ai" as motion
+
+pub fn main(args:view<str>)->i32 effects{alloc,env,fs.meta,fs.read,fs.write,io.write,process,time}{
+  let root=path.join(system.temp_directory(),text.concat("mm-air-repair-runtime-test-",
+    string.from_int(time.monotonic_ns())))
+  match files.create_dir(str.view(root)){ok(_)=>{},err(_)=>{panic "test root"}}
+  let source=path.join(str.view(root),"source.mp4")
+  let output=path.join(str.view(root),"result.mp4")
+  match proc.check(["ffmpeg","-nostdin","-v","error","-y","-f","lavfi",
+      "-i","testsrc2=size=64x64:rate=24:duration=1","-f","lavfi","-i",
+      "sine=frequency=440:sample_rate=32000:duration=1","-map","0:v:0","-map",
+      "1:a:0","-c:v","libx264rgb","-crf","0","-pix_fmt","rgb24","-c:a",
+      "aac",string.copy(str.view(source))]){ok(_)=>{},err(_)=>{panic "fixture"}}
+  var settings=runtime.settings(6,10,1,1,1.0,plan.MemoryMode.Full,56,22)
+  var holds=motion.create(24)
+  match motion.add_span(holds,6,10,3.0){ok(_)=>{},err(_)=>{panic "hold"}}
+  let encoded=motion.encode(holds)
+  match runtime.set_motion_plan(settings,str.view(encoded)){
+    ok(_)=>{},err(_)=>{panic "motion plan"}}
+  var prepared=match runtime.prepare(str.view(source),str.view(output),str.view(root),settings){
+    ok(value)=>value,err(message)=>{
+      io.write(message)
+      panic "prepare"
+    }}
+  match proc.check(["ffmpeg","-nostdin","-v","error","-y","-i",
+      runtime.h3_source(prepared),"-map","0:v:0","-frames:v",
+      string.from_int(runtime.h3_geometry(prepared).frames),"-c:v","libx264rgb",
+      "-crf","0","-pix_fmt","rgb24",runtime.h3_output(prepared)]){
+    ok(_)=>{},err(_)=>{panic "fake generation"}}
+  var report=match runtime.finish(prepared){ok(value)=>value,
+    err(message)=>{
+      io.write(message)
+      panic "finish"
+    }}
+  if not report.outside_exact{panic "outside exact"}
+  runtime.discard(prepared)
+  let _=files.remove(str.view(source))
+  let _=files.remove(str.view(output))
+  let _=files.remove(text.concat(str.view(output),".repair.json"))
+  let _=files.remove(str.view(root))
+  io.write("MM-Air repair runtime PASS\n")
+  0
+}

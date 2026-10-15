@@ -1,0 +1,93 @@
+module app.mm_air.tests.native_generate
+import "../native_generate.ai" as form
+import "../parameters.ai" as parameters
+import std.widgets as w
+import std.draw as draw
+
+pub fn main(args:view<str>)->i32 effects {alloc,io.write} {
+  var request=parameters.QwenImageRequest{prompt:"A robot in a garden",seed:18446744073709551615,
+    width:2048,height:2048,steps:40,scheduler:0,sampler:0,
+    source:"first.png",references:[string.copy("second.png")],output:"result.png"}
+  var ui=w.new(900,900)
+  w.begin(ui)
+  let root=w.panel(ui,1,0,true,0,1,8,8)
+  form.qwen_fields(ui,root,100,request)
+  var initial=option.unwrap(draw.surface(1,1))
+  let picture=w.image(ui,200,root,80,0,initial)
+  w.finish(ui)
+  var restored=match form.qwen_request(ui,100,request){ok(value)=>value,err(problem)=>{io.ewrite(problem)
+    return 1},}
+  if restored.seed!=18446744073709551615 or restored.steps!=40{return 2}
+  if array.len(struct.borrow(restored,field=references))!=1 or restored.source!="first.png"{return 3}
+  w.set_text(ui,w.find(ui,103),"9007199254740993")
+  var changed=match form.qwen_request(ui,100,request){ok(value)=>value,err(_)=>{return 4},}
+  if changed.seed!=9007199254740993{return 5}
+  w.set_text(ui,w.find(ui,103),"18446744073709551616")
+  match form.qwen_request(ui,100,request){ok(_)=>{return 6},err(_)=>{},}
+  if request.seed!=18446744073709551615{return 7}
+  w.set_text(ui,w.find(ui,103),"42")
+  w.set_text(ui,w.find(ui,109),"1")
+  match form.qwen_request(ui,100,request){ok(_)=>{return 8},err(_)=>{},}
+  w.set_text(ui,w.find(ui,109),"20")
+  w.set_text(ui,w.find(ui,111),"C:/images/café source.webp")
+  w.set_text(ui,w.find(ui,113),"D:/images/first reference.png\r\n\r\nD:/images/second.jpg\n")
+  w.set_text(ui,w.find(ui,115),"D:/outputs/café result.png")
+  var paths=match form.qwen_request(ui,100,request){ok(value)=>value,err(problem)=>{io.ewrite(problem)
+    return 9},}
+  if paths.source!="C:/images/café source.webp" or paths.output!="D:/outputs/café result.png"{return 10}
+  if array.len(struct.borrow(paths,field=references))!=2{return 11}
+  if array.borrow(struct.borrow(paths,field=references),0)!="D:/images/first reference.png"{return 12}
+  if array.borrow(struct.borrow(paths,field=references),1)!="D:/images/second.jpg"{return 13}
+  if request.source!="first.png" or request.output!="result.png"{return 14}
+  w.set_text(ui,w.find(ui,115),"result.jpg")
+  match form.qwen_request(ui,100,request){ok(_)=>{return 15},err(_)=>{},}
+  // Replacing a preview retains independent pixels and must not reset edits.
+  var replacement=option.unwrap(draw.surface_from_rgb24(2,1,b"\x{ff}\x{00}\x{00}\x{00}\x{ff}\x{00}"))
+  w.image_picture(ui,picture,replacement)
+  array.set(struct.borrow(replacement,field=pixels),0,0)
+  let retained=struct.borrow(array.borrow(struct.borrow(ui,field=widgets),picture-1),field=picture)
+  let red=option.unwrap(draw.surface_pixel(retained,0,0))
+  let green=option.unwrap(draw.surface_pixel(retained,1,0))
+  if red.r!=255 or red.g!=0 or green.g!=255 or green.r!=0{return 16}
+  if w.text_of(ui,w.find(ui,103))!="42" or w.text_of(ui,w.find(ui,115))!="result.jpg"{return 17}
+  if not w.dirty(ui){return 18}
+  w.set_text(ui,w.find(ui,115),"result.png")
+  var scheduler:u32=0
+  loop{if scheduler>=2{break}
+    var sampler:u32=0
+    loop{if sampler>=2{break}
+      let _=form.select_method(ui,100,116+cast.wrap(scheduler))
+      let _=form.select_method(ui,100,118+cast.wrap(sampler))
+      var selected=match form.qwen_request(ui,100,request){ok(value)=>value,err(_)=>{return 19},}
+      if selected.scheduler!=scheduler or selected.sampler!=sampler{return 20}
+      sampler=sampler+1
+    }
+    scheduler=scheduler+1
+  }
+  if request.scheduler!=0 or request.sampler!=0{return 21}
+  form.restore_methods(ui,100,0,0)
+  var reset=match form.qwen_request(ui,100,request){ok(value)=>value,err(_)=>{return 22},}
+  if reset.scheduler!=0 or reset.sampler!=0{return 23}
+  w.check(ui,w.find(ui,117),true)
+  match form.qwen_request(ui,100,request){ok(_)=>{return 24},err(_)=>{},}
+  w.set_text(ui,w.find(ui,113),"first.png\n")
+  var selected:array<string> = [string.copy("D:/café folder/second.webp"),string.copy("first.png")]
+  match form.add_references(ui,100,selected){ok(_)=>{},err(_)=>{return 25},}
+  let ordered="first.png\nD:/café folder/second.webp\nfirst.png"
+  if w.text_of(ui,w.find(ui,113))!=ordered{return 26}
+  var invalid:array<string> = [string.copy("valid.png"),string.copy("invalid.txt")]
+  match form.add_references(ui,100,invalid){ok(_)=>{return 27},err(_)=>{},}
+  if w.text_of(ui,w.find(ui,113))!=ordered{return 28}
+  var remaining:array<string> = [string.copy("4.png"),string.copy("5.jpg"),string.copy("6.jpeg"),
+    string.copy("7.webp"),string.copy("8.PNG"),string.copy("9.png")]
+  match form.add_references(ui,100,remaining){ok(_)=>{},err(_)=>{return 29},}
+  let full=w.text_of(ui,w.find(ui,113))
+  var extra:array<string> = [string.copy("10.png")]
+  match form.add_references(ui,100,extra){ok(_)=>{return 30},err(_)=>{},}
+  if w.text_of(ui,w.find(ui,113))!=full{return 31}
+  var empty:array<string> = []
+  match form.add_references(ui,100,empty){ok(_)=>{},err(_)=>{return 32},}
+  if w.text_of(ui,w.find(ui,113))!=full{return 33}
+  io.write("Native Qwen controls preserve exact seeds, ordered reference selections and invalid drafts.\n")
+  0
+}

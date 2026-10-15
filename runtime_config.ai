@@ -1,0 +1,114 @@
+// Local deployment settings shared by native Windows and Linux entry points.
+// Environment values override user preferences and optional deployment defaults.
+module app.mm_air.runtime_config
+import std.decode as decode
+import std.files as files
+import std.json as json
+import std.path as path
+import std.system as system
+import std.text as text
+import "library.ai" as library
+
+pub fn field(source:str,name:str)->result<option<string>,string> effects{alloc}{
+  var document=match json.parse(source){ok(value)=>value,
+    err(_)=>{return result.err("MM-Air runtime configuration is not valid JSON")},}
+  var root=decode.root()
+  var schema_node=match decode.field(document,root,"schema"){
+    ok(value)=>value,err(problem)=>{var held=problem
+      return result.err(decode.message(held))},}
+  let schema=match decode.as_string(document,schema_node){
+    ok(value)=>value,err(problem)=>{var held=problem
+      return result.err(decode.message(held))},}
+  if schema!="mm-air.runtime.v1"{
+    return result.err("Unsupported MM-Air runtime configuration schema")
+  }
+  let selected=match decode.optional_field(document,root,name){
+    ok(value)=>value,err(problem)=>{var held=problem
+      return result.err(decode.message(held))},}
+  match selected{
+    none=>result.ok(option.none()),
+    some(value)=>{var node=value
+      match decode.as_string(document,node){
+        ok(value)=>result.ok(option.some(value)),
+        err(problem)=>{var held=problem
+          result.err(decode.message(held))},
+      }
+    },
+  }
+}
+
+fn read_field(filename:str,name:str,required:bool)->result<option<string>,string>
+    effects{alloc,fs.read,fs.meta}{
+  if not required{match files.exists(filename){
+    ok(found)=>{if not found{return result.ok(option.none())}},
+    err(problem)=>{return result.err(string.copy(problem.message))},}}
+  let source=match files.read_text(filename){ok(value)=>value,
+    err(problem)=>{return result.err(text.concat("Cannot read MM-Air runtime configuration: ",problem.message))},}
+  field(source,name)
+}
+
+pub fn preferences_path()->result<string,string> effects{alloc,env}{
+  match env.get("MM_AIR_RUNTIME_CONFIG"){
+    some(filename)=>result.ok(filename),
+    none=>result.ok(path.join(try library.data_directory(),"runtime.json")),}
+}
+
+pub fn value(name:str)->result<option<string>,string>
+    effects{alloc,env,fs.read,fs.meta}{
+  match env.get(name){some(value)=>{return result.ok(option.some(value))},none=>{},}
+  match env.get("MM_AIR_RUNTIME_CONFIG"){
+    some(filename)=>{return read_field(filename,name,true)},none=>{},}
+  let stored=try read_field(try preferences_path(),name,false)
+  match stored{some(value)=>{return result.ok(option.some(value))},none=>{},}
+  let executable=match system.executable_path(){ok(value)=>value,
+    err(problem)=>{return result.err(string.copy(problem.message))},}
+  read_field(path.join(path.dirname(executable),"share/mm-air/runtime.json"),name,false)
+}
+
+// Retain unknown preferences and deployment keys when updating chosen fields.
+pub fn update(source:str,names:ref<array<string>>,values:ref<array<string>>)
+    ->result<string,string> effects{alloc}{
+  if array.len(names)!=array.len(values){return result.err("Settings field count mismatch")}
+  let _=try field(source,"schema")
+  var document=match json.parse(source){ok(value)=>value,
+    err(_)=>{return result.err("Invalid settings JSON")},}
+  var keys:array<string> = []
+  var fragments:array<string> = []
+  var cursor=json.first_member(document,json.root())
+  loop{
+    let member=match json.member(document,json.root(),cursor){some(value)=>value,
+      none=>{break},}
+    let key=option.unwrap(json.as_string(document,member.name))
+    var replaced:bool=false
+    var index:u64=0
+    loop{if index>=array.len(names){break}
+      if array.borrow(names,index)==key{replaced=true}
+      index=index+1}
+    if not replaced{
+      array.push(keys,key)
+      array.push(fragments,option.unwrap(json.raw(document,member.value)))}
+    cursor=member.next
+  }
+  var index:u64=0
+  loop{if index>=array.len(names){break}
+    array.push(keys,string.copy(array.borrow(names,index)))
+    array.push(fragments,json.quote(array.borrow(values,index)))
+    index=index+1}
+  match json.encode_object(keys,fragments){ok(value)=>result.ok(value),
+    err(_)=>result.err("Cannot encode MM-Air settings"),}
+}
+
+pub fn save(names:ref<array<string>>,values:ref<array<string>>)->result<string,string>
+    effects{alloc,env,fs.read,fs.meta,fs.write}{
+  let filename=try preferences_path()
+  let exists=match files.exists(filename){ok(value)=>value,
+    err(problem)=>{return result.err(string.copy(problem.message))},}
+  let source=if exists{match files.read_text(filename){ok(value)=>value,
+    err(problem)=>{return result.err(string.copy(problem.message))},}}
+    else{string.copy("{\"schema\":\"mm-air.runtime.v1\"}")}
+  let encoded=try update(source,names,values)
+  match files.mkdirs(path.dirname(filename)){ok(_)=>{},
+    err(problem)=>{return result.err(string.copy(problem.message))},}
+  match files.write_atomic(filename,text.concat(filename,".tmp"),encoded){
+    ok(_)=>result.ok(filename),err(problem)=>result.err(string.copy(problem.message)),}
+}

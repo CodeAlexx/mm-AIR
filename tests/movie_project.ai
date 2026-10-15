@@ -1,0 +1,89 @@
+module app.mm_air.tests.movie_project
+import "../movie_project.ai" as movie
+import std.text as text
+
+pub fn main(args:view<str>)->i32 effects{alloc,env,fs.meta,fs.read,fs.write,process,time}{
+  var project=movie.create()
+  if movie.resolution_for_aspect(1161,2048)!=5 or
+     movie.resolution_for_aspect(2048,1161)!=0 or
+     movie.resolution_for_aspect(1024,1024)!=3{
+    panic "opening frame aspect must select an admitted matching H3 canvas"}
+  movie.set_resolution(project,0,movie.resolution_for_aspect(1161,2048))
+  var portrait=movie.snapshot_shot(project,0)
+  if portrait.width!=768 or portrait.height!=1344{panic "portrait opening geometry"}
+  movie.set_resolution(project,0,0)
+  if array.len(struct.borrow(project,field=shots))!=1{panic "default shot"}
+  let first=array.borrow(struct.borrow(project,field=shots),0)
+  let _=ref.swap(struct.borrow(first,field=brief),
+    string.copy("A slow dolly toward the fairy robot while rain glows behind her."))
+  let prompt=movie.compile_prompt(first)
+  if not text.contains(str.view(prompt),"integrated_multimodal_description:"){panic "base prompt"}
+  if movie.internal_frames(first)%17!=5{panic "H3 frame alignment"}
+  movie.add_character(project,"/tmp/fairy-robot.png")
+  var effective=movie.effective_references(project,0)
+  if array.len(effective)!=1 or array.borrow(effective,0)!="/tmp/fairy-robot.png"{
+    panic "shared cast reference"}
+  let cast_prompt=movie.compile_project_prompt(project,0)
+  if not text.contains(str.view(cast_prompt),"subject_definitions:") or
+     not text.contains(str.view(cast_prompt),"character_bible:"){
+    panic "shared cast prompt"}
+  if movie.endless_segment_duration(43.0,60.0,15.0)!=15.0 or
+     movie.endless_segment_duration(0.0,120.0,45.0)!=45.0{
+    panic "endless exact target plan"}
+  struct.set(project,7200.0,field=endless_target)
+  struct.set(project,45.0,field=endless_segment)
+  match movie.validate_endless(project){ok(_)=>{},err(_)=>{panic "unlocked Endless target and segment"}}
+  struct.set(project,2.0,field=endless_target)
+  struct.set(project,0.5,field=endless_segment)
+  match movie.validate_endless(project){ok(_)=>{},err(_)=>{panic "short Endless target and segment"}}
+  struct.set(project,0.0,field=endless_segment)
+  match movie.validate_endless(project){ok(_)=>{panic "zero Endless segment"},err(_)=>{}}
+  struct.set(project,8.0,field=endless_segment)
+  movie.record_take_at(project,0,"/tmp/shot.mp4",42,true)
+  match movie.create_continuation(project,0){ok(_)=>{},err(_)=>{panic "continuation"}}
+  let continuation=array.borrow(struct.borrow(project,field=shots),1)
+  if movie.mode(continuation)!="motion" or
+     struct.borrow(continuation,field=continue_from)!="/tmp/shot.mp4.airh3ctx"{
+    panic "native latent continuation"}
+  movie.add_shot(project)
+  if array.len(struct.borrow(project,field=shots))!=3{panic "add shot"}
+  movie.duplicate_shot(project)
+  if array.len(struct.borrow(project,field=shots))!=4{panic "duplicate shot"}
+  if not movie.delete_shot(project){panic "delete shot"}
+  let encoded=match movie.encode(project){ok(value)=>value,err(_)=>{panic "encode"}}
+  if not text.contains(str.view(encoded),"serenity.h3.movie.v1"){panic "project schema"}
+  let manifest=match movie.edit_manifest(project){ok(value)=>value,err(_)=>{panic "manifest"}}
+  if not text.contains(str.view(manifest),"serenity.h3.edit.v1"){panic "edit schema"}
+  let filename="/tmp/mm-air-movie-project-test.json"
+  match movie.save(project,filename){ok(_)=>{},err(_)=>{panic "save"}}
+  let library_root="/tmp/mm-air-movie-library-test"
+  match movie.save_library_selection(library_root,filename){
+    ok(_)=>{},err(_)=>{panic "save library selection"}}
+  if movie.selected_library_path(library_root,"/tmp/missing")!=filename{
+    panic "restore library selection"}
+  var restored=match movie.load(filename){ok(value)=>value,err(_)=>{panic "load"}}
+  if array.len(struct.borrow(restored,field=shots))!=3{panic "roundtrip shots"}
+  if array.len(struct.borrow(restored,field=characters))!=1{panic "roundtrip cast"}
+  if view.len(args)==2{
+    var imported=match movie.load(view.get(args,1)){ok(value)=>value,
+      err(_)=>{panic "Serenity import"}}
+    if array.len(struct.borrow(imported,field=shots))==0{panic "Serenity shots"}
+  }
+  movie.set_dimensions(project,0,1920,1088)
+  movie.set_duration(project,0,35.125)
+  var custom=movie.snapshot_shot(project,0)
+  match movie.validate(custom){ok(_)=>{},err(_)=>{panic "custom movie geometry"}}
+  movie.set_duration(project,0,0.0)
+  var invalid=movie.snapshot_shot(project,0)
+  match movie.validate(invalid){ok(_)=>{panic "invalid movie duration"},err(_)=>{}}
+  movie.set_duration(project,0,8.0)
+  if view.len(args)==3{
+    movie.set_duration(project,0,1.0)
+    movie.set_duration(project,1,1.0)
+    movie.record_take_at(project,0,view.get(args,1),42,true)
+    movie.record_take_at(project,1,view.get(args,2),43,true)
+    match movie.stitch(project,"/tmp/mm-air-movie-stitch.mp4","/tmp"){
+      ok(_)=>{},err(_)=>{panic "stitch"}}
+  }
+  0
+}

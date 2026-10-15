@@ -1,0 +1,136 @@
+// Four-segment same-seed Movie Maker continuation gate. Both branches start
+// from the exact same base video/context and differ only by Drift Control.
+module app.mm_air.tests.movie_drift_ab_generate
+
+import "../generate.ai" as generation
+import "../movie_project.ai" as movie
+import "../.air/deps/h3/media.ai" as media
+import "../.air/deps/h3/session.ai" as session
+import std.channel as channel
+import std.files as files
+import std.path as path
+import std.text as text
+
+fn fail(message:str)->i32 effects{io.write}{
+  io.ewrite(message)
+  io.ewrite("\n")
+  1
+}
+
+fn continuation(configuration:ref<generation.Configuration>,context_path:str,
+                output:str,drift:bool)->generation.Outcome
+    effects{alloc,env,fs.meta,fs.read,fs.write,gpu,net,process,time}{
+  let geometry=match media.geometry(120,256,256){ok(value)=>value,
+    err(problem)=>{var held=problem
+      return generation.Outcome{succeeded:false,output:string.copy(output),
+        message:media.error_message(held),runtime_ms:0,peak_vram_bytes:0}}}
+  // The desktop drains progress continuously. This bounded gate owns no UI
+  // consumer, so provision enough space for one complete generation.
+  var receiver=match channel.open(4096,128){ok(value)=>value,
+    err(problem)=>{var held=problem
+      return generation.Outcome{succeeded:false,output:string.copy(output),
+        message:channel.message(held),runtime_ms:0,peak_vram_bytes:0}}}
+  var references:array<string> = array.new()
+  var audio:array<string> = array.new()
+  var job=generation.job(configuration,
+    "The friendly cobalt-blue fairy robot walks forward through a luminous moss garden in one continuous cinematic shot. Preserve her delicate wing geometry, polished blue shell, proportions, travel direction, environment, lighting, and synchronized soft mechanical footsteps.",
+    session.Model.Base,session.Task.T2VA,geometry,references,audio,output,0,"",
+    424242,19,session.Projection.ExactBF16,session.Projection.ConvRotI8,
+    session.Attention.HybridExact3DenseInt8,channel.ticket(receiver),
+    session.Schedule.Exponential)
+  match generation.enable_motion_context(job,context_path,22,120){
+    ok(_)=>{},err(message)=>{let _=channel.close(receiver)
+      return generation.Outcome{succeeded:false,output:string.copy(output),
+        message:message,runtime_ms:0,peak_vram_bytes:0}}}
+  match generation.enable_drift_control(job,drift,5,2,0.35){
+    ok(_)=>{},err(message)=>{let _=channel.close(receiver)
+      return generation.Outcome{succeeded:false,output:string.copy(output),
+        message:message,runtime_ms:0,peak_vram_bytes:0}}}
+  var completed=generation.run(job)
+  let _=channel.close(receiver)
+  completed
+}
+
+fn build_branch(configuration:ref<generation.Configuration>,root:str,
+                base_video:str,base_context:str,name:str,drift:bool)
+    ->result<string,string>
+    effects{alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+  let branch=path.join(root,name)
+  match files.mkdirs(str.view(branch)){ok(_)=>{},err(problem)=>{
+    return result.err(string.copy(problem.message))}}
+  var videos:array<string> = array.new()
+  array.push(videos,string.copy(base_video))
+  var context=string.copy(base_context)
+  var segment:u64=2
+  loop{
+    if segment>4{break}
+    let stem=text.concat("shot-0",str.view(string.from_int(segment)))
+    let leaf=text.concat(str.view(stem),".mp4")
+    let output=path.join(str.view(branch),str.view(leaf))
+    let output_context=text.concat(str.view(output),".airh3ctx")
+    let has_output=match files.is_file(str.view(output)){ok(value)=>value,
+      err(_)=>false}
+    let has_context=match files.is_file(str.view(output_context)){ok(value)=>value,
+      err(_)=>false}
+    if has_output and has_context{
+      io.write(text.concat(name,text.concat(" resumed existing segment ",
+        text.concat(str.view(string.from_int(segment)),"\n"))))
+    }else{
+      var outcome=continuation(configuration,str.view(context),str.view(output),drift)
+      if not outcome.succeeded{return result.err(string.copy(
+        struct.borrow(outcome,field=message)))}
+      var receipt=string.copy(name)
+      string.append(receipt," segment ")
+      string.append(receipt,str.view(string.from_int(segment)))
+      string.append(receipt," runtime_ms=")
+      string.append(receipt,str.view(string.from_int(outcome.runtime_ms)))
+      string.append(receipt," peak_vram_bytes=")
+      string.append(receipt,str.view(string.from_int(outcome.peak_vram_bytes)))
+      string.append(receipt,"\n")
+      io.write(str.view(receipt))}
+    array.push(videos,string.copy(str.view(output)))
+    context=output_context
+    segment=segment+1
+  }
+  var project=movie.create()
+  var index:u64=0
+  loop{
+    if index>=array.len(videos){break}
+    if index>0{match movie.create_continuation(project,index-1){
+      ok(_)=>{},err(message)=>{return result.err(message)}}}
+    movie.set_duration(project,index,5.0)
+    movie.record_take_at(project,index,str.view(array.borrow(videos,index)),424242,true)
+    index=index+1
+  }
+  let assembled=path.join(str.view(branch),"movie.mp4")
+  match movie.stitch(project,str.view(assembled),str.view(branch)){
+    ok(_)=>{},err(message)=>{return result.err(message)}}
+  result.ok(assembled)
+}
+
+pub fn main(args:view<str>)->i32
+    effects{alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+  if view.len(args)!=4{return fail(
+    "usage: movie-drift-ab-generate BASE_VIDEO BASE_CONTEXT OUTPUT_DIR")}
+  let here=match files.cwd(){ok(value)=>value,err(problem)=>{
+    return fail(problem.message)}}
+  let base_video=path.join(str.view(here),view.get(args,1))
+  let base_context=path.join(str.view(here),view.get(args,2))
+  let root=path.join(str.view(here),view.get(args,3))
+  match files.mkdirs(str.view(root)){ok(_)=>{},err(problem)=>{return fail(problem.message)}}
+  var configuration=match generation.configuration(){ok(value)=>value,
+    err(message)=>{return fail(str.view(message))}}
+  var baseline=match build_branch(configuration,str.view(root),str.view(base_video),
+      str.view(base_context),
+      "baseline",false){ok(value)=>value,err(message)=>{return fail(message)}}
+  var controlled=match build_branch(configuration,str.view(root),str.view(base_video),
+      str.view(base_context),
+      "drift-5-2-035",true){ok(value)=>value,err(message)=>{return fail(message)}}
+  var message=string.copy("MM-Air four-segment Drift A/B GPU PASS: ")
+  string.append(message,str.view(baseline))
+  string.append(message," | ")
+  string.append(message,str.view(controlled))
+  string.append(message,"\n")
+  io.write(str.view(message))
+  0
+}

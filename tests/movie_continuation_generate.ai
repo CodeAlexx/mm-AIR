@@ -1,0 +1,76 @@
+// Bounded production GPU gate for Movie Maker: one native take, one latent
+// Motion Context continuation, then the same selected-take stitch used by UI.
+module app.mm_air.tests.movie_continuation_generate
+
+import "../generate.ai" as generation
+import "../movie_project.ai" as movie
+import "../.air/deps/h3/media.ai" as media
+import "../.air/deps/h3/session.ai" as session
+import std.channel as channel
+import std.files as files
+import std.path as path
+import std.text as text
+
+fn fail(message:str)->i32 effects{io.write}{
+  io.ewrite(message)
+  io.ewrite("\n")
+  1
+}
+
+fn run_take(configuration:ref<generation.Configuration>,output:str,
+            context_path:str)->generation.Outcome
+    effects{alloc,fs.meta,fs.read,fs.write,gpu,net,process,time}{
+  let geometry=match media.geometry(120,256,256){ok(value)=>value,
+    err(problem)=>{var held=problem
+      return generation.Outcome{succeeded:false,output:string.copy(output),
+        message:media.error_message(held),runtime_ms:0,peak_vram_bytes:0}}}
+  var receiver=match channel.open(128,1024){ok(value)=>value,
+    err(problem)=>{var held=problem
+      return generation.Outcome{succeeded:false,output:string.copy(output),
+        message:channel.message(held),runtime_ms:0,peak_vram_bytes:0}}}
+  var references: array<string> = array.new()
+  var audio: array<string> = array.new()
+  var job=generation.job(configuration,
+    "The friendly cobalt-blue fairy robot walks forward through a luminous moss garden in one continuous cinematic shot. Preserve her delicate wing geometry, polished blue shell, proportions, travel direction, environment, lighting, and synchronized soft mechanical footsteps.",
+    session.Model.Base,session.Task.T2VA,geometry,references,audio,output,0,"",
+    424242,19,session.Projection.ExactBF16,session.Projection.ConvRotI8,
+    session.Attention.HybridExact3DenseInt8,channel.ticket(receiver),
+    session.Schedule.Exponential)
+  if str.len(context_path)!=0{
+    match generation.enable_motion_context(job,context_path,22,120){
+      ok(_)=>{},err(message)=>{let _=channel.close(receiver)
+        return generation.Outcome{succeeded:false,output:string.copy(output),
+          message:message,runtime_ms:0,peak_vram_bytes:0}}}
+  }
+  var completed=generation.run(job)
+  let _=channel.close(receiver)
+  completed
+}
+
+pub fn main(args:view<str>)->i32
+    effects{alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+  if view.len(args)!=2{return fail("usage: movie-continuation-generate OUTPUT_DIR")}
+  let root=string.copy(view.get(args,1))
+  match files.mkdirs(str.view(root)){ok(_)=>{},err(problem)=>{return fail(problem.message)}}
+  var configuration=match generation.configuration(){ok(value)=>value,
+    err(message)=>{return fail(str.view(message))}}
+  let first=path.join(str.view(root),"shot-01.mp4")
+  let second=path.join(str.view(root),"shot-02.mp4")
+  let stitched=path.join(str.view(root),"movie.mp4")
+  var first_outcome=run_take(configuration,str.view(first),"")
+  if not first_outcome.succeeded{return fail(struct.borrow(first_outcome,field=message))}
+  let context_path=text.concat(str.view(first),".airh3ctx")
+  var second_outcome=run_take(configuration,str.view(second),str.view(context_path))
+  if not second_outcome.succeeded{return fail(struct.borrow(second_outcome,field=message))}
+  var project=movie.create()
+  movie.set_duration(project,0,5.0)
+  movie.record_take_at(project,0,str.view(first),424242,true)
+  match movie.create_continuation(project,0){ok(_)=>{},err(message)=>{return fail(str.view(message))}}
+  movie.set_duration(project,1,5.0)
+  movie.record_take_at(project,1,str.view(second),424242,true)
+  match movie.stitch(project,str.view(stitched),str.view(root)){
+    ok(_)=>{},err(message)=>{return fail(str.view(message))}}
+  io.write(text.concat("MM-Air Movie GPU gate PASS: ",str.view(stitched)))
+  io.write("\n")
+  0
+}

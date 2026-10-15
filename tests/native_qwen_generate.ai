@@ -1,0 +1,49 @@
+// Exercise the same CK worker used by the Windows presenter, with real weights.
+// Usage: native-qwen-generate PARAMETERS.json [--exact]
+// Exact attention is a diagnostic control for isolating CK approximation.
+module app.mm_air.tests.native_qwen_generate
+import "../generate.ai" as generation
+import "../parameters.ai" as parameters
+import std.channel as channel
+import std.files as files
+
+pub fn main(args:view<str>)->i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
+  if view.len(args)<2 or view.len(args)>3{io.ewrite("Usage: native-qwen-generate PARAMETERS.json [--exact]\n")
+    return 2}
+  let exact=view.len(args)==3
+  if exact{if view.get(args,2)!="--exact"{io.ewrite("Expected --exact\n")
+    return 2}}
+  let source=match files.read_text(view.get(args,1)){ok(value)=>value,
+    err(problem)=>{io.ewrite(problem.message)
+      return 2},}
+  var request=match parameters.decode_qwen_image(source){ok(value)=>value,
+    err(problem)=>{io.ewrite(problem)
+      return 2},}
+  var receiver=match channel.open(128,1024){ok(value)=>value,
+    err(_)=>{io.ewrite("Cannot open worker progress channel\n")
+      return 2},}
+  var work=generation.QwenImageJob{request:request,progress:channel.ticket(receiver)}
+  var code:i32=1
+  task.scope {
+    var jobs:array<task<generation.Outcome>> = [if exact{
+      task.spawn(work,fn=generation.run_qwen_image)
+    }else{task.spawn(work,fn=generation.run_qwen_image_ck)}]
+    loop{
+      match channel.recv_now(receiver,time.monotonic_ns()){
+        ok(value)=>match value{some(message)=>{var update=message
+          match channel.text_of(update){some(note)=>{io.write(note)
+            io.write("\n")},none=>{},}},none=>{},},err(_)=>{},
+      }
+      match task.wait_any(jobs,0){some(_)=>{
+        var finished=task.join(option.unwrap(array.pop(jobs)))
+        io.write(finished.message)
+        io.write("\n")
+        if finished.succeeded{code=0}
+        break
+      },none=>{time.sleep_ms(10)},}
+    }
+  }
+  let _=channel.close(receiver)
+  code
+}

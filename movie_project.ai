@@ -1,0 +1,967 @@
+// Native, file-backed project/shot/take contracts for MM-Air Movie Maker.
+// The schema and prompt rules intentionally match Serenity's H3 Studio.
+module app.mm_air.movie_project
+
+import std.codec as codec
+import std.files as files
+import std.json as json
+import std.math as math
+import std.path as path
+import std.process as proc
+import std.text as text
+import std.system as system
+import ".air/deps/h3/request.ai" as h3
+
+pub type Take=struct{output:string,state:string,seed:u64}
+pub type Character=struct{id:u64,name:string,role:string,identity:string,image:string}
+pub type Shot=struct{
+  id:u64,title:string,duration:f64,width:u64,height:u64,steps:u64,seed:i64,
+  brief:string,plan:string,soundscape:string,music:string,prompt_override:string,
+  first_frame:string,last_frame:string,continue_from:string,
+  motion_context_frames:u64,references:array<string>,takes:array<Take>,
+  selected_take:i64,locked:bool
+}
+pub type Project=struct{
+  title:string,format:u32,target_duration:f64,takes_per_shot:u64,delivery_fps:u64,
+  director_bible:string,continuity_bible:string,brand_bible:string,
+  characters:array<Character>,cast_replaces_identities:bool,next_character_id:u64,
+  selected_character:u64,
+  endless_target:f64,endless_segment:f64,endless_active:bool,
+  shots:array<Shot>,selected_shot:u64,next_shot_id:u64
+}
+
+pub fn create_shot(id:u64,title:str)->Shot effects{alloc}{
+  Shot{id:id,title:string.copy(title),duration:8.0,width:1344,height:768,
+    steps:20,seed:42,brief:string.new(),plan:string.new(),
+    soundscape:string.copy("N/A"),music:string.copy("N/A"),
+    prompt_override:string.new(),first_frame:string.new(),last_frame:string.new(),
+    continue_from:string.new(),motion_context_frames:22,references:array.new(),
+    takes:array.new(),selected_take:-1,locked:false}
+}
+
+pub fn create()->Project effects{alloc}{
+  Project{title:string.copy("Untitled H3 Movie"),format:1,target_duration:120.0,
+    takes_per_shot:1,delivery_fps:24,
+    director_bible:string.copy("Describe the story, visual language, performances, camera grammar, and sound direction for this movie."),
+    continuity_bible:string.copy("Lock identity, wardrobe, geography, eyelines, screen direction, lighting, and motion seams across shots."),
+    brand_bible:string.new(),characters:array.new(),
+    cast_replaces_identities:true,next_character_id:1,selected_character:0,endless_target:60.0,
+    endless_segment:8.0,endless_active:false,shots:[create_shot(1,"Opening shot")],
+    selected_shot:0,next_shot_id:2}
+}
+
+fn copy_take(source:ref<Take>)->Take effects{alloc}{Take{
+  output:string.copy(struct.borrow(source,field=output)),
+  state:string.copy(struct.borrow(source,field=state)),seed:source.seed}}
+
+pub fn copy_shot(source:ref<Shot>,id:u64,title:str)->Shot effects{alloc}{
+  var refs:array<string> = []
+  var i:u64=0
+  loop{if i >= array.len(struct.borrow(source,field=references)){break}
+    array.push(refs,string.copy(array.borrow(struct.borrow(source,field=references),i)))
+    i=i+1}
+  Shot{id:id,title:string.copy(title),duration:source.duration,width:source.width,
+    height:source.height,steps:source.steps,seed:source.seed,
+    brief:string.copy(struct.borrow(source,field=brief)),
+    plan:string.copy(struct.borrow(source,field=plan)),
+    soundscape:string.copy(struct.borrow(source,field=soundscape)),
+    music:string.copy(struct.borrow(source,field=music)),
+    prompt_override:string.copy(struct.borrow(source,field=prompt_override)),
+    first_frame:string.copy(struct.borrow(source,field=first_frame)),
+    last_frame:string.copy(struct.borrow(source,field=last_frame)),
+    continue_from:string.copy(struct.borrow(source,field=continue_from)),
+    motion_context_frames:source.motion_context_frames,references:refs,
+    takes:array.new(),selected_take:-1,locked:false}
+}
+
+fn full_copy_shot(source:ref<Shot>)->Shot effects{alloc}{
+  let title=string.copy(struct.borrow(source,field=title))
+  let id=source.id
+  let selected_take=source.selected_take
+  let locked=source.locked
+  let takes=clone_takes(struct.borrow(source,field=takes))
+  var output=copy_shot(source,id,str.view(title))
+  let _=ref.swap(struct.borrow(output,field=takes),takes)
+  struct.set(output,selected_take,field=selected_take)
+  struct.set(output,locked,field=locked)
+  output
+}
+
+fn copy_at(shots:ref<array<Shot>>,index:u64)->Shot effects{alloc}{
+  full_copy_shot(array.borrow(shots,index))
+}
+
+pub fn snapshot_shot(project:ref<Project>,index:u64)->Shot effects{alloc}{
+  copy_at(struct.borrow(project,field=shots),index)
+}
+
+fn duplicate_at(shots:ref<array<Shot>>,index:u64,id:u64)->Shot effects{alloc}{
+  let source=array.borrow(shots,index)
+  let title=text.concat(struct.borrow(source,field=title)," copy")
+  copy_shot(source,id,str.view(title))
+}
+
+pub fn add_shot(project:ref<Project>)->unit effects{alloc}{
+  let id=project.next_shot_id
+  let title=text.concat("Shot ",str.view(string.from_int(array.len(
+    struct.borrow(project,field=shots))+1)))
+  array.push(struct.borrow(project,field=shots),create_shot(id,str.view(title)))
+  struct.set(project,array.len(struct.borrow(project,field=shots))-1,field=selected_shot)
+  struct.set(project,id+1,field=next_shot_id)
+  ()
+}
+
+pub fn duplicate_shot(project:ref<Project>)->unit effects{alloc}{
+  let id=project.next_shot_id
+  let clone=duplicate_at(struct.borrow(project,field=shots),project.selected_shot,id)
+  var reordered:array<Shot> = []
+  var i:u64=0
+  loop{if i >= array.len(struct.borrow(project,field=shots)){break}
+    array.push(reordered,copy_at(struct.borrow(project,field=shots),i))
+    i=i+1}
+  array.push(reordered,clone)
+  let _=ref.swap(struct.borrow(project,field=shots),reordered)
+  struct.set(project,array.len(struct.borrow(project,field=shots))-1,field=selected_shot)
+  struct.set(project,id+1,field=next_shot_id)
+  ()
+}
+
+pub fn delete_shot(project:ref<Project>)->bool effects{alloc}{
+  if array.len(struct.borrow(project,field=shots)) <= 1{return false}
+  var kept:array<Shot> = []
+  var i:u64=0
+  loop{if i >= array.len(struct.borrow(project,field=shots)){break}
+    if i!=project.selected_shot{
+      array.push(kept,copy_at(struct.borrow(project,field=shots),i))}
+    i=i+1}
+  let _=ref.swap(struct.borrow(project,field=shots),kept)
+  if project.selected_shot >= array.len(struct.borrow(project,field=shots)){
+    struct.set(project,array.len(struct.borrow(project,field=shots))-1,field=selected_shot)}
+  true
+}
+
+fn clone_takes(source:ref<array<Take>>)->array<Take> effects{alloc}{
+  var output:array<Take> = []
+  var i:u64=0
+  loop{if i >= array.len(source){break}
+    array.push(output,copy_take(array.borrow(source,i)))
+    i=i+1}
+  output
+}
+
+pub fn output_frames(shot:ref<Shot>)->u64 effects{}{
+  cast.sat(math.round(shot.duration*24.0))
+}
+
+pub fn internal_frames(shot:ref<Shot>)->u64 effects{}{
+  var frames=output_frames(shot)
+  loop{
+    if frames%17==5{break}
+    frames=frames+1
+  }
+  frames
+}
+
+pub fn mode(shot:ref<Shot>)->string effects{alloc}{
+  if str.len(struct.borrow(shot,field=continue_from))!=0{return string.copy("motion")}
+  if array.len(struct.borrow(shot,field=references))!=0{return string.copy("ref2va")}
+  if str.len(struct.borrow(shot,field=first_frame))!=0 and
+      str.len(struct.borrow(shot,field=last_frame))!=0{return string.copy("fl2va")}
+  if str.len(struct.borrow(shot,field=first_frame))!=0{return string.copy("i2va")}
+  if str.len(struct.borrow(shot,field=last_frame))!=0{return string.copy("l2va")}
+  string.copy("t2va")
+}
+
+pub fn mode_label(shot:ref<Shot>)->string effects{alloc}{
+  let value=mode(shot)
+  if value=="ref2va"{return string.copy("Directed references")}
+  if value=="motion"{return string.copy("Native latent continuation")}
+  if value=="fl2va"{return string.copy("Frame-to-frame")}
+  if value=="i2va"{return string.copy("Opening frame")}
+  if value=="l2va"{return string.copy("Ending frame")}
+  string.copy("From story")
+}
+
+fn plan_text(shot:ref<Shot>)->string effects{alloc}{
+  if str.len(text.trim(struct.borrow(shot,field=plan)))!=0{
+    return string.copy(text.trim(struct.borrow(shot,field=plan)))}
+  if str.len(text.trim(struct.borrow(shot,field=brief)))!=0{
+    return string.copy(text.trim(struct.borrow(shot,field=brief)))}
+  string.copy("Describe the visible action, camera movement, dialogue, and synchronized sound for this shot.")
+}
+
+pub fn compile_prompt(shot:ref<Shot>)->string effects{alloc}{
+  if str.len(text.trim(struct.borrow(shot,field=prompt_override)))!=0{
+    return string.copy(text.trim(struct.borrow(shot,field=prompt_override)))}
+  let task=mode(shot)
+  let plan=plan_text(shot)
+  if task=="ref2va"{
+    var definitions=string.new()
+    var retention=string.new()
+    var i:u64=0
+    loop{if i >= array.len(struct.borrow(shot,field=references)){break}
+      if i!=0{
+        string.append(definitions,"\n")
+        string.append(retention,"\n")
+      }
+      let n=string.from_int(i+1)
+      string.append(definitions,"<Subject ")
+      string.append(definitions,str.view(n))
+      string.append(definitions,"> is the visible identity or scene content from <Picture ")
+      string.append(definitions,str.view(n))
+      string.append(definitions,">; preserve its concrete appearance and materials.")
+      string.append(retention,"<Subject ")
+      string.append(retention,str.view(n))
+      string.append(retention,">: fully_preserved")
+      i=i+1}
+    return text.concat("subject_definitions:\n",text.concat(str.view(definitions),
+      text.concat("\n\nsummary:\n[reference generation] ",text.concat(str.view(plan),
+      text.concat("\n\nretention_analysis:\n",text.concat(str.view(retention),
+      text.concat("\n\ndetailed_description:\n[Shot 1] ",text.concat(str.view(plan),
+      text.concat("\n\noverall_soundscape:\n",text.concat(struct.borrow(shot,field=soundscape),
+      text.concat("\n\nnon_diegetic_music:\n",struct.borrow(shot,field=music))))))))))))
+  }
+  var prefix=string.new()
+  if task=="i2va"{string.append(prefix,"For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.\n\n")}
+  if task=="fl2va"{string.append(prefix,"How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark; Picture 2 aligns with the final frame.\n\n")}
+  if task=="l2va"{string.append(prefix,"How the reference pictures align with the target video — <Picture 1> (from [Shot 1]) aligns with the final frame.\n\n")}
+  string.append(prefix,"integrated_multimodal_description: [Shot 1] ")
+  string.append(prefix,str.view(plan))
+  string.append(prefix,"\n\noverall_soundscape: ")
+  string.append(prefix,struct.borrow(shot,field=soundscape))
+  string.append(prefix,"\n\nnon_diegetic_music: ")
+  string.append(prefix,struct.borrow(shot,field=music))
+  prefix
+}
+
+pub fn effective_references(project:ref<Project>,index:u64)->array<string>
+    effects{alloc} {
+  var output: array<string> = array.new()
+  var i:u64=0
+  loop {if i>=array.len(struct.borrow(project,field=characters)){break}
+    let character=array.borrow(struct.borrow(project,field=characters),i)
+    if str.len(struct.borrow(character,field=image))!=0 {
+      array.push(output,string.copy(struct.borrow(character,field=image)))}
+    i=i+1}
+  let shot=array.borrow(struct.borrow(project,field=shots),index)
+  i=0
+  loop {if i>=array.len(struct.borrow(shot,field=references)){break}
+    let candidate=array.borrow(struct.borrow(shot,field=references),i)
+    var duplicate=false
+    var j:u64=0
+    loop {if j>=array.len(output){break}
+      if array.borrow(output,j)==candidate{duplicate=true}
+      j=j+1}
+    if not duplicate{array.push(output,string.copy(candidate))}
+    i=i+1}
+  output
+}
+
+pub fn compile_project_prompt(project:ref<Project>,index:u64)->string effects{alloc}{
+  var source=snapshot_shot(project,index)
+  if str.len(struct.borrow(source,field=continue_from))==0 {
+    var references=effective_references(project,index)
+    let _=ref.swap(struct.borrow(source,field=references),references)
+  }
+  var prompt=compile_prompt(source)
+  if array.len(struct.borrow(project,field=characters))==0{return prompt}
+  var cast=string.copy("\n\ncharacter_bible:\n")
+  var i:u64=0
+  loop {if i>=array.len(struct.borrow(project,field=characters)){break}
+    let character=array.borrow(struct.borrow(project,field=characters),i)
+    string.append(cast,"<Picture ")
+    string.append(cast,str.view(string.from_int(i+1)))
+    string.append(cast,"> = ")
+    string.append(cast,struct.borrow(character,field=name))
+    string.append(cast," · ")
+    string.append(cast,struct.borrow(character,field=role))
+    string.append(cast," · ")
+    string.append(cast,struct.borrow(character,field=identity))
+    string.append(cast,"; preserve this identity exactly.\n")
+    i=i+1}
+  if project.cast_replaces_identities {
+    string.append(cast,"The cast bible replaces conflicting prose identity descriptions.\n")}
+  string.append(prompt,str.view(cast))
+  prompt
+}
+
+pub fn add_character(project:ref<Project>,image:str)->unit effects{alloc}{
+  let id=project.next_character_id
+  let base=path.basename(image)
+  array.push(struct.borrow(project,field=characters),Character{id:id,
+    name:string.copy(str.view(base)),role:string.copy("principal character"),
+    identity:string.copy("Preserve face, silhouette, materials, palette, and distinguishing details from the reference image."),
+    image:string.copy(image)})
+  struct.set(project,id+1,field=next_character_id)
+  ()
+}
+
+pub fn remove_character(project:ref<Project>,index:u64)->bool effects{alloc}{
+  if index>=array.len(struct.borrow(project,field=characters)){return false}
+  var kept: array<Character> = array.new()
+  var i:u64=0
+  loop {if i>=array.len(struct.borrow(project,field=characters)){break}
+    if i!=index{let source=array.borrow(struct.borrow(project,field=characters),i)
+      array.push(kept,Character{id:source.id,
+        name:string.copy(struct.borrow(source,field=name)),
+        role:string.copy(struct.borrow(source,field=role)),
+        identity:string.copy(struct.borrow(source,field=identity)),
+        image:string.copy(struct.borrow(source,field=image))})}
+    i=i+1}
+  let _=ref.swap(struct.borrow(project,field=characters),kept)
+  true
+}
+
+pub fn set_character_text(project:ref<Project>,index:u64,field:u32,value:str)
+    ->unit effects{alloc}{
+  if index>=array.len(struct.borrow(project,field=characters)){return ()}
+  let character=array.borrow(struct.borrow(project,field=characters),index)
+  if field==0{let _=ref.swap(struct.borrow(character,field=name),string.copy(value))}
+  if field==1{let _=ref.swap(struct.borrow(character,field=role),string.copy(value))}
+  if field==2{let _=ref.swap(struct.borrow(character,field=identity),string.copy(value))}
+  ()
+}
+
+fn validate_geometry(width:u64,height:u64,seconds:f64)->result<unit,string> effects{alloc}{
+  var request=h3.request("geometry",h3.model_base(),h3.task_t2va(),h3.profile_quality_19(),
+    h3.projection_exact_bf16(),h3.projection_convrot_int8(),h3.attention_ck_int8(),0,
+    h3.resolution_custom(),[],"geometry.mp4")
+  match h3.set_geometry(request,width,height,seconds){
+    ok(_)=>{},err(problem)=>{var held=problem
+      return result.err(string.copy(struct.borrow(held,field=message)))},
+  }
+  result.ok(())
+}
+
+pub fn validate_endless(project:ref<Project>)->result<unit,string> effects{alloc}{
+  if not math.is_finite(project.endless_target) or project.endless_target<=0.0{
+    return result.err("Endless target duration must be finite and positive")}
+  if array.len(struct.borrow(project,field=shots))==0 or
+     project.selected_shot>=array.len(struct.borrow(project,field=shots)){
+    return result.err("Select a shot before starting an Endless chain")}
+  let shot=array.borrow(struct.borrow(project,field=shots),project.selected_shot)
+  match validate_geometry(shot.width,shot.height,project.endless_segment){
+    ok(_)=>{},err(message)=>{return result.err(message)},
+  }
+  // The chain target is independent of a single H3 segment's frame range.
+  validate_geometry(shot.width,shot.height,math.min(project.endless_target,project.endless_segment))
+}
+
+pub fn validate(shot:ref<Shot>)->result<unit,string> effects{alloc}{
+  match validate_geometry(shot.width,shot.height,shot.duration){
+    ok(_)=>{},err(message)=>{return result.err(message)},
+  }
+  if str.len(text.trim(struct.borrow(shot,field=brief)))==0 and
+      str.len(text.trim(struct.borrow(shot,field=plan)))==0 and
+      str.len(text.trim(struct.borrow(shot,field=prompt_override)))==0{
+    return result.err("Write a shot brief, shot plan, or H3 prompt before rendering")}
+  if array.len(struct.borrow(shot,field=references))>12{return result.err("H3 accepts at most 12 ordered references")}
+  result.ok(())
+}
+
+fn encode_take(writer:ref<codec.Writer>,take:ref<Take>)->unit effects{alloc}{
+  codec.begin_object(writer)
+  codec.field_text(writer,"output",struct.borrow(take,field=output))
+  codec.field_text(writer,"state",struct.borrow(take,field=state))
+  codec.field_u64(writer,"seed",take.seed)
+  codec.end_object(writer)
+}
+
+fn encode_shot(writer:ref<codec.Writer>,shot:ref<Shot>)->unit effects{alloc}{
+  codec.begin_object(writer)
+  codec.field_u64(writer,"id",shot.id)
+  codec.field_text(writer,"title",struct.borrow(shot,field=title))
+  codec.field_f64(writer,"duration_seconds",shot.duration)
+  codec.field_u64(writer,"width",shot.width)
+  codec.field_u64(writer,"height",shot.height)
+  codec.field_u64(writer,"steps",shot.steps)
+  codec.field_i64(writer,"seed",shot.seed)
+  codec.field_text(writer,"brief",struct.borrow(shot,field=brief))
+  codec.field_text(writer,"shot_description",struct.borrow(shot,field=plan))
+  codec.field_text(writer,"soundscape",struct.borrow(shot,field=soundscape))
+  codec.field_text(writer,"music",struct.borrow(shot,field=music))
+  codec.field_text(writer,"prompt_override",struct.borrow(shot,field=prompt_override))
+  codec.field_text(writer,"first_frame",struct.borrow(shot,field=first_frame))
+  codec.field_text(writer,"last_frame",struct.borrow(shot,field=last_frame))
+  codec.field_text(writer,"continue_from",struct.borrow(shot,field=continue_from))
+  codec.field_u64(writer,"motion_context_frames",shot.motion_context_frames)
+  codec.key(writer,"references")
+  codec.begin_array(writer)
+  var reference_index:u64=0
+  loop{if reference_index >= array.len(struct.borrow(shot,field=references)){break}
+    codec.begin_object(writer)
+    codec.field_text(writer,"kind","image")
+    codec.field_text(writer,"path",array.borrow(struct.borrow(shot,field=references),reference_index))
+    codec.field_text(writer,"audio_use","reference")
+    codec.field_f64(writer,"duration_seconds",5.0)
+    codec.field_text(writer,"note","")
+    codec.field_text(writer,"role","subject")
+    codec.end_object(writer)
+    reference_index=reference_index+1
+  }
+  codec.end_array(writer)
+  codec.key(writer,"takes")
+  codec.begin_array(writer)
+  var i:u64=0
+  loop{if i >= array.len(struct.borrow(shot,field=takes)){break}
+    encode_take(writer,array.borrow(struct.borrow(shot,field=takes),i))
+    i=i+1
+  }
+  codec.end_array(writer)
+  codec.key(writer,"take_job_ids")
+  codec.begin_array(writer)
+  codec.end_array(writer)
+  var take_states:array<string> = []
+  var take_paths:array<string> = []
+  i=0
+  loop{if i >= array.len(struct.borrow(shot,field=takes)){break}
+    let take=array.borrow(struct.borrow(shot,field=takes),i)
+    array.push(take_states,string.copy(struct.borrow(take,field=state)))
+    array.push(take_paths,string.copy(struct.borrow(take,field=output)))
+    i=i+1
+  }
+  codec.field_text_array(writer,"take_states",take_states)
+  codec.field_text_array(writer,"take_output_paths",take_paths)
+  codec.field_i64(writer,"selected_take",shot.selected_take)
+  codec.field_text(writer,"status",if shot.selected_take>=0{"Ready"}else{"Unrendered"})
+  let selected_index:u64=cast.wrap(shot.selected_take)
+  let selected_output=if shot.selected_take>=0 and selected_index<array.len(take_paths){
+    string.copy(array.borrow(take_paths,selected_index))}else{string.new()}
+  codec.field_text(writer,"output_path",str.view(selected_output))
+  codec.field_bool(writer,"locked",shot.locked)
+  codec.end_object(writer)
+}
+
+pub fn encode(project:ref<Project>)->result<string,string> effects{alloc}{
+  var writer=codec.writer()
+  codec.begin_object(writer)
+  codec.field_text(writer,"schema","serenity.h3.movie.v1")
+  codec.field_text(writer,"title",struct.borrow(project,field=title))
+  codec.field_u64(writer,"project_kind",cast.wrap(project.format))
+  codec.field_u64(writer,"delivery_fps",project.delivery_fps)
+  codec.field_bool(writer,"adult_mode",false)
+  codec.field_u64(writer,"caption_tier",0)
+  codec.field_f64(writer,"target_duration_seconds",project.target_duration)
+  codec.field_u64(writer,"takes_per_shot",project.takes_per_shot)
+  codec.field_text(writer,"director_brief",struct.borrow(project,field=director_bible))
+  codec.field_text(writer,"continuity_bible",struct.borrow(project,field=continuity_bible))
+  codec.field_text(writer,"brand_bible",struct.borrow(project,field=brand_bible))
+  codec.key(writer,"assets")
+  codec.begin_array(writer)
+  codec.end_array(writer)
+  codec.key(writer,"characters")
+  codec.begin_array(writer)
+  var character_index:u64=0
+  loop{if character_index>=array.len(struct.borrow(project,field=characters)){break}
+    let character=array.borrow(struct.borrow(project,field=characters),character_index)
+    codec.begin_object(writer)
+    codec.field_u64(writer,"id",character.id)
+    codec.field_text(writer,"name",struct.borrow(character,field=name))
+    codec.field_text(writer,"role",struct.borrow(character,field=role))
+    codec.field_text(writer,"identity",struct.borrow(character,field=identity))
+    codec.field_text(writer,"image",struct.borrow(character,field=image))
+    codec.end_object(writer)
+    character_index=character_index+1}
+  codec.end_array(writer)
+  codec.field_bool(writer,"cast_replaces_identities",project.cast_replaces_identities)
+  codec.field_u64(writer,"next_character_id",project.next_character_id)
+  codec.field_f64(writer,"endless_target_seconds",project.endless_target)
+  codec.field_f64(writer,"endless_segment_seconds",project.endless_segment)
+  codec.field_bool(writer,"endless_active",project.endless_active)
+  codec.key(writer,"shots")
+  codec.begin_array(writer)
+  var i:u64=0
+  loop{if i >= array.len(struct.borrow(project,field=shots)){break}
+    encode_shot(writer,array.borrow(struct.borrow(project,field=shots),i))
+    i=i+1
+  }
+  codec.end_array(writer)
+  codec.field_u64(writer,"next_shot_id",project.next_shot_id)
+  codec.end_object(writer)
+  match codec.finish(writer){ok(value)=>result.ok(value),err(problem)=>result.err(codec.describe(problem))}
+}
+
+pub fn save(project:ref<Project>,filename:str)->result<unit,string>
+    effects{alloc,fs.meta,fs.write}{
+  let folder=path.dirname(filename)
+  match files.mkdirs(str.view(folder)){ok(_)=>{},err(problem)=>{return result.err(string.copy(problem.message))}}
+  let payload=try encode(project)
+  match files.write_atomic(filename,text.concat(filename,".tmp"),str.view(payload)){
+    ok(_)=>result.ok(()),err(problem)=>result.err(string.copy(problem.message))}
+}
+
+pub fn library_paths(root:str)->result<array<string>,string> effects{alloc,fs.meta,fs.write}{
+  match files.mkdirs(root){ok(_)=>{},err(problem)=>{return result.err(string.copy(problem.message))}}
+  var entries=match files.list_dir(root){ok(value)=>value,
+    err(problem)=>{return result.err(string.copy(problem.message))}}
+  var output: array<string> = array.new()
+  var i:u64=0
+  loop {if i>=array.len(entries){break}
+    let entry=array.borrow(entries,i)
+    if text.ends_with(entry,".serenitymovie.json") {
+      array.push(output,if path.is_absolute(entry){string.copy(entry)}
+        else{path.join(root,entry)})}
+    i=i+1}
+  result.ok(output)
+}
+
+pub fn selected_library_path(root:str,fallback:str)->string
+    effects{alloc,fs.meta,fs.read}{
+  let pointer=path.join(root,"current-project.txt")
+  let selected=match files.read_text(str.view(pointer)){
+    ok(value)=>string.copy(text.trim(str.view(value))),
+    err(_)=>{return string.copy(fallback)},
+  }
+  if str.len(selected)==0{return string.copy(fallback)}
+  let present=match files.exists(str.view(selected)){
+    ok(value)=>value,err(_)=>false}
+  if present{return string.copy(str.view(selected))}
+  string.copy(fallback)
+}
+
+pub fn save_library_selection(root:str,selected:str)->result<unit,string>
+    effects{alloc,fs.meta,fs.write}{
+  match files.mkdirs(root){
+    ok(_)=>{},err(problem)=>{return result.err(string.copy(problem.message))}}
+  let pointer=path.join(root,"current-project.txt")
+  let temporary=text.concat(str.view(pointer),".tmp")
+  match files.write_atomic(str.view(pointer),str.view(temporary),selected){
+    ok(_)=>result.ok(()),err(problem)=>result.err(string.copy(problem.message))}
+}
+
+pub fn new_library_path(root:str)->string effects{alloc,time}{
+  path.join(root,text.concat("movie-",text.concat(
+    str.view(string.from_int(time.monotonic_ns())),".serenitymovie.json")))
+}
+
+fn decode_take(document:ref<json.Document>,reader:ref<codec.Reader>)->result<Take,string>
+    effects{alloc}{
+  let output=match codec.text_or(document,reader,"output",""){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+  let state=match codec.text_or(document,reader,"state","done"){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+  let seed=match codec.u64_or(document,reader,"seed",42){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+  result.ok(Take{output:output,state:state,seed:seed})
+}
+
+fn decode_shot(document:ref<json.Document>,reader:ref<codec.Reader>)->result<Shot,string>
+    effects{alloc}{
+  let id=match codec.u64_or(document,reader,"id",1){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+  let title=match codec.text_or(document,reader,"title","Shot"){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+  var shot=create_shot(id,str.view(title))
+  struct.set(shot,match codec.f64_or(document,reader,"duration_seconds",8.0){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}},field=duration)
+  struct.set(shot,match codec.u64_or(document,reader,"width",1344){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}},field=width)
+  struct.set(shot,match codec.u64_or(document,reader,"height",768){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}},field=height)
+  struct.set(shot,match codec.u64_or(document,reader,"steps",20){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}},field=steps)
+  struct.set(shot,match codec.i64_or(document,reader,"seed",42){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}},field=seed)
+  let _=ref.swap(struct.borrow(shot,field=brief),match codec.text_or(document,reader,"brief",""){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}})
+  let _=ref.swap(struct.borrow(shot,field=plan),match codec.text_or(document,reader,"shot_description",""){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}})
+  let _=ref.swap(struct.borrow(shot,field=soundscape),match codec.text_or(document,reader,"soundscape","N/A"){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}})
+  let _=ref.swap(struct.borrow(shot,field=music),match codec.text_or(document,reader,"music","N/A"){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}})
+  let _=ref.swap(struct.borrow(shot,field=prompt_override),match codec.text_or(document,reader,"prompt_override",""){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}})
+  let _=ref.swap(struct.borrow(shot,field=first_frame),match codec.text_or(document,reader,"first_frame",""){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}})
+  let _=ref.swap(struct.borrow(shot,field=last_frame),match codec.text_or(document,reader,"last_frame",""){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}})
+  let _=ref.swap(struct.borrow(shot,field=continue_from),match codec.text_or(
+    document,reader,"continue_from",""){ok(value)=>value,
+    err(problem)=>{return result.err(codec.describe(problem))}})
+  struct.set(shot,match codec.u64_or(document,reader,"motion_context_frames",22){
+    ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}},
+    field=motion_context_frames)
+  var refs=match codec.items_field(document,reader,"references",codec.lenient()){
+    ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+  var reference_values:array<string> = []
+  loop{var item=match codec.next_object(document,refs){ok(value)=>match value{
+      some(found)=>found,none=>{break}},err(problem)=>{return result.err(codec.describe(problem))}}
+    let ref_path=match codec.text_or(document,item,"path",""){ok(value)=>value,
+      err(problem)=>{return result.err(codec.describe(problem))}}
+    array.push(reference_values,ref_path)}
+  let _=ref.swap(struct.borrow(shot,field=references),reference_values)
+  var take_values:array<Take> = []
+  let has_takes=match codec.has_field(document,reader,"takes"){
+    ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+  if has_takes{
+    var takes=match codec.items_field(document,reader,"takes",codec.lenient()){
+      ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+    loop{var item=match codec.next_object(document,takes){ok(value)=>match value{
+        some(found)=>found,none=>{break}},err(problem)=>{return result.err(codec.describe(problem))}}
+      array.push(take_values,try decode_take(document,item))}
+  }else{
+    var states:array<string> = []
+    if match codec.has_field(document,reader,"take_states"){ok(value)=>value,err(_)=>false}{
+      var state_items=match codec.items_field(document,reader,"take_states",codec.lenient()){
+        ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+      loop{let item=match codec.next_text(document,state_items){ok(value)=>value,
+          err(problem)=>{return result.err(codec.describe(problem))}}
+        match item{some(value)=>{array.push(states,value)},none=>{break}}}
+    }
+    var paths:array<string> = []
+    if match codec.has_field(document,reader,"take_output_paths"){ok(value)=>value,err(_)=>false}{
+      var path_items=match codec.items_field(document,reader,"take_output_paths",codec.lenient()){
+        ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+      loop{let item=match codec.next_text(document,path_items){ok(value)=>value,
+          err(problem)=>{return result.err(codec.describe(problem))}}
+        match item{some(value)=>{array.push(paths,value)},none=>{break}}}
+    }
+    var i:u64=0
+    loop{if i >= array.len(paths){break}
+      array.push(take_values,Take{output:string.copy(array.borrow(paths,i)),
+        state:if i<array.len(states){string.copy(array.borrow(states,i))}
+          else{string.copy("done")},seed:cast.sat(shot.seed)})
+      i=i+1
+    }
+  }
+  let _=ref.swap(struct.borrow(shot,field=takes),take_values)
+  if match codec.has_field(document,reader,"take_job_ids"){ok(value)=>value,err(_)=>false}{
+    match codec.items_field(document,reader,"take_job_ids",codec.lenient()){ok(_)=>{},err(_)=>{}}}
+  if has_takes and match codec.has_field(document,reader,"take_states"){ok(value)=>value,err(_)=>false}{
+    match codec.items_field(document,reader,"take_states",codec.lenient()){ok(_)=>{},err(_)=>{}}}
+  if has_takes and match codec.has_field(document,reader,"take_output_paths"){ok(value)=>value,err(_)=>false}{
+    match codec.items_field(document,reader,"take_output_paths",codec.lenient()){ok(_)=>{},err(_)=>{}}}
+  struct.set(shot,match codec.i64_or(document,reader,"selected_take",-1){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}},field=selected_take)
+  let _=codec.text_or(document,reader,"status","Unrendered")
+  let _=codec.text_or(document,reader,"output_path","")
+  struct.set(shot,match codec.bool_or(document,reader,"locked",false){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}},field=locked)
+  match codec.reader_finish(document,reader){ok(_)=>result.ok(shot),err(problem)=>result.err(codec.describe(problem))}
+}
+
+pub fn decode(payload:string own)->result<Project,string> effects{alloc}{
+  var document=match json.parse_owned(payload){ok(value)=>value,err(problem)=>{
+    return result.err(json.error_message(problem))}}
+  var reader=codec.root_reader(codec.lenient())
+  let schema=match codec.text_field(document,reader,"schema"){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+  if schema!="serenity.h3.movie.v1"{return result.err("Not a Serenity H3 movie project")}
+  var project=create()
+  let _=ref.swap(struct.borrow(project,field=title),match codec.text_or(document,reader,"title","Untitled H3 Movie"){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}})
+  struct.set(project,cast.wrap(match codec.u64_or(document,reader,"project_kind",1){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}),field=format)
+  struct.set(project,match codec.u64_or(document,reader,"delivery_fps",24){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}},field=delivery_fps)
+  struct.set(project,match codec.f64_or(document,reader,"target_duration_seconds",120.0){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}},field=target_duration)
+  struct.set(project,match codec.u64_or(document,reader,"takes_per_shot",1){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}},field=takes_per_shot)
+  let _=ref.swap(struct.borrow(project,field=director_bible),match codec.text_or(document,reader,"director_brief",""){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}})
+  let _=ref.swap(struct.borrow(project,field=continuity_bible),match codec.text_or(document,reader,"continuity_bible",""){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}})
+  let _=ref.swap(struct.borrow(project,field=brand_bible),match codec.text_or(document,reader,"brand_bible",""){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}})
+  var character_values: array<Character> = array.new()
+  if match codec.has_field(document,reader,"characters"){
+      ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}} {
+    var characters=match codec.items_field(document,reader,"characters",codec.lenient()){
+      ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+    loop {var item=match codec.next_object(document,characters){ok(value)=>match value{
+        some(found)=>found,none=>{break}},err(problem)=>{return result.err(codec.describe(problem))}}
+      let id=match codec.u64_or(document,item,"id",array.len(character_values)+1){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+      let name=match codec.text_or(document,item,"name","Character"){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+      let role=match codec.text_or(document,item,"role","principal character"){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+      let identity=match codec.text_or(document,item,"identity",""){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+      let image=match codec.text_or(document,item,"image",""){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+      array.push(character_values,Character{id:id,name:name,role:role,
+        identity:identity,image:image})}
+  }
+  let next_character_fallback=array.len(character_values)+1
+  let _=ref.swap(struct.borrow(project,field=characters),character_values)
+  struct.set(project,match codec.bool_or(document,reader,"cast_replaces_identities",true){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}},field=cast_replaces_identities)
+  struct.set(project,match codec.u64_or(document,reader,"next_character_id",next_character_fallback){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}},field=next_character_id)
+  struct.set(project,match codec.f64_or(document,reader,"endless_target_seconds",60.0){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}},field=endless_target)
+  struct.set(project,match codec.f64_or(document,reader,"endless_segment_seconds",8.0){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}},field=endless_segment)
+  struct.set(project,match codec.bool_or(document,reader,"endless_active",false){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}},field=endless_active)
+  var shots=match codec.items_field(document,reader,"shots",codec.lenient()){
+    ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+  var shot_values:array<Shot> = []
+  loop{var item=match codec.next_object(document,shots){ok(value)=>match value{
+      some(found)=>found,none=>{break}},err(problem)=>{return result.err(codec.describe(problem))}}
+    array.push(shot_values,try decode_shot(document,item))}
+  if array.len(shot_values)==0{return result.err("Movie project must contain at least one shot")}
+  let next_fallback=array.len(shot_values)+1
+  let _=ref.swap(struct.borrow(project,field=shots),shot_values)
+  struct.set(project,match codec.u64_or(document,reader,"next_shot_id",next_fallback){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}},field=next_shot_id)
+  struct.set(project,0,field=selected_shot)
+  result.ok(project)
+}
+
+pub fn load(filename:str)->result<Project,string> effects{alloc,fs.meta,fs.read}{
+  let present=match files.exists(filename){ok(value)=>value,err(problem)=>{return result.err(string.copy(problem.message))}}
+  if not present{return result.ok(create())}
+  let payload=match files.read_text(filename){ok(value)=>value,err(problem)=>{return result.err(string.copy(problem.message))}}
+  decode(payload)
+}
+
+pub fn edit_manifest(project:ref<Project>)->result<string,string> effects{alloc}{
+  var writer=codec.writer()
+  codec.begin_object(writer)
+  codec.field_text(writer,"schema","serenity.h3.edit.v1")
+  codec.field_text(writer,"project_schema","serenity.h3.movie.v1")
+  codec.field_text(writer,"project_title",struct.borrow(project,field=title))
+  codec.field_u64(writer,"source_fps",24)
+  codec.field_u64(writer,"delivery_fps",project.delivery_fps)
+  codec.key(writer,"shots")
+  codec.begin_array(writer)
+  var i:u64=0
+  var order:u64=1
+  loop{if i >= array.len(struct.borrow(project,field=shots)){break}
+    let shot=array.borrow(struct.borrow(project,field=shots),i)
+    let take_index:u64=cast.wrap(shot.selected_take)
+    if shot.selected_take >= 0 and take_index < array.len(struct.borrow(shot,field=takes)){
+      encode_manifest_item(writer,shot,order,take_index)
+      order=order+1
+    }
+    i=i+1}
+  codec.end_array(writer)
+  codec.end_object(writer)
+  match codec.finish(writer){ok(value)=>result.ok(value),err(problem)=>result.err(codec.describe(problem))}
+}
+
+fn encode_manifest_item(writer:ref<codec.Writer>,shot:ref<Shot>,order:u64,
+                        take_index:u64)->unit effects{alloc}{
+  let title=string.copy(struct.borrow(shot,field=title))
+  let output=string.copy(struct.borrow(array.borrow(struct.borrow(shot,field=takes),
+    take_index),field=output))
+  codec.begin_object(writer)
+  codec.field_u64(writer,"order",order)
+  codec.field_u64(writer,"shot_id",shot.id)
+  codec.field_text(writer,"title",str.view(title))
+  codec.field_bool(writer,"locked",shot.locked)
+  codec.field_text(writer,"path",str.view(output))
+  codec.field_f64(writer,"duration_seconds",shot.duration)
+  codec.end_object(writer)
+}
+
+pub fn total_seconds(project:ref<Project>)->f64 effects{}{
+  var total:f64=0.0
+  var i:u64=0
+  loop{if i >= array.len(struct.borrow(project,field=shots)){break}
+    total=total+array.borrow(struct.borrow(project,field=shots),i).duration
+    i=i+1
+  }
+  total
+}
+
+pub fn completed_seconds(project:ref<Project>)->f64 effects{}{
+  var total:f64=0.0
+  var i:u64=0
+  loop{if i>=array.len(struct.borrow(project,field=shots)){break}
+    let shot=array.borrow(struct.borrow(project,field=shots),i)
+    if shot.selected_take>=0{total=total+shot.duration}
+    i=i+1}
+  total
+}
+
+// Pick one legal H3 segment while ensuring the remaining tail is either zero
+// or another legal segment. This makes finite Endless runs land on the target.
+pub fn endless_segment_duration(completed:f64,target:f64,preferred:f64)->f64
+    effects{}{
+  let remaining=target-completed
+  if remaining<=0.0{return 0.0}
+  let minimum:f64=4.0/24.0
+  let chosen=math.max(minimum,preferred)
+  if remaining<=chosen{return remaining}
+  if remaining-chosen<minimum{return remaining/2.0}
+  chosen
+}
+
+pub fn record_take(shot:ref<Shot>,output:str,seed:u64,succeeded:bool)->unit effects{alloc}{
+  array.push(struct.borrow(shot,field=takes),Take{output:string.copy(output),
+    state:string.copy(if succeeded{"done"}else{"failed"}),seed:seed})
+  struct.set(shot,cast.sat(array.len(struct.borrow(shot,field=takes))-1),field=selected_take)
+  ()
+}
+
+pub fn record_take_at(project:ref<Project>,index:u64,output:str,seed:u64,
+                      succeeded:bool)->unit effects{alloc}{
+  record_take(array.borrow(struct.borrow(project,field=shots),index),output,seed,succeeded)
+}
+
+pub fn apply_director_plan(project:ref<Project>,index:u64,value:str)->unit effects{alloc}{
+  let shot=array.borrow(struct.borrow(project,field=shots),index)
+  let _=ref.swap(struct.borrow(shot,field=plan),string.copy(value))
+  let _=ref.swap(struct.borrow(shot,field=prompt_override),string.new())
+  ()
+}
+
+pub fn set_frame(project:ref<Project>,index:u64,value:str,opening:bool)->unit effects{alloc}{
+  let shot=array.borrow(struct.borrow(project,field=shots),index)
+  if opening{let _=ref.swap(struct.borrow(shot,field=first_frame),string.copy(value))}
+  else{let _=ref.swap(struct.borrow(shot,field=last_frame),string.copy(value))}
+  ()
+}
+
+pub fn add_references(project:ref<Project>,index:u64,values:ref<array<string>>)
+    ->unit effects{alloc}{
+  let shot=array.borrow(struct.borrow(project,field=shots),index)
+  var i:u64=0
+  loop{if i >= array.len(values) or array.len(struct.borrow(shot,field=references)) >= 12{break}
+    array.push(struct.borrow(shot,field=references),string.copy(array.borrow(values,i)))
+    i=i+1}
+  ()
+}
+
+pub fn remove_last_reference(project:ref<Project>,index:u64)->unit effects{alloc}{
+  let shot=array.borrow(struct.borrow(project,field=shots),index)
+  if array.len(struct.borrow(shot,field=references))!=0{
+    let _=array.pop(struct.borrow(shot,field=references))}
+  ()
+}
+
+pub fn select_take(project:ref<Project>,index:u64,take_index:i64)->bool effects{}{
+  let shot=array.borrow(struct.borrow(project,field=shots),index)
+  let selected:u64=cast.wrap(take_index)
+  if take_index<0 or selected>=array.len(struct.borrow(shot,field=takes)){return false}
+  struct.set(shot,take_index,field=selected_take)
+  true
+}
+
+pub fn set_shot_text(project:ref<Project>,index:u64,field:u32,value:str)->unit effects{alloc}{
+  let shot=array.borrow(struct.borrow(project,field=shots),index)
+  if field==0{let _=ref.swap(struct.borrow(shot,field=title),string.copy(value))}
+  if field==1{let _=ref.swap(struct.borrow(shot,field=brief),string.copy(value))}
+  if field==2{let _=ref.swap(struct.borrow(shot,field=plan),string.copy(value))}
+  if field==3{let _=ref.swap(struct.borrow(shot,field=prompt_override),string.copy(value))}
+  if field==4{let _=ref.swap(struct.borrow(shot,field=soundscape),string.copy(value))}
+  if field==5{let _=ref.swap(struct.borrow(shot,field=music),string.copy(value))}
+  ()
+}
+
+pub fn set_duration(project:ref<Project>,index:u64,value:f64)->unit effects{}{
+  struct.set(array.borrow(struct.borrow(project,field=shots),index),value,field=duration)
+  ()
+}
+
+pub fn set_locked(project:ref<Project>,index:u64,value:bool)->unit effects{}{
+  struct.set(array.borrow(struct.borrow(project,field=shots),index),value,field=locked)
+  ()
+}
+
+pub fn set_resolution(project:ref<Project>,index:u64,value:u32)->unit effects{}{
+  let shot=array.borrow(struct.borrow(project,field=shots),index)
+  let size=h3.resolution(value)
+  if size.width!=0 and size.height!=0{
+    struct.set(shot,size.width,field=width)
+    struct.set(shot,size.height,field=height)}
+  ()
+}
+
+pub fn set_dimensions(project:ref<Project>,index:u64,width:u64,height:u64)->unit effects{}{
+  let shot=array.borrow(struct.borrow(project,field=shots),index)
+  struct.set(shot,width,field=width)
+  struct.set(shot,height,field=height)
+  ()
+}
+
+// Match imported opening frames to an admitted H3 canvas, rather than silently
+// stretching a portrait onto the default landscape shot. Users can then change
+// the visible resolution control explicitly.
+pub fn resolution_for_aspect(width:u64,height:u64)->u32 effects{}{
+  if width==0 or height==0{return 0}
+  let aspect:f64=cast.float(width)/cast.float(height)
+  var best:u32=0
+  var distance:f64=1000000.0
+  var index:u32=0
+  loop{if index>=h3.resolution_custom(){break}
+    let size=h3.resolution(index)
+    let error:f64=math.abs(cast.float(size.width)/cast.float(size.height)-aspect)
+    if error<distance{distance=error
+      best=index}
+    index=index+1}
+  best
+}
+
+pub fn create_continuation(project:ref<Project>,source_index:u64)->result<unit,string>
+    effects{alloc}{
+  var source=snapshot_shot(project,source_index)
+  let take_index:u64=cast.wrap(source.selected_take)
+  if source.selected_take<0 or take_index>=array.len(struct.borrow(source,field=takes)){
+    return result.err("Select a finished take before continuing")}
+  let selected=array.borrow(struct.borrow(source,field=takes),take_index)
+  if struct.borrow(selected,field=state)!="done" or struct.borrow(selected,field=output)==""{
+    return result.err("Select a finished take before continuing")}
+  let source_path=string.copy(struct.borrow(array.borrow(struct.borrow(source,field=takes),take_index),field=output))
+  let source_title=string.copy(struct.borrow(source,field=title))
+  add_shot(project)
+  let continuation=array.borrow(struct.borrow(project,field=shots),project.selected_shot)
+  let _=ref.swap(struct.borrow(continuation,field=title),text.concat(str.view(source_title)," · continuation"))
+  let _=ref.swap(struct.borrow(continuation,field=brief),string.copy("Continue the same scene naturally. Preserve identity, wardrobe, environment, screen direction, motion, lighting, synchronized sound, and story state."))
+  let context_path=text.concat(str.view(source_path),".airh3ctx")
+  let _=ref.swap(struct.borrow(continuation,field=continue_from),context_path)
+  struct.set(continuation,source.duration,field=duration)
+  struct.set(continuation,source.width,field=width)
+  struct.set(continuation,source.height,field=height)
+  result.ok(())
+}
+
+type SelectedTake=struct{output:string,duration:f64}
+
+fn selected_takes(project:ref<Project>)->array<SelectedTake> effects{alloc}{
+  var outputs:array<SelectedTake> = []
+  var i:u64=0
+  loop{if i >= array.len(struct.borrow(project,field=shots)){break}
+    var shot=snapshot_shot(project,i)
+    let take_index:u64=cast.wrap(shot.selected_take)
+    if shot.selected_take >= 0 and take_index < array.len(struct.borrow(shot,field=takes)){
+      let take=array.borrow(struct.borrow(shot,field=takes),take_index)
+      if take.state=="done" and str.len(struct.borrow(take,field=output))!=0{
+        array.push(outputs,SelectedTake{output:string.copy(struct.borrow(take,field=output)),duration:shot.duration})}
+    }
+    i=i+1
+  }
+  outputs
+}
+
+pub fn selected_outputs(project:ref<Project>)->array<string> effects{alloc}{
+  var takes=selected_takes(project)
+  var outputs:array<string> = []
+  var i:u64=0
+  loop{if i>=array.len(takes){break}
+    array.push(outputs,string.copy(struct.borrow(array.borrow(takes,i),field=output)))
+    i=i+1}
+  outputs
+}
+
+// Every selected H3 take is normalized before concat. This keeps delivery audio
+// and timestamps coherent even when shots use different source dimensions.
+pub fn concat_entry(filename:str)->result<string,string> effects{alloc,env}{
+  if text.contains(filename,"\n") or text.contains(filename,"\r"){
+    return result.err("Movie export paths cannot contain line breaks")
+  }
+  let portable=if system.platform()=="windows"{text.replace(filename,"\\","/")}else{string.copy(filename)}
+  // FFmpeg concat quoting: leave the quoted token, escape the quote, resume it.
+  let escaped=text.replace(portable,"'","'\\''")
+  result.ok(text.concat("file '",text.concat(escaped,"'\n")))
+}
+
+pub fn stitch(project:ref<Project>,output:str,scratch_root:str)->result<unit,string>
+    effects{alloc,env,fs.meta,fs.write,process,time}{
+  var sources=selected_takes(project)
+  if array.len(sources)==0{return result.err("Select at least one finished take before stitching")}
+  let root=path.join(scratch_root,text.concat("mm-air-movie-",str.view(
+    string.from_int(time.monotonic_ns()))))
+  match files.mkdirs(str.view(root)){ok(_)=>{},err(problem)=>{return result.err(string.copy(problem.message))}}
+  var normalized:array<string> = []
+  var selected_seconds:f64=0.0
+  var i:u64=0
+  loop{if i >= array.len(sources){break}
+    let take=array.borrow(sources,i)
+    let duration=take.duration
+    if not math.is_finite(duration) or duration<=0.0{
+      return result.err("Movie export requires a positive finite duration for each selected shot")}
+    selected_seconds=selected_seconds+duration
+    let target=path.join(str.view(root),text.concat("shot-",text.concat(
+      str.view(string.from_int(i)),".mp4")))
+    match proc.check(["ffmpeg","-nostdin","-v","error","-y","-i",
+      string.copy(struct.borrow(take,field=output)),"-t",string.from_float(duration),"-vf","setpts=PTS-STARTPTS,fps=24:start_time=0,scale=1344:768:force_original_aspect_ratio=decrease,pad=1344:768:(ow-iw)/2:(oh-ih)/2:black,setsar=1",
+      "-af","aresample=48000:async=1:first_pts=0","-c:v","libx264","-preset","medium","-crf","17",
+      "-pix_fmt","yuv420p","-c:a","aac","-b:a","192k","-ar","48000","-ac","2",
+      "-movflags","+faststart",string.copy(str.view(target))]){
+      ok(_)=>{},err(_)=>{return result.err("Movie stitch failed while normalizing a selected take")}}
+    array.push(normalized,target)
+    i=i+1
+  }
+  let concat_file=path.join(str.view(root),"concat.txt")
+  var listing=string.new()
+  i=0
+  loop{if i >= array.len(normalized){break}
+    string.append(listing,try concat_entry(array.borrow(normalized,i)))
+    i=i+1
+  }
+  match files.write_atomic(str.view(concat_file),text.concat(str.view(concat_file),".tmp"),str.view(listing)){
+    ok(_)=>{},err(problem)=>{return result.err(string.copy(problem.message))}}
+  match proc.check(["ffmpeg","-nostdin","-v","error","-y","-f","concat","-safe","0",
+    "-i",string.copy(str.view(concat_file)),"-vf","setpts=PTS-STARTPTS,fps=24:start_time=0,setsar=1","-af","aresample=48000:async=1:first_pts=0",
+    "-c:v","libx264","-preset","medium","-crf","17","-pix_fmt","yuv420p",
+    "-c:a","aac","-b:a","192k","-ar","48000","-ac","2","-movflags","+faststart",
+    "-t",string.from_float(selected_seconds),string.copy(output)]){
+    ok(_)=>result.ok(()),err(_)=>result.err("Movie stitch failed while assembling normalized takes")}
+}

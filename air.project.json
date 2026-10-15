@@ -1,0 +1,239 @@
+{
+  "schema": "air.project",
+  "version": 1,
+  "package": {
+    "name": "mm-air-h3",
+    "version": "0.1.0",
+    "description": "MM-Air compile boundary for the shared pure-AIR MiniMax-H3 session library.",
+    "license": "MIT",
+    "namespace": "app.mm_air"
+  },
+  "targets": {
+    "bin": [
+      {
+        "name": "mm-air",
+        "entry": "main.ai"
+      },
+      {
+        "name": "runtime-config",
+        "entry": "tests/runtime_config.ai"
+      },
+      {
+        "name": "mm-air-native-view-test",
+        "entry": "tests/native_view.ai"
+      },
+      {
+        "name": "mm-air-library-check",
+        "entry": "tests/library.ai"
+      },
+      {
+        "name": "auto-mask-pipeline",
+        "entry": "tests/auto_mask_pipeline.ai"
+      },
+      {
+        "name": "prompt-lab-8b-smoke",
+        "entry": "tests/prompt_lab_8b_smoke.ai"
+      },
+      {
+        "name": "prompt-lab-32b-row-i8-smoke",
+        "entry": "tests/prompt_lab_32b_row_i8_smoke.ai"
+      },
+      {
+        "name": "prompt-lab-32b-row-i8-video-smoke",
+        "entry": "tests/prompt_lab_32b_row_i8_video_smoke.ai"
+      },
+      {
+        "name": "character-sheet-video",
+        "entry": "tests/character_sheet_video.ai"
+      },
+      {
+        "name": "character-sheet-generate",
+        "entry": "tests/character_sheet_generate.ai"
+      },
+      {
+        "name": "character-swap-4b-smoke",
+        "entry": "tests/character_swap_4b_smoke.ai"
+      },
+      {
+        "name": "character-replace-generate",
+        "entry": "tests/character_replace_generate.ai"
+      },
+      {
+        "name": "masked-image-generate",
+        "entry": "tests/masked_image_generate.ai"
+      },
+      {
+        "name": "masked-video-generate",
+        "entry": "tests/masked_video_generate.ai"
+      },
+      {
+        "name": "masked-background-generate",
+        "entry": "tests/masked_background_generate.ai"
+      },
+      {
+        "name": "seedvr2-existing-video",
+        "entry": "tests/seedvr2_existing_video.ai"
+      },
+      {
+        "name": "windowed-h3-generate",
+        "entry": "tests/windowed_generate.ai"
+      },
+      {
+        "name": "outpaint-generate",
+        "entry": "tests/outpaint_generate.ai"
+      },
+      {
+        "name": "timing-ab-generate",
+        "entry": "tests/timing_ab_generate.ai"
+      },
+      {
+        "name": "motion-repair-generate",
+        "entry": "tests/motion_repair_generate.ai"
+      },
+      {
+        "name": "rolling-repair-generate",
+        "entry": "tests/rolling_repair_generate.ai"
+      },
+      {
+        "name": "motion-analyze",
+        "entry": "tests/motion_analyze.ai"
+      },
+      {
+        "name": "repair-recomposite",
+        "entry": "tests/repair_recomposite.ai"
+      },
+      {
+        "name": "movie-drift-ab-generate",
+        "entry": "tests/movie_drift_ab_generate.ai"
+      }
+    ],
+    "test": [
+        {
+          "name": "native-generate",
+          "entry": "tests/native_generate.ai"
+        },
+        {
+          "name": "native-krea",
+          "entry": "tests/native_krea.ai"
+        },
+        {
+          "name": "native-h3",
+          "entry": "tests/native_h3.ai"
+        },
+        {
+          "name": "native-h3-job",
+          "entry": "tests/native_h3_job.ai"
+        },
+        {
+          "name": "native-worker-cancel",
+          "entry": "tests/native_worker_cancel.ai",
+          "requires": {"gpu": true},
+          "missing": "skip",
+          "timeout": "1m"
+        },
+        {
+          "name": "native-krea-cancel",
+          "entry": "tests/native_krea_cancel.ai",
+          "requires": {"gpu": true},
+          "missing": "skip",
+          "timeout": "1m"
+        },
+      {
+        "name": "h3-library-import",
+        "entry": "tests/h3_library_import.ai"
+      },
+      {
+        "name": "h3-lora-failure",
+        "entry": "tests/h3_lora_failure.ai"
+      },
+      {
+        "name": "h3-lora-admission",
+        "entry": "tests/h3_lora_admission.ai"
+      },
+      {
+        "name": "parameters",
+        "entry": "tests/parameters.ai"
+      },
+      {
+        "name": "reference-preprocess",
+        "entry": "tests/reference_preprocess.ai"
+      },
+      {
+        "name": "prompt-lab",
+        "entry": "tests/prompt_lab.ai"
+      },
+      {
+        "name": "character-sheet",
+        "entry": "tests/character_sheet.ai"
+      },
+      {
+        "name": "character-swap",
+        "entry": "tests/character_swap.ai"
+      },
+      {
+        "name": "masked-edit",
+        "entry": "tests/masked_edit.ai"
+      },
+      {
+        "name": "masked-runtime",
+        "entry": "tests/masked_runtime.ai"
+      },
+      {
+        "name": "video-outpaint",
+        "entry": "tests/outpaint.ai"
+      },
+      {
+        "name": "video-outpaint-runtime",
+        "entry": "tests/outpaint_runtime.ai"
+      },
+      {
+        "name": "video-repair-runtime",
+        "entry": "tests/repair_runtime.ai"
+      },
+      {
+        "name": "seedvr2-postprocess",
+        "entry": "tests/seedvr2_postprocess.ai"
+      }
+    ]
+  },
+  "sources": [
+    "generate.ai",
+    "runtime_config.ai",
+    "settings.ai",
+    "character_sheet.ai",
+    "character_swap.ai",
+    "masked_edit.ai",
+    "masked_runtime.ai",
+    "outpaint.ai",
+    "outpaint_runtime.ai",
+    "repair_runtime.ai",
+    "seedvr2_post.ai",
+    "prompt_lab.ai",
+    "library.ai",
+    "parameters.ai",
+    "native_generate.ai",
+    "native_movie.ai",
+    "native_krea.ai",
+    "native_h3.ai",
+    "native_seed.ai",
+    "native_view.ai",
+    "tests"
+  ],
+  "requires": {
+    "os": ["linux"],
+    "arch": ["x86_64"],
+    "airc": ">=0.1.0"
+  },
+  "dependencies": {
+    "prompt": {"path":"../../AIR/toolkits/prompt","version":">=0.1.0"},
+    "sam3": {"path":"../../AIR/toolkits/sam3","version":">=0.1.0"},
+    "seedvr2": {"path":"../../AIR/toolkits/seedvr2","version":">=0.1.0"},
+    "krea2": {"path":"../../AIR/models/krea2","version":">=0.1.0"},
+    "qwenimage21": {"path":"../../AIR/models/qwenimage21","version":">=0.1.0"},
+    "h3": {
+      "path": "../../AIR/models/h3",
+      "version": ">=0.1.0"
+    },
+    "h3_repair": {"path":"../../AIR/toolkits/h3-repair","version":">=0.1.0"}
+  }
+}

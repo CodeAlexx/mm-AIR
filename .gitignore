@@ -26,3 +26,6 @@ __pycache__/
 /stdlib/
 /toolkits/
 /archive/
+
+# Machine-specific build locations
+tools/local-paths.cmd

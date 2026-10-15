@@ -1,0 +1,116 @@
+// Thin MM-Air adapter for the reusable AIR SeedVR2 toolkit. Model execution,
+// media geometry and muxing remain in the toolkit; this file owns app settings
+// and durable sidecar spelling only.
+module app.mm_air.seedvr2_post
+import ".air/deps/seedvr2/config.ai" as config
+import ".air/deps/seedvr2/session.ai" as seed_session
+import ".air/deps/seedvr2/media.ai" as seed_media
+import "runtime_config.ai" as runtime_config
+import std.codec as codec
+import std.files as files
+import std.text as text
+
+pub type Settings=struct {variant:u32,size_mode:u32,custom_width:u64,custom_height:u64,
+  preserve_audio:bool,seed:u64,quality:u32,memory:u32}
+
+pub type Completed=struct {metadata:string,source_output:string,final_output:string,
+  runtime_ms:u64,peak_vram_bytes:u64}
+
+pub fn settings(variant:u32,size_mode:u32,custom_width:u64,custom_height:u64,
+    preserve_audio:bool,seed:u64,quality:u32,memory:u32)->Settings effects {} {
+  Settings {variant:variant,size_mode:size_mode,custom_width:custom_width,
+    custom_height:custom_height,preserve_audio:preserve_audio,seed:seed,
+    quality:quality,memory:memory}
+}
+
+fn required(name:str)->result<string,string> effects {alloc,env,fs.read,fs.meta} {
+  match try runtime_config.value(name){some(value)=>{if str.len(str.view(value))==0{
+    return result.err(text.concat(name," is empty"))}
+    result.ok(value)},none=>result.err(text.concat("Set ",name))}
+}
+
+pub fn sources(variant:u32)->result<seed_session.Sources,string> effects {alloc,env,fs.read,fs.meta} {
+  if variant>1{return result.err("Unknown SeedVR2 model variant")}
+  result.ok(seed_session.Sources {
+    dit_checkpoint:try required(if variant==1{"MM_AIR_SEEDVR2_7B_DIT"}
+      else{"MM_AIR_SEEDVR2_DIT"}),
+    vae_checkpoint:try required("MM_AIR_SEEDVR2_VAE"),
+    manifest_directory:try required(if variant==1{
+      "MM_AIR_SEEDVR2_7B_MANIFEST_ROOT"}else{"MM_AIR_SEEDVR2_MANIFEST_ROOT"})})
+}
+
+fn request(info:seed_media.SourceInfo,value:Settings)->config.Request effects {} {
+  config.Request {variant:if value.variant==1{config.Variant.SevenB}
+      else{config.Variant.ThreeB},source_width:info.width,source_height:info.height,
+    frames:info.frames,fps_numerator:info.fps_numerator,
+    fps_denominator:info.fps_denominator,
+    size_mode:if value.size_mode==1{config.SizeMode.Scale2x}
+      else if value.size_mode==2{config.SizeMode.Custom}else{config.SizeMode.Restore},
+    custom_width:value.custom_width,custom_height:value.custom_height,
+    seed:value.seed,preserve_audio:value.preserve_audio,
+    memory:if value.memory==1{config.MemoryMode.LowVram}
+      else if value.memory==2{config.MemoryMode.Performance}else{config.MemoryMode.Auto},
+    quality:if value.quality==1{config.Quality.EightStep}else{config.Quality.OneStep}}
+}
+
+fn memory_name(value:u32)->string effects {alloc} {
+  string.copy(if value==1{"low-vram"}else if value==2{"performance"}else{"auto"})
+}
+
+fn size_name(value:u32)->string effects {alloc} {
+  string.copy(if value==1{"2x"}else if value==2{"custom"}else{"restore"})
+}
+
+fn metadata(report:ref<seed_media.Report>,sources:ref<seed_session.Sources>,
+            value:Settings)->result<string,string> effects {alloc} {
+  var writer=codec.writer()
+  codec.begin_object(writer)
+  codec.field_text(writer,"schema","mm-air.seedvr2.postprocess")
+  codec.field_u64(writer,"version",3)
+  codec.field_bool(writer,"enabled",true)
+  codec.field_text(writer,"model_variant",if value.variant==1{"SeedVR2 7B"}
+    else{"SeedVR2 3B"})
+  codec.field_text(writer,"model_file",struct.borrow(sources,field=dit_checkpoint))
+  codec.field_text(writer,"vae_file",struct.borrow(sources,field=vae_checkpoint))
+  codec.field_text(writer,"precision",if value.variant==1{"BF16"}else{"F16"})
+  codec.field_text(writer,"output_size",size_name(value.size_mode))
+  codec.field_u64(writer,"target_width",report.width)
+  codec.field_u64(writer,"target_height",report.height)
+  codec.field_u64(writer,"frames",report.frames)
+  codec.field_u64(writer,"fps_numerator",report.fps_numerator)
+  codec.field_u64(writer,"fps_denominator",report.fps_denominator)
+  codec.field_u64(writer,"seed",report.seed)
+  codec.field_f64(writer,"guidance_scale",cast.float(config.guidance_scale()))
+  codec.field_text(writer,"quality",if value.quality==1{"eight-step"}else{"one-step"})
+  codec.field_text(writer,"memory_mode",memory_name(value.memory))
+  codec.field_bool(writer,"preserve_audio",report.preserve_audio)
+  codec.field_text(writer,"source_generated_file",struct.borrow(report,field=source))
+  codec.field_text(writer,"final_restored_file",struct.borrow(report,field=output))
+  codec.field_u64(writer,"runtime_ms",report.runtime_ms)
+  codec.field_u64(writer,"peak_vram_bytes",report.peak_vram_bytes)
+  codec.field_u64(writer,"estimated_vram_bytes",report.estimated_vram_bytes)
+  codec.field_u64(writer,"temporal_chunks",report.chunks)
+  codec.field_u64(writer,"max_chunk_frames",report.max_chunk_frames)
+  codec.field_u64(writer,"overlap_frames",report.overlap_frames)
+  codec.end_object(writer)
+  match codec.finish(writer){ok(found)=>result.ok(found),
+    err(problem)=>result.err(codec.describe(problem))}
+}
+
+pub fn run(source:str,output:str,work_root:str,value:Settings)
+    ->result<Completed,string>
+    effects {alloc,env,fs.meta,fs.read,fs.write,process,time,gpu} {
+  var model_sources=try sources(value.variant)
+  var info=try seed_media.inspect(source,work_root)
+  var restored=try seed_media.upscale_video(source,output,work_root,model_sources,
+    request(info,value))
+  var encoded=try metadata(restored,model_sources,value)
+  let sidecar=text.concat(output,".seedvr2.json")
+  match files.write_atomic(str.view(sidecar),text.concat(str.view(sidecar),".tmp"),
+      str.view(encoded)){ok(_)=>{},err(problem)=>{
+    return result.err(text.concat("SeedVR2 media saved but sidecar failed: ",
+      problem.message))},}
+  result.ok(Completed {metadata:encoded,source_output:string.copy(source),
+    final_output:string.copy(output),runtime_ms:restored.runtime_ms,
+    peak_vram_bytes:restored.peak_vram_bytes})
+}

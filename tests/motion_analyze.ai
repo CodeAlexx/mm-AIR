@@ -1,0 +1,27 @@
+// Reusable native video-to-MotionPlan command for product and toolkit gates.
+module app.mm_air.tests.motion_analyze
+import "../repair_runtime.ai" as runtime
+import "../.air/deps/h3_repair/analyze.ai" as analysis
+import "../.air/deps/h3_repair/motion.ai" as motion
+import std.files as files
+import std.text as text
+
+fn fail(message:str)->i32 effects{io.write}{io.ewrite(message)
+  io.ewrite("\n")
+  1}
+
+pub fn main(args:view<str>)->i32
+    effects{alloc,fs.meta,fs.read,fs.write,io.write,process,time}{
+  if view.len(args)!=3{return fail("usage: motion-analyze SOURCE_VIDEO OUTPUT_JSON")}
+  var found=match runtime.analyze_motion(view.get(args,1),"/tmp",1.0,2.0){
+    ok(value)=>value,err(message)=>{return fail(message)}}
+  let summary=analysis.describe(found)
+  let encoded=motion.encode(struct.borrow(found,field=plan))
+  match files.write_atomic(view.get(args,2),text.concat(view.get(args,2),".tmp"),
+      str.view(encoded)){
+    ok(_)=>{},err(problem)=>{return fail(problem.message)}}
+  io.write(str.view(summary))
+  io.write("\n")
+  io.write("MM-Air native motion analysis video PASS\n")
+  0
+}

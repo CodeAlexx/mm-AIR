@@ -1,0 +1,37 @@
+module app.mm_air.tests.native_h3_job
+import "../generate.ai" as generation
+import "../parameters.ai" as parameters
+import "../native_seed.ai" as seed
+import "../.air/deps/h3/request.ai" as h3
+import "../.air/deps/h3/session.ai" as session
+import std.channel as channel
+
+pub fn main(args:view<str>)->i32 effects {alloc,io.write,net,random,time} {
+  var config=generation.Configuration{checkpoint_root:"base",reference_checkpoint_root:"reference",
+    donor_root:"prepared",manifest_root:"manifests",scratch_root:"scratch"}
+  var receiver=match channel.open(8,1024){ok(v)=>v,err(_)=>{return 1},}
+  var loras:array<parameters.LoraEntry> = [parameters.LoraEntry{path:"D:/adapter.safetensors",strength:0.5,enabled:true}]
+  var request=h3.request("A robot walks, birds sing",1,3,3,1,2,4,9223372036854775807,6,["first.png","last.png"],"movie.mp4")
+  let old=ref.swap(struct.borrow(request,field=audio_references),[string.copy("sound.wav")])
+  var job=match generation.h3_job(config,request,loras,channel.ticket(receiver)){ok(v)=>v,err(p)=>{io.ewrite(p)
+    let _=channel.close(receiver)
+    return 2},}
+  if job.model!=session.Model.Reference or job.task!=session.Task.Ref2VA{return 3}
+  if job.seed!=9223372036854775807 or job.attention!=session.Attention.CkInt8{return 4}
+  if job.transformer_projection!=session.Projection.ConvRotI8Streaming or job.conditioner_projection!=session.Projection.ExactBF16{return 5}
+  if job.schedule_kind!=session.Schedule.Exponential or job.evaluations!=19{return 6}
+  if job.geometry.width!=832 or array.len(struct.borrow(job,field=references))!=2{return 7}
+  if array.len(struct.borrow(job,field=audio_references))!=1 or array.borrow(struct.borrow(job,field=loras),0).strength!=0.5{return 8}
+  array.set(struct.borrow(request,field=references),0,"changed.png")
+  if array.borrow(struct.borrow(job,field=references),0)!="first.png"{return 9}
+  struct.set(request,-1,field=seed)
+  match generation.h3_job(config,request,loras,channel.ticket(receiver)){ok(_)=>{return 10},err(_)=>{},}
+  let random_seed=match seed.resolve(-1){ok(v)=>v,err(_)=>{return 11},}
+  if random_seed<0 or random_seed>72057594037927935{return 12}
+  struct.set(request,random_seed,field=seed)
+  struct.set(request,0,field=model)
+  match generation.h3_job(config,request,loras,channel.ticket(receiver)){ok(_)=>{return 13},err(_)=>{},}
+  let _=channel.close(receiver)
+  io.write("H3 request-to-worker mapping passed\n")
+  0
+}

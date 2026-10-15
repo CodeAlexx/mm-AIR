@@ -1,0 +1,42 @@
+module app.mm_air.tests.native_h3_worker
+import "../generate.ai" as generation
+import "../parameters.ai" as parameters
+import "../.air/deps/h3/request.ai" as h3
+import std.channel as channel
+import std.files as files
+import std.path as path
+
+// Caller owns an empty temporary directory. Exercise the real asynchronous
+// worker and cleanup with absent assets, before GPU execution.
+pub fn main(args:view<str>)->i32 effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
+  if view.len(args)!=2{return 2}
+  let root=view.get(args,1)
+  let output=path.join(root,"must-not-exist.mp4")
+  var config=generation.Configuration{checkpoint_root:path.join(root,"absent"),reference_checkpoint_root:"",
+    donor_root:path.join(root,"prepared"),manifest_root:path.join(root,"manifests"),scratch_root:string.copy(root)}
+  var request=h3.request("A robot walks, birds sing",0,0,3,1,2,4,42,6,[],output)
+  var loras:array<parameters.LoraEntry> = []
+  var receiver=match channel.open(128,1024){ok(v)=>v,err(_)=>{return 3},}
+  var job=match generation.h3_job(config,request,loras,channel.ticket(receiver)){ok(v)=>v,err(_)=>{return 4},}
+  var code:i32=5
+  var updates:u64=0
+  task.scope {
+    var jobs:array<task<generation.Outcome>> = [task.spawn(job,fn=generation.run)]
+    loop{
+      match channel.recv_now(receiver,time.monotonic_ns()){
+        ok(value)=>match value{some(_)=>{updates=updates+1},none=>{},},err(_)=>{},
+      }
+      match task.wait_any(jobs,0){some(_)=>{
+        var finished=task.join(option.unwrap(array.pop(jobs)))
+        if not finished.succeeded and finished.message=="Cannot load the MiniMax-H3 tokenizer"{code=0}
+        else{io.ewrite(struct.borrow(finished,field=message))}
+        break
+      },none=>{time.sleep_ms(10)},}
+    }
+  }
+  let _=channel.close(receiver)
+  if updates==0{return 6}
+  if match files.exists(output){ok(v)=>v,err(_)=>true,}{return 7}
+  if code==0{io.write("H3 worker missing-assets refusal and progress teardown passed\n")}
+  code
+}

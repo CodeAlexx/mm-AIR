@@ -1,0 +1,48 @@
+module app.mm_air.tests.outpaint
+import "../outpaint.ai" as outpaint
+import std.text as text
+
+fn expect(value:bool,message:str)->unit effects{io.write}{if not value{io.ewrite(message)
+panic "outpaint test"}}
+
+pub fn main(args:view<str>)->i32 effects{alloc,io.write}{
+  var g=match outpaint.geometry(320,256,576,256,outpaint.right(),
+      outpaint.anchor_center()){ok(value)=>value,err(_)=>{panic "right geometry"}}
+  expect(g.placement_x==0 and g.expand_right==256 and
+    array.len(struct.borrow(g,field=generated))==1,"right expansion geometry\n")
+  var exact=match outpaint.mask(22,g,outpaint.exact(),0){ok(value)=>value,
+    err(_)=>{panic "exact mask"}}
+  expect(array.get(struct.borrow(exact,field=weights),0)==0.0 and
+    array.get(struct.borrow(exact,field=weights),575)==1.0,
+    "exact preserve/generate regions\n")
+  var both=match outpaint.geometry(320,256,576,512,outpaint.all_sides(),
+      outpaint.anchor_center()){ok(value)=>value,err(_)=>{panic "all geometry"}}
+  expect(both.expand_left==128 and both.expand_right==128 and
+    both.expand_top==128 and both.expand_bottom==128,"centered all-sides placement\n")
+  var blend=match outpaint.mask(4,both,outpaint.blended(),8){ok(value)=>value,
+    err(_)=>{panic "blend mask"}}
+  let interior=both.placement_y*both.target_width+both.placement_x
+  expect(array.get(struct.borrow(blend,field=weights),interior)>0.0 and
+    array.get(struct.borrow(blend,field=weights),interior)<1.0,
+    "bounded blended transition\n")
+  var plan=match outpaint.window_plan(240,124,22){ok(value)=>value,
+    err(_)=>{panic "window plan"}}
+  expect(array.len(struct.borrow(plan,field=windows))>1,"sequential outpaint windows\n")
+  let first=array.get(struct.borrow(plan,field=windows),0)
+  let second=array.get(struct.borrow(plan,field=windows),1)
+  expect(first.source_frames.first==0 and second.source_frames.first<
+    first.source_frames.end_exclusive,"window source overlap\n")
+  let prompt=outpaint.qwen_instruction(both,"continue the garden",plan)
+  expect(text.contains(str.view(prompt),"Preserve <Video 1> exactly") and
+    text.contains(str.view(prompt),"all-sides"),"source-aware Qwen request\n")
+  let metadata=match outpaint.sidecar(both,"source.mp4","continue",7,240,124,22,
+    outpaint.exact(),0,true,"decoded-tail-reference",2,7,0,1,2,1){
+      ok(value)=>value,err(_)=>{panic "sidecar"}}
+  expect(text.contains(str.view(metadata),"mm-air.h3-video-outpaint") and
+    text.contains(str.view(metadata),"source_audio_preserved") and
+    text.contains(str.view(metadata),"row-i8-language-bf16-vision") and
+    text.contains(str.view(metadata),"h3_transformer_projection"),
+    "sidecar metadata\n")
+  io.write("MM-Air H3 video outpaint geometry, seam, window and metadata PASS\n")
+  0
+}

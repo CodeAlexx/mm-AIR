@@ -1,0 +1,42 @@
+// Apply the production Repair/Motion Repair splice to an already-generated
+// bounded H3 span. This avoids rerunning a rejected generation while proving
+// the native mask and temporal-handle compositor on the same GPU pixels.
+module app.mm_air.tests.repair_recomposite
+import "../repair_runtime.ai" as runtime
+import "../.air/deps/h3_repair/plan.ai" as plan
+import std.files as files
+
+fn fail(message:str)->i32 effects{io.write}{io.ewrite(message)
+  io.ewrite("\n")
+  1}
+
+pub fn main(args:view<str>)->i32
+    effects{alloc,fs.meta,fs.read,fs.write,io.write,process,time}{
+  if view.len(args)!=6{return fail(
+    "usage: repair-recomposite SOURCE GENERATED_SPAN SOURCE_MASK TARGET_MASK OUTPUT")}
+  var settings=runtime.settings(12,48,5,5,1.0,plan.MemoryMode.Full,56,22)
+  match runtime.set_spatial_mask(settings,view.get(args,3),2,8,4){
+    ok(_)=>{},err(message)=>{return fail(message)}}
+  var prepared=match runtime.prepare(view.get(args,1),view.get(args,5),"/tmp",
+      settings){ok(value)=>value,err(message)=>{return fail(message)}}
+  match runtime.set_target_mask(prepared,view.get(args,4)){
+    ok(_)=>{},err(message)=>{runtime.discard(prepared)
+      return fail(message)}}
+  var generated=match files.read_limited(view.get(args,2),1073741824){
+    ok(value)=>value,err(_)=>{runtime.discard(prepared)
+      return fail("Cannot read generated repair span")}}
+  match files.write_bytes(runtime.h3_output(prepared),bytes.view(generated)){
+    ok(_)=>{},err(problem)=>{runtime.discard(prepared)
+      return fail(problem.message)}}
+  var report=match runtime.finish(prepared){ok(value)=>value,err(message)=>{
+    runtime.discard(prepared)
+    return fail(message)}}
+  io.write("repair-recomposite entry_delta=")
+  io.write(str.view(string.from_float(report.entry_delta)))
+  io.write(" exit_delta=")
+  io.write(str.view(string.from_float(report.exit_delta)))
+  io.write("\n")
+  runtime.discard(prepared)
+  io.write("MM-Air masked feathered repair recomposite PASS\n")
+  0
+}

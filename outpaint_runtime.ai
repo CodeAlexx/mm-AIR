@@ -1,0 +1,345 @@
+// Native media boundary for H3 video outpaint. FFmpeg only decodes/encodes,
+// slices and pads local media; AIR owns geometry, masks, planning and composite.
+module app.mm_air.outpaint_runtime
+
+import std.files as files
+import std.media as media
+import std.media_input as input
+import std.math as math
+import std.path as path
+import std.process as proc
+import std.text as text
+import ".air/deps/h3/timeline.ai" as timeline
+import ".air/deps/h3/media.ai" as h3_media
+import "masked_edit.ai" as edit
+import "masked_runtime.ai" as masked
+import "outpaint.ai" as outpaint
+
+pub type Settings=struct{
+  target_width:u64,target_height:u64,direction:u32,anchor:u32,
+  composite_mode:u32,seam_width:u64,window_frames:u64,overlap_frames:u64,
+  preview_first_window:bool,preserve_audio:bool,qwen_model:u32
+}
+
+pub fn settings(target_width:u64,target_height:u64,direction:u32,anchor:u32,
+                composite_mode:u32,seam_width:u64,window_frames:u64,
+                overlap_frames:u64,preview_first_window:bool)->Settings effects{}{
+  Settings{target_width:target_width,target_height:target_height,
+    direction:direction,anchor:anchor,composite_mode:composite_mode,
+    seam_width:seam_width,window_frames:window_frames,
+    overlap_frames:overlap_frames,preview_first_window:preview_first_window,
+    preserve_audio:true,qwen_model:0}
+}
+
+pub fn set_qwen_model(value:ref<Settings>,model:u32)->unit effects{}{
+  struct.set(value,model,field=qwen_model)
+  ()
+}
+
+pub type Prepared=struct{
+  base:masked.Prepared,geometry:outpaint.Geometry,padded_source:string,
+  mask_path:string,root:string
+}
+
+pub type SourceInfo=struct{width:u64,height:u64,frames:u64,duration_ms:u64}
+
+fn probe_duration_ms(source:str,root:str,video_stream:bool)->result<u64,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process,time}{
+  let work=path.join(root,"duration")
+  var exit=proc.start(proc.plan(["ffprobe","-v","error","-select_streams","v:0","-show_entries",
+    if video_stream{"stream=duration"}else{"format=duration"},"-of","default=noprint_wrappers=1:nokey=1",
+    string.copy(source)],str.view(work)))
+  if not proc.finished(exit){return result.err("Video Outpaint duration probe failed")}
+  var raw=match files.read_limited(proc.out_path(str.view(work)),128){
+    ok(value)=>value,err(_)=>{return result.err("Cannot read outpaint duration probe")}}
+  let _=files.remove(proc.pid_path(str.view(work)))
+  let _=files.remove(proc.out_path(str.view(work)))
+  let _=files.remove(proc.err_path(str.view(work)))
+  let _=files.remove(proc.launch_path(str.view(work)))
+  let seconds:f64=match str.from_bytes(bytes.view(raw)){
+    some(value)=>match text.parse_f64(text.trim(value)){some(found)=>found,
+      none=>{return result.err("Outpaint source duration is not numeric")}},
+    none=>{return result.err("Outpaint source duration is not UTF-8")}}
+  if seconds<=0.0{return result.err("Video Outpaint source duration must be positive")}
+  result.ok(cast.sat(math.round(seconds*1000.0)))
+}
+
+fn check(arguments:array<string> own,message:str)->result<unit,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process}{
+  match proc.check(arguments){ok(_)=>result.ok(()),err(problem)=>{
+    var held=problem
+    let detail=match held{Launch(error)=>string.copy(error.message),
+      Exit(status)=>text.concat("exit status ",str.view(string.from_int(
+        proc.exit_code(status))))}
+    result.err(text.concat(message,text.concat(": ",str.view(detail))))}}
+}
+
+pub fn inspect(source:str,scratch_root:str)->result<SourceInfo,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process,time}{
+  if input.classify_path(source)!=input.Kind.Video{
+    return result.err("Video Outpaint requires a source video")}
+  let root=path.join(scratch_root,text.concat("mm-air-outpaint-probe-",
+    str.view(string.from_int(time.monotonic_ns()))))
+  var info=try media.probe("/nonexistent/air-image-provider",source,str.view(root))
+  // Container duration can include an audio tail beyond the final video frame.
+  // Edit/repair/outpaint operate on the selected video stream's 24 FPS extent.
+  let duration:u64=match probe_duration_ms(source,str.view(root),true){
+    ok(value)=>value,err(_)=>match info.duration_ms{some(value)=>value,
+      none=>try probe_duration_ms(source,str.view(root),false)}}
+  let _=files.remove(str.view(root))
+  let frames:u64=duration*24/1000
+  if frames<4{return result.err("Video Outpaint source is shorter than four 24 FPS frames")}
+  result.ok(SourceInfo{width:cast.wrap(info.width),height:cast.wrap(info.height),
+    frames:frames,duration_ms:duration})
+}
+
+fn write_mask(filename:str,value:ref<edit.Mask>)->result<unit,string>
+    effects{alloc,fs.write}{
+  let header=text.concat("P5\n",text.concat(str.view(string.from_int(value.width)),
+    text.concat(" ",text.concat(str.view(string.from_int(value.height)),"\n255\n"))))
+  let header_bytes=str.bytes(str.view(header))
+  var payload:array<byte> = []
+  var i:u64=0
+  loop{if i>=view.len(header_bytes){break}
+    array.push(payload,view.get(header_bytes,i))
+    i=i+1}
+  var gray=edit.gray_bytes(value)
+  i=0
+  loop{if i>=value.width*value.height{break}
+    array.push(payload,array.get(gray,i))
+    i=i+1}
+  match files.write_bytes(filename,array.view(payload)){
+    ok(_)=>result.ok(()),err(problem)=>result.err(string.copy(problem.message))}
+}
+
+fn padded(source:str,output:str,value:ref<outpaint.Geometry>,frames:u64,
+          preserve_audio:bool)->result<unit,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process}{
+  let filter=text.concat("fps=24,tpad=stop_mode=clone:stop_duration=2,pad=",text.concat(str.view(string.from_int(
+    value.target_width)),text.concat(":",text.concat(str.view(string.from_int(
+    value.target_height)),text.concat(":",text.concat(str.view(string.from_int(
+    value.placement_x)),text.concat(":",text.concat(str.view(string.from_int(
+    value.placement_y)),":color=black"))))))))
+  var arguments:array<string> = ["ffmpeg","-nostdin","-v","error","-y","-i",
+    string.copy(source),"-map","0:v:0"]
+  if preserve_audio{array.push(arguments,"-map")
+    array.push(arguments,"0:a?")}
+  array.push(arguments,"-vf")
+  array.push(arguments,filter)
+  array.push(arguments,"-frames:v")
+  array.push(arguments,string.from_int(frames))
+  array.push(arguments,"-c:v")
+  array.push(arguments,"libx264rgb")
+  array.push(arguments,"-preset")
+  array.push(arguments,"fast")
+  array.push(arguments,"-crf")
+  array.push(arguments,"0")
+  array.push(arguments,"-pix_fmt")
+  array.push(arguments,"rgb24")
+  if preserve_audio{array.push(arguments,"-c:a")
+    array.push(arguments,"copy")}
+  array.push(arguments,string.copy(output))
+  check(arguments,"FFmpeg could not build the source-preserving outpaint canvas")
+}
+
+pub fn prepare(source:str,final_output:str,scratch_root:str,frames:u64,
+               settings:ref<Settings>)->result<Prepared,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process,time}{
+  var source_info=try inspect(source,scratch_root)
+  var geometry=try outpaint.geometry(source_info.width,source_info.height,
+    settings.target_width,settings.target_height,settings.direction,settings.anchor)
+  let root=path.join(scratch_root,text.concat("mm-air-outpaint-",
+    str.view(string.from_int(time.monotonic_ns()))))
+  match files.create_dir(str.view(root)){ok(_)=>{},err(problem)=>{
+    return result.err(text.concat("Cannot create outpaint scratch directory: ",
+      problem.message))}}
+  let padded_source=path.join(str.view(root),"padded-source.mp4")
+  let mask_path=path.join(str.view(root),"outpaint-mask.pgm")
+  var authored=try outpaint.mask(frames,geometry,settings.composite_mode,
+    settings.seam_width)
+  let _=try write_mask(str.view(mask_path),authored)
+  let _=try padded(source,str.view(padded_source),geometry,frames,
+    settings.preserve_audio)
+  let full_padding:u64=if settings.target_width>settings.target_height{
+    settings.target_width}else{settings.target_height}
+  var mask_settings=masked.settings(str.view(mask_path),false,0.0,0.0,0.0,0.0,
+    0,0,0,edit.fixed_combined(),full_padding,true)
+  var base=try masked.prepare(str.view(padded_source),final_output,str.view(root),
+    frames,mask_settings)
+  result.ok(Prepared{base:base,geometry:geometry,padded_source:padded_source,
+    mask_path:mask_path,root:root})
+}
+
+pub fn h3_output(value:ref<Prepared>)->string effects{alloc}{
+  string.copy(struct.borrow(struct.borrow(value,field=base),field=h3_output))
+}
+pub fn h3_source(value:ref<Prepared>)->string effects{alloc}{
+  string.copy(struct.borrow(struct.borrow(value,field=base),field=cropped_source))
+}
+pub fn h3_geometry(value:ref<Prepared>)->h3_media.Geometry effects{alloc}{
+  masked.working_geometry(struct.borrow(value,field=base))
+}
+pub fn copy_token_weights(value:ref<Prepared>)->array<f32> effects{alloc}{
+  var out:array<f32> = []
+  let weights=struct.borrow(struct.borrow(struct.borrow(value,field=base),field=latent),
+    field=token_weights)
+  var i:u64=0
+  loop{if i>=array.len(weights){break}
+    array.push(out,array.get(weights,i))
+    i=i+1}
+  out
+}
+
+pub fn finish(value:ref<Prepared>)->result<unit,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process}{
+  let base=struct.borrow(value,field=base)
+  let _=try masked.finish(base)
+  // Outpaint's Exact Source contract reaches the saved file: retain the AIR
+  // composite's RGB bytes through a lossless RGB H.264 container encode.
+  check(["ffmpeg","-nostdin","-v","error","-y","-f","rawvideo",
+    "-pixel_format","rgb24","-video_size",text.concat(str.view(string.from_int(
+    base.source_width)),text.concat("x",str.view(string.from_int(base.source_height)))),
+    "-framerate","24","-i",string.copy(struct.borrow(base,field=composite_raw)),
+    "-i",string.copy(struct.borrow(base,field=source_path)),"-frames:v",
+    string.from_int(base.frames),"-map","0:v:0","-map","1:a?","-c:v",
+    "libx264rgb","-preset","fast","-crf","0","-pix_fmt","rgb24","-c:a",
+    "copy",string.copy(struct.borrow(base,field=final_output))],
+    "FFmpeg could not publish the lossless source-exact outpaint composite")
+}
+
+pub fn discard(value:ref<Prepared>)->unit effects{fs.write}{
+  masked.discard(struct.borrow(value,field=base))
+  let _=files.remove(struct.borrow(value,field=mask_path))
+  let _=files.remove(struct.borrow(value,field=padded_source))
+  let _=files.remove(struct.borrow(value,field=root))
+  ()
+}
+
+pub fn preview(source:str,output:str,scratch_root:str,target_width:u64,
+               target_height:u64,direction:u32,anchor:u32,position:f64)
+    ->result<outpaint.Geometry,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process,time}{
+  var info=try inspect(source,scratch_root)
+  var geometry=try outpaint.geometry(info.width,info.height,target_width,
+    target_height,direction,anchor)
+  var filter=string.copy("pad=")
+  string.append(filter,str.view(string.from_int(target_width)))
+  string.append(filter,":")
+  string.append(filter,str.view(string.from_int(target_height)))
+  string.append(filter,":")
+  string.append(filter,str.view(string.from_int(geometry.placement_x)))
+  string.append(filter,":")
+  string.append(filter,str.view(string.from_int(geometry.placement_y)))
+  string.append(filter,":color=#1a1a1a,drawbox=x=")
+  string.append(filter,str.view(string.from_int(geometry.placement_x)))
+  string.append(filter,":y=")
+  string.append(filter,str.view(string.from_int(geometry.placement_y)))
+  string.append(filter,":w=")
+  string.append(filter,str.view(string.from_int(geometry.source_width)))
+  string.append(filter,":h=")
+  string.append(filter,str.view(string.from_int(geometry.source_height)))
+  string.append(filter,":color=#e8a84c:t=3")
+  let _=try check(["ffmpeg","-nostdin","-v","error","-y","-ss",
+    string.from_float(position),"-i",string.copy(source),"-map","0:v:0","-vf",
+    string.copy(str.view(filter)),"-frames:v","1","-c:v","png",string.copy(output)],
+    "FFmpeg could not render the outpaint geometry preview")
+  result.ok(geometry)
+}
+
+pub fn slice_source(source:str,output:str,span:timeline.Span,model_frames:u64)
+    ->result<unit,string> effects{alloc,fs.meta,fs.read,fs.write,process}{
+  if timeline.span_length(span)==0 or model_frames<timeline.span_length(span){
+    return result.err("Invalid outpaint source/reference window slice")}
+  let start:f64=cast.float(span.first)/24.0
+  let duration:f64=cast.float(timeline.span_length(span))/24.0
+  let pad:f64=cast.float(model_frames-timeline.span_length(span))/24.0
+  let video_filter=text.concat("fps=24,tpad=stop_mode=clone:stop_duration=",
+    str.view(string.from_float(pad)))
+  check(["ffmpeg","-nostdin","-v","error","-y","-ss",string.from_float(start),
+    "-t",string.from_float(duration),"-i",string.copy(source),"-map","0:v:0",
+    "-map","0:a?","-vf",video_filter,"-frames:v",string.from_int(model_frames),
+    "-c:v","libx264rgb","-preset","fast","-crf","0","-pix_fmt","rgb24",
+    "-c:a","copy",string.copy(output)],
+    "FFmpeg could not slice the outpaint source/reference window")
+}
+
+pub fn slice_visual_tail(source:str,output:str,span:timeline.Span,
+                         model_frames:u64)->result<unit,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process}{
+  if timeline.span_length(span)==0 or model_frames<timeline.span_length(span){
+    return result.err("Invalid outpaint visual continuity tail")}
+  let start:f64=cast.float(span.first)/24.0
+  let duration:f64=cast.float(timeline.span_length(span))/24.0
+  let pad:f64=cast.float(model_frames-timeline.span_length(span))/24.0
+  let video_filter=text.concat("fps=24,tpad=stop_mode=clone:stop_duration=",
+    str.view(string.from_float(pad)))
+  check(["ffmpeg","-nostdin","-v","error","-y","-ss",string.from_float(start),
+    "-t",string.from_float(duration),"-i",string.copy(source),"-map","0:v:0",
+    "-vf",video_filter,"-frames:v",string.from_int(model_frames),"-an",
+    "-c:v","libx264rgb","-preset","fast","-crf","0","-pix_fmt","rgb24",
+    string.copy(output)],"FFmpeg could not export the visual-only outpaint tail")
+}
+
+pub fn publish_window(window:str,source:str,frames:u64,output:str)
+    ->result<unit,string> effects{alloc,fs.meta,fs.read,fs.write,process}{
+  check(["ffmpeg","-nostdin","-v","error","-y","-i",string.copy(window),
+    "-i",string.copy(source),"-map","0:v:0","-map","1:a?","-frames:v",
+    string.from_int(frames),"-c:v","copy","-c:a","copy",
+    string.copy(output)],"FFmpeg could not publish the requested outpaint frames")
+}
+
+// Join generated delivery windows in authoritative order, dropping only each
+// later window's planned leading overlap. Audio is mapped from the untouched
+// source video, never blended or gated by the visual mask.
+pub fn stitch(windows:ref<array<string>>,plan:ref<timeline.Plan>,source:str,
+              output:str)->result<unit,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process}{
+  if array.len(windows)!=timeline.window_count(plan) or array.len(windows)<2{
+    return result.err("Outpaint stitch inputs do not match the window plan")}
+  var arguments:array<string> = ["ffmpeg","-nostdin","-v","error","-y"]
+  var filter=string.new()
+  var index:u64=0
+  loop{if index>=array.len(windows){break}
+    array.push(arguments,"-i")
+    array.push(arguments,string.copy(array.borrow(windows,index)))
+    let window=array.borrow(struct.borrow(plan,field=windows),index)
+    string.append(filter,"[")
+    string.append(filter,str.view(string.from_int(index)))
+    string.append(filter,":v]trim=start_frame=")
+    string.append(filter,str.view(string.from_int(window.overlap_frames)))
+    string.append(filter,",setpts=PTS-STARTPTS[v")
+    string.append(filter,str.view(string.from_int(index)))
+    string.append(filter,"];")
+    index=index+1}
+  index=0
+  loop{if index>=array.len(windows){break}
+    string.append(filter,"[v")
+    string.append(filter,str.view(string.from_int(index)))
+    string.append(filter,"]")
+    index=index+1}
+  string.append(filter,"concat=n=")
+  string.append(filter,str.view(string.from_int(array.len(windows))))
+  string.append(filter,":v=1:a=0[outv]")
+  array.push(arguments,"-i")
+  array.push(arguments,string.copy(source))
+  array.push(arguments,"-filter_complex")
+  array.push(arguments,filter)
+  array.push(arguments,"-map")
+  array.push(arguments,"[outv]")
+  array.push(arguments,"-map")
+  array.push(arguments,text.concat(str.view(string.from_int(array.len(windows))),":a?"))
+  array.push(arguments,"-frames:v")
+  array.push(arguments,string.from_int(plan.requested_frames))
+  array.push(arguments,"-c:v")
+  array.push(arguments,"libx264rgb")
+  array.push(arguments,"-preset")
+  array.push(arguments,"fast")
+  array.push(arguments,"-crf")
+  array.push(arguments,"0")
+  array.push(arguments,"-pix_fmt")
+  array.push(arguments,"rgb24")
+  array.push(arguments,"-c:a")
+  array.push(arguments,"copy")
+  array.push(arguments,string.copy(output))
+  check(arguments,"FFmpeg could not stitch the sequential outpaint windows")
+}

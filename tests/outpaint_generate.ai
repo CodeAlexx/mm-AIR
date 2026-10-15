@@ -1,0 +1,64 @@
+// Bounded real-model receipt for the native Video Outpaint worker.
+module app.mm_air.tests.outpaint_generate
+import "../generate.ai" as generation
+import "../outpaint.ai" as outpaint
+import "../outpaint_runtime.ai" as outpaint_runtime
+import "../.air/deps/h3/media.ai" as media
+import "../.air/deps/h3/session.ai" as session
+import std.channel as channel
+import std.text as text
+
+fn failure(message:str)->i32 effects{io.write}{io.ewrite(message)
+io.ewrite("\n")
+1}
+
+pub fn main(args:view<str>)->i32
+    effects{alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time}{
+  if view.len(args)!=3 and view.len(args)!=6{io.ewrite(
+    "usage: outpaint-generate SOURCE_MP4 OUTPUT_MP4 [FRAMES WINDOW OVERLAP]\n")
+    return 2}
+  let frames:u64=if view.len(args)==6{match text.parse_u64(view.get(args,3)){
+    some(value)=>value,none=>{return failure("FRAMES must be unsigned")}}}else{22}
+  let window_frames:u64=if view.len(args)==6{match text.parse_u64(view.get(args,4)){
+    some(value)=>value,none=>{return failure("WINDOW must be unsigned")}}}else{22}
+  let overlap_frames:u64=if view.len(args)==6{match text.parse_u64(view.get(args,5)){
+    some(value)=>value,none=>{return failure("OVERLAP must be unsigned")}}}else{0}
+  var configuration=match generation.configuration(){ok(value)=>value,
+    err(message)=>{return failure(str.view(message))}}
+  let geometry=match media.geometry(frames,384,256){ok(value)=>value,
+    err(problem)=>{var held=problem
+      return failure(str.view(media.error_message(held)))}}
+  var receiver=match channel.open(128,1024){ok(value)=>value,
+    err(problem)=>{var held=problem
+      return failure(str.view(channel.message(held)))}}
+  let prompt="subject_definitions:\n<Video 1>: preserved square source video and temporal authority.\n\nsummary:\n[video extension + reference generation] Extend the source workshop naturally to the right.\n\nretention_analysis:\n<Video 1>: partially_preserved; request exact preservation inside its source rectangle while generating only beyond the right edge.\n\ndetailed_description:\n[Shot 1] Continue the same sunlit workshop, floor, wall perspective, warm light, and subtle camera motion into the new right-hand canvas. Keep the blue helper robot, its action, scale, position, and all original source pixels unchanged. The generated right side reveals a matching workbench and softly moving dust motes with coherent parallax.\n\noverall_soundscape:\nPreserve the source soundtrack.\n\nnon_diegetic_music:\nNo added music."
+  var references:array<string> = [string.copy(view.get(args,1))]
+  var job=generation.job(configuration,prompt,session.Model.Reference,
+    session.Task.Ref2VA,geometry,references,[],view.get(args,2),0,"",20260912,7,
+    session.Projection.ExactBF16,session.Projection.RowScaledI8,
+    session.Attention.DenseInt8,channel.ticket(receiver),session.Schedule.Exponential)
+  generation.enable_outpaint(job,outpaint_runtime.settings(384,256,
+    outpaint.right(),outpaint.anchor_center(),outpaint.exact(),0,window_frames,
+    overlap_frames,false))
+  var completed=generation.Outcome{succeeded:false,output:string.new(),
+    message:string.copy("outpaint worker did not complete"),runtime_ms:0,
+    peak_vram_bytes:0}
+  task.scope{
+    var jobs:array<task<generation.Outcome>> = [task.spawn(job,fn=generation.run)]
+    loop{
+      match channel.recv_now(receiver,time.monotonic_ns()){
+        ok(value)=>match value{some(item)=>{var update=item
+          match channel.text_of(update){some(message)=>{io.write(str.view(message))
+            io.write("\n")},none=>{}}},none=>{}},err(_)=>{}}
+      match task.wait_any(jobs,0){some(_)=>{completed=task.join(option.unwrap(
+        array.pop(jobs)))
+        break},none=>{time.sleep_ms(50)}}
+    }
+  }
+  let _=channel.close(receiver)
+  io.write(text.concat("result=",text.concat(if completed.succeeded{"success"}
+    else{"failure"},"\n")))
+  io.write(text.concat("output=",text.concat(struct.borrow(completed,field=output),"\n")))
+  io.write(text.concat("message=",text.concat(struct.borrow(completed,field=message),"\n")))
+  if completed.succeeded{0}else{1}
+}

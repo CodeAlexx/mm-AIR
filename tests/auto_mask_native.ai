@@ -1,0 +1,21 @@
+module app.mm_air.tests.auto_mask_native
+
+import std.process as proc
+import std.text as text
+
+pub fn main(args:view<str>)->i32
+    effects{alloc,fs.read,fs.write,gpu,io.write}{
+  if view.len(args)!=5{
+    io.ewrite("usage: auto_mask_native PLUGIN MODEL SOURCE OUTPUT\n")
+    return 2
+  }
+  match automask.mask_media(view.get(args,1),view.get(args,2),view.get(args,3),
+      "person",view.get(args,4),48,0,0){
+    err(problem)=>{io.ewrite(text.concat(problem.message,"\n"))
+      return 3},
+    ok(status)=>{if not proc.success(status){
+      return proc.exit_code(status)}},
+  }
+  io.write(text.concat("mask=",text.concat(view.get(args,4)," frames=48\n")))
+  0
+}

@@ -1,0 +1,35 @@
+// End-to-end automatic-mask gate used by the Edit UI: AIR decodes the source
+// video to a raw 24 FPS stream, then the same-process native CUDA plugin tracks
+// it and AIR encodes the visible mask preview.
+module app.mm_air.tests.auto_mask_pipeline
+
+import "../.air/deps/sam3/mask.ai" as auto_mask
+import std.text as text
+
+pub fn main(args:view<str>)->i32
+    effects{alloc,fs.meta,fs.read,fs.write,gpu,io.write,process,thread,time}{
+  if view.len(args)!=6 and view.len(args)!=7{
+    io.ewrite("usage: auto-mask-pipeline PLUGIN MODEL SOURCE RAW PREVIEW [FRAMES]\n")
+    return 2}
+  let frames:u64=if view.len(args)==7{
+    match text.parse_u64(view.get(args,6)){some(value)=>value,none=>{
+      io.ewrite("FRAMES must be an integer\n")
+      return 2}}
+  }else{48}
+  var work=auto_mask.Job{
+    plugin:string.copy(view.get(args,1)),model:string.copy(view.get(args,2)),
+    source:string.copy(view.get(args,3)),prompt:string.copy("person"),
+    raw_output:string.copy(view.get(args,4)),
+    preview_output:string.copy(view.get(args,5)),frames:frames}
+  var completed=auto_mask.Outcome{succeeded:false,mask_path:string.new(),
+    message:string.new(),width:0,height:0,frames:0}
+  task.scope{
+    var running=task.spawn(work,fn=auto_mask.run)
+    completed=task.join(running)}
+  if not completed.succeeded{
+    io.ewrite(text.concat(struct.borrow(completed,field=message),"\n"))
+    return 3}
+  io.write(text.concat("MM-Air automatic mask pipeline PASS: ",
+    text.concat(struct.borrow(completed,field=mask_path),"\n")))
+  0
+}

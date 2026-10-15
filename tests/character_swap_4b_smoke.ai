@@ -1,0 +1,38 @@
+module app.mm_air.tests.character_swap_4b_smoke
+import "../character_swap.ai" as swap
+import "../prompt_lab.ai" as lab
+import "../.air/deps/prompt/types.ai" as prompt
+import std.text as text
+
+pub fn main(args: view<str>) -> i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,process} {
+  if view.len(args) != 4 {
+    io.ewrite("usage: character-swap-4b-smoke MANIFESTS SOURCE_VIDEO CHARACTER_IMAGE\n")
+    return 2
+  }
+  var pictures: array<string> = [string.copy(view.get(args,3))]
+  var options = swap.settings(swap.replace_main(),"","",true,true,true)
+  var request = match swap.request(prompt.ModelChoice.Qwen3VL4B,
+      view.get(args,2),pictures,options) {
+    ok(value) => value,
+    err(message) => { io.ewrite(text.concat(message,"\n"))
+      return 1 },
+  }
+  var job = lab.Job {request:request,
+    manifest_directory:string.copy(view.get(args,1))}
+  var outcome = lab.run(job)
+  if not outcome.succeeded or not outcome.fully_unloaded {
+    io.ewrite(text.concat(struct.borrow(outcome,field=message),"\n"))
+    return 1
+  }
+  var normalized = swap.normalize_prompt(struct.borrow(outcome,field=response))
+  match swap.validate_prompt(str.view(normalized)) {
+    err(message) => { io.ewrite(text.concat(message,"\n"))
+      io.ewrite(struct.borrow(outcome,field=response))
+      return 1 },
+    ok(_) => {},
+  }
+  io.write(str.view(normalized))
+  io.write("\nMM-Air Qwen3-VL 4B Character Swap prompt-build PASS · unloaded\n")
+  0
+}

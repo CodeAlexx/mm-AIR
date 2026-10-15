@@ -1,0 +1,127 @@
+module app.mm_air.tests.masked_edit
+import "../masked_edit.ai" as edit
+
+fn expect(value:bool,message:str)->unit effects {io.write}{if not value{io.ewrite(message)
+panic "masked edit test"}}
+fn b(value:u64)->byte effects{}{let lane:u8=cast.wrap(value)
+cast.bits(lane)}
+fn u(value:byte)->u64 effects{}{let lane:u8=cast.bits(value)
+cast.wrap(lane)}
+
+pub fn main(args:view<str>)->i32 effects {alloc,io.write}{
+  // Isolated speck removal and enclosed one-pixel hole fill.
+  var raw:array<f32> = []
+var i:u64=0
+  loop{if i >= 49{break}
+array.push(raw,0.0)
+i=i+1}
+  var y:u64=1
+  loop{if y >= 6{break}
+var x:u64=1
+loop{if x >= 6{break}
+array.set(raw,y*7+x,1.0)
+x=x+1}
+y=y+1}
+  array.set(raw,3*7+3,0.0)
+array.set(raw,6,1.0)
+  var mask=match edit.create(1,7,7,raw) {ok(value)=>value,err(_)=>{panic "create mask"}}
+  var cleaned=edit.cleanup(mask,2,0,0)
+  expect(array.get(struct.borrow(cleaned,field=weights),6) == 0.0,"isolated region removed\n")
+  expect(array.get(struct.borrow(cleaned,field=weights),3*7+3) == 1.0,"small hole filled\n")
+
+  // Feather stays soft and does not collapse to a binary threshold.
+  var feathered=edit.cleanup(cleaned,0,1,0)
+  let edge:f32=array.get(struct.borrow(feathered,field=weights),0)
+  expect(edge>0.0 and edge<1.0,"soft feather retained\n")
+  expect(array.get(struct.borrow(feathered,field=weights),1*7+1)==1.0,
+    "feather does not expose source inside removal core\n")
+
+  // A moving subject inside the hysteresis margin keeps one constant crop.
+  var moving:array<f32> = []
+i=0
+  loop{if i >= 3*16*16{break}
+array.push(moving,0.0)
+i=i+1}
+  var frame:u64=0
+  loop{if frame >= 3{break}
+y=5
+loop{if y<0{break}
+if y >= 9{break}
+var x:u64=5+frame
+loop{if x >= 9+frame{break}
+array.set(moving,(frame*16+y)*16+x,1.0)
+x=x+1}
+y=y+1}
+frame=frame+1}
+  var moving_mask=match edit.create(3,16,16,moving) {ok(value)=>value,err(_)=>{panic "moving mask"}}
+  var track=match edit.crop_track(moving_mask,edit.tracked(),2,8,1) {ok(value)=>value,err(_)=>{panic "tracked crop"}}
+  let c0=array.get(struct.borrow(track,field=crops),0)
+  let c1=array.get(struct.borrow(track,field=crops),1)
+  expect(c0.x == c1.x and c0.y == c1.y and c0.width == c1.width,"tracked crop suppresses jitter\n")
+
+  // Fixed crop/uncrop composite preserves every zero-mask source byte exactly.
+  var rect=match edit.rectangle(1,4,4,1,1,2,2) {ok(value)=>value,err(_)=>{panic "rectangle"}}
+  var fixed=match edit.crop_track(rect,edit.fixed_combined(),0,2,1) {ok(value)=>value,err(_)=>{panic "fixed crop"}}
+  var source:array<byte> = []
+var replacement:array<byte> = []
+i=0
+  loop{if i >= 4*4*3{break}
+array.push(source,b(17))
+i=i+1}
+  i=0
+loop{if i >= fixed.working_width*fixed.working_height*3{break}
+array.push(replacement,b(231))
+i=i+1}
+  var composed=match edit.composite_rgb(array.view(source),array.view(replacement),rect,fixed) {ok(value)=>value,err(_)=>{panic "composite"}}
+  expect(u(array.get(composed,0)) == 17,"outside mask source exact\n")
+  expect(u(array.get(composed,(1*4+1)*3)) == 231,"inside mask edited\n")
+  var target_weights:array<f32> = [1.0,0.0,0.0,0.0]
+  var target_mask=match edit.create(1,2,2,target_weights) {
+    ok(value)=>value,err(_)=>{panic "target mask"}}
+  var target_composed=match edit.composite_crop_mask(array.view(source),
+      array.view(replacement),target_mask,fixed) {
+    ok(value)=>value,err(_)=>{panic "target composite"}}
+  expect(u(array.get(target_composed,(1*4+1)*3)) == 231,
+    "target subject matte inserts replacement\n")
+  expect(u(array.get(target_composed,(1*4+2)*3)) == 17,
+    "target subject matte preserves reconstructed base\n")
+  var extracted_mask=match edit.extract_mask(rect,fixed) {ok(value)=>value,err(_)=>{panic "extract mask"}}
+  var extracted_rgb=match edit.extract_rgb(array.view(source),1,4,4,fixed) {ok(value)=>value,err(_)=>{panic "extract rgb"}}
+  expect(extracted_mask.width == 2 and extracted_mask.height == 2 and
+    array.len(struct.borrow(extracted_mask,field=weights)) == 4,
+    "cropped mask geometry\n")
+  expect(array.len(extracted_rgb) == 12 and u(array.get(extracted_rgb,0)) == 17,
+    "cropped RGB geometry\n")
+  var gray=edit.gray_bytes(rect)
+  var gray_roundtrip=match edit.from_gray(1,4,4,array.view(gray)) {ok(value)=>value,err(_)=>{panic "gray mask"}}
+  expect(array.get(struct.borrow(gray_roundtrip,field=weights),5) == 1.0 and
+    array.get(struct.borrow(gray_roundtrip,field=weights),0) == 0.0,
+    "gray mask roundtrip\n")
+
+  // Freehand paint and erase events become one generic, clip-stable mask.
+  var strokes:array<edit.BrushPoint> = [
+    edit.brush_point(0.5,0.5,0.25,false,true),
+    edit.brush_point(0.5,0.5,0.05,true,true)]
+  var painted=match edit.painted(2,16,16,strokes) {
+    ok(value)=>value,err(_)=>{panic "painted mask"}}
+  expect(array.get(struct.borrow(painted,field=weights),(8*16+8))==0.0,
+    "eraser clears painted center\n")
+  expect(array.get(struct.borrow(painted,field=weights),(8*16+5))==1.0 and
+    array.get(struct.borrow(painted,field=weights),(16*16)+(8*16+5))==1.0,
+    "painted mask repeats across clip frames\n")
+
+  // H3 mapping uses 16x spatial compression, 2x2 token grouping and 5+17k time.
+  var full=match edit.rectangle(22,32,32,0,0,32,32) {ok(value)=>value,err(_)=>{panic "full mask"}}
+  var geometry=match edit.h3_geometry(22,32,32) {ok(value)=>value,err(_)=>{panic "geometry"}}
+  var latent=match edit.map_to_h3(full,geometry) {ok(value)=>value,err(_)=>{panic "latent mask"}}
+  expect(geometry.latent_frames == 7 and geometry.latent_height == 2 and
+    geometry.latent_width == 2,"H3 latent geometry\n")
+  expect(array.len(struct.borrow(latent,field=latent_weights)) == 28 and
+    array.len(struct.borrow(latent,field=token_weights)) == 7,"H3 token geometry\n")
+  i=0
+loop{if i >= array.len(struct.borrow(latent,field=token_weights)){break}
+expect(array.get(struct.borrow(latent,field=token_weights),i) == 1.0,"full mask mapping\n")
+i=i+1}
+  io.write("MM-Air reusable masked edit geometry PASS\n")
+0
+}

@@ -1,0 +1,86 @@
+// Same-seed native H3 repair A/B harness. Runs the five intake presets
+// sequentially and records each exact-spliced MP4 plus repair sidecar.
+module app.mm_air.tests.timing_ab_generate
+
+import "../generate.ai" as generation
+import "../repair_runtime.ai" as repair_runtime
+import "../.air/deps/h3/media.ai" as media
+import "../.air/deps/h3/session.ai" as session
+import "../.air/deps/h3/timing.ai" as timing
+import "../.air/deps/h3_repair/plan.ai" as repair_plan
+import std.channel as channel
+import std.files as files
+import std.path as path
+import std.text as text
+
+fn fail(message:str)->i32 effects{io.write}{io.ewrite(message)
+  io.ewrite("\n")
+  1}
+
+fn mode(index:u64)->timing.Config effects{alloc}{
+  match timing.config(if index==0{timing.Mode.Stock}
+      else if index==1{timing.Mode.PhysicalAll}
+      else if index==2{timing.Mode.PhysicalBlocks}
+      else if index==3{timing.Mode.PhysicalBlocks}
+      else{timing.Mode.FadePhysicalToCompact},
+      if index==3{40}else{30},49,0.7,0,6){
+    ok(value)=>value,err(_)=>{panic "timing A/B preset"}}
+}
+
+fn name(index:u64)->string effects{alloc}{
+  string.copy(if index==0{"stock"}else if index==1{"physical-all"}
+    else if index==2{"physical-blocks-30-49"}
+    else if index==3{"physical-blocks-40-49"}else{"fade-0.7"})
+}
+
+pub fn main(args:view<str>)->i32
+    effects{alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+  if view.len(args)!=4{
+    io.ewrite("usage: timing-ab-generate SOURCE_VIDEO IDENTITY_IMAGE OUTPUT_DIR\n")
+    return 2
+  }
+  let source=view.get(args,1)
+  let identity=view.get(args,2)
+  let output_root=view.get(args,3)
+  match files.mkdirs(output_root){ok(_)=>{},err(problem)=>{
+    return fail(problem.message)}}
+  var configuration=match generation.configuration(){ok(value)=>value,
+    err(message)=>{return fail(str.view(message))}}
+  var facts=match repair_runtime.inspect(source,"/tmp"){ok(value)=>value,
+    err(message)=>{return fail(str.view(message))}}
+  var index:u64=0
+  loop{if index>=5{break}
+    let label=name(index)
+    let output=path.join(output_root,text.concat(str.view(label),".mp4"))
+    var geometry=match media.geometry(facts.frames,facts.width,facts.height){
+      ok(value)=>value,err(problem)=>{var held=problem
+        return fail(str.view(media.error_message(held)))}}
+    var receiver=match channel.open(128,1024){ok(value)=>value,
+      err(problem)=>{var held=problem
+        return fail(str.view(channel.message(held)))}}
+    var references:array<string> = [string.copy(source),string.copy(identity)]
+    var job=generation.job(configuration,
+      "Repair the selected action while preserving the source character trajectory, camera, scene, lighting, identity reference, timing, and soundtrack.",
+      session.Model.Reference,session.Task.Ref2VA,geometry,references,[],
+      str.view(output),0,"",202609131337,7,session.Projection.ExactBF16,
+      session.Projection.RowScaledI8,session.Attention.DenseInt8,
+      channel.ticket(receiver),session.Schedule.Exponential)
+    let first:u64=if facts.frames>36{12}else{0}
+    let ending:u64=if facts.frames>36{36}else{facts.frames}
+    generation.enable_repair(job,repair_runtime.settings(first,ending,5,5,2.0,
+      repair_plan.MemoryMode.Full,124,22))
+    generation.enable_timing(job,mode(index))
+    var completed=generation.run(job)
+    let _=channel.close(receiver)
+    io.write(str.view(label))
+    io.write(" runtime_ms=")
+    io.write(str.view(string.from_int(completed.runtime_ms)))
+    io.write(" peak_vram_bytes=")
+    io.write(str.view(string.from_int(completed.peak_vram_bytes)))
+    io.write("\n")
+    if not completed.succeeded{return fail(struct.borrow(completed,field=message))}
+    index=index+1
+  }
+  io.write("MM-Air same-seed timing repair A/B PASS\n")
+  0
+}

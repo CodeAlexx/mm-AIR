@@ -1,0 +1,169 @@
+// Shared application settings and presenter; the platform toolkit owns widgets.
+module app.mm_air.settings
+import "runtime_config.ai" as config
+import "../../AIR/toolkits/desktop/ui.ai" as desk
+import std.application_theme as themes
+import std.codec as codec
+import std.text as text
+
+pub type State=struct{paths:array<string>,theme:u64,accent:string,
+  panel_width:u64,navigation_width:u64,navigation_height:u64}
+pub fn keys()->array<string> effects{alloc}{
+  ["MM_AIR_H3_CHECKPOINT_ROOT","MM_AIR_H3_REFERENCE_ROOT",
+   "MM_AIR_H3_DONOR_ROOT","MM_AIR_H3_MANIFEST_ROOT","MM_AIR_OUTPUT_ROOT",
+   "QWEN_IMAGE21_ROOT","QWEN_IMAGE21_MANIFEST_DIR",
+   "MM_AIR_KREA_MODEL","MM_AIR_KREA_QWEN_INDEX","MM_AIR_KREA_TOKENIZER_DIR",
+   "MM_AIR_KREA_VAE","MM_AIR_KREA_VAE_CONFIG","MM_AIR_KREA_MANIFEST_ROOT",
+   "AIR_QWEN3_VL_4B_DIR","AIR_QWEN3_VL_8B_DIR","AIR_QWEN3_VL_32B_DIR",
+   "MM_AIR_PROMPT_MANIFEST_ROOT",
+   "MM_AIR_SEEDVR2_DIT","MM_AIR_SEEDVR2_7B_DIT","MM_AIR_SEEDVR2_VAE",
+   "MM_AIR_SEEDVR2_MANIFEST_ROOT","MM_AIR_SEEDVR2_7B_MANIFEST_ROOT",
+   "MM_AIR_H3_CHARACTER_SWAP_ROOT","MM_AIR_H3_CHARACTER_SWAP_TURBO_ROOT"]
+}
+pub fn index(id:str,browse:bool)->option<u64> effects{alloc}{
+  var i:u64=0
+  var names=keys()
+  loop{if i>=array.len(names){break}
+    if id==text.concat(if browse{"settings_browse_"}else{"settings_path_"},
+        string.from_int(i)){return option.some(i)}
+    i=i+1}
+  option.none()
+}
+pub fn is_file(index:u64)->bool effects{}{
+  index==7 or index==8 or index==10 or index==11 or
+    index==17 or index==18 or index==19
+}
+fn configured(key:str,fallback:str)->result<string,string>
+    effects{alloc,env,fs.read,fs.meta}{
+  match try config.value(key){some(value)=>result.ok(value),
+    none=>result.ok(string.copy(fallback)),}
+}
+fn dimension(key:str,fallback:u64,minimum:u64,maximum:u64)->result<u64,string>
+    effects{alloc,env,fs.read,fs.meta}{
+  let source=try configured(key,string.from_int(fallback))
+  match text.parse_u64(source){some(value)=>{
+    result.ok(if value<minimum{minimum}else if value>maximum{maximum}else{value})},
+    none=>result.ok(fallback),}
+}
+pub fn load(output:str)->result<State,string> effects{alloc,env,fs.read,fs.meta}{
+  var names=keys()
+  var paths:array<string> = []
+  var i:u64=0
+  loop{if i>=array.len(names){break}
+    let chosen=if i==4{try configured(array.borrow(names,i),output)}
+      else{try configured(array.borrow(names,i),"")}
+    array.push(paths,chosen)
+    i=i+1}
+  let selected=try configured("MM_AIR_THEME","0")
+  let theme=match text.parse_u64(selected){some(value)=>if value<themes.count(){value}else{0},none=>0,}
+  result.ok(State{paths:paths,theme:theme,accent:try configured("MM_AIR_ACCENT_COLOR",""),
+    panel_width:try dimension("MM_AIR_PANEL_WIDTH",300,240,900),
+    navigation_width:try dimension("MM_AIR_NAV_WIDTH",86,60,200),
+    navigation_height:try dimension("MM_AIR_NAV_HEIGHT",56,32,120)})
+}
+pub fn show(session:ref<desk.Session>,state:ref<State>)->unit effects{alloc,net,time}{
+  var i:u64=0
+  loop{if i>=array.len(struct.borrow(state,field=paths)){break}
+    let _=desk.set_text(session,text.concat("settings_path_",string.from_int(i)),
+      array.borrow(struct.borrow(state,field=paths),i))
+    i=i+1}
+  var names=themes.names()
+  var command=desk.command("items","settings_themes")
+  codec.key(command,"items")
+  codec.begin_array(command)
+  i=0
+  loop{if i>=array.len(names){break}
+    codec.begin_object(command)
+    codec.field_text(command,"key",string.from_int(i))
+    codec.field_text(command,"label",array.borrow(names,i))
+    codec.end_object(command)
+    i=i+1}
+  codec.end_array(command)
+  let _=desk.submit(session,command)
+  let _=desk.select(session,"settings_themes",string.from_int(state.theme))
+  let _=desk.set_text(session,"settings_accent",state.accent)
+  let _=desk.set_number(session,"settings_panel_width","value",cast.float(state.panel_width))
+  let _=desk.set_number(session,"settings_navigation_width","value",cast.float(state.navigation_width))
+  let _=desk.set_number(session,"settings_navigation_height","value",cast.float(state.navigation_height))
+  ()
+}
+pub fn valid_accent(value:str)->bool effects{}{
+  if value==""{return true}
+  if str.len(value)!=7 or not str.starts_with(value,"#"){return false}
+  var i:u64=1
+  loop{if i>=7{break}
+    if not text.ascii_is_hex_digit(view.get(str.bytes(value),i)){return false}
+    i=i+1}
+  true
+}
+pub fn apply(session:ref<desk.Session>,state:ref<State>)->result<unit,string>
+    effects{alloc,net,time}{
+  let _=try validate_dimensions(state)
+  if not valid_accent(state.accent){return result.err("Accent color must be #RRGGBB, or empty for the theme default")}
+  let palette=themes.theme(state.theme)
+  var css=themes.desktop_css(".mm-air-window",palette)
+  string.append(css,"\n@define-color carbon ")
+  string.append(css,themes.css_color(palette.background))
+  string.append(css,";\n@define-color panel ")
+  string.append(css,themes.css_color(palette.surface))
+  string.append(css,";\n@define-color deck @panel;\n@define-color panel_hi ")
+  string.append(css,themes.css_color(palette.shade))
+  string.append(css,";\n@define-color ink ")
+  string.append(css,themes.css_color(palette.ink))
+  string.append(css,";\n@define-color soft ")
+  string.append(css,themes.css_color(palette.faint))
+  string.append(css,";\n@define-color rule ")
+  string.append(css,themes.css_color(palette.line))
+  string.append(css,";\n@define-color accent ")
+  string.append(css,if state.accent==""{themes.css_color(palette.accent)}else{string.copy(state.accent)})
+  string.append(css,";\n@define-color amber @accent;\n@define-color amber_dark @accent;\n@define-color violet @accent;\n@define-color cyan @accent;\n")
+  string.append(css,".mm-air-window * { color: @ink; }\n.mm-air-window headerbar, .mm-air-window .mode-rail, .mm-air-window .status-bar { background: @panel; }\n.mm-air-window .mode-button:checked, .mm-air-window .primary-action, .mm-air-window .movie-primary { background: @accent; color: @carbon; }\n.mm-air-window .settings-page { background: @carbon; }\n")
+  string.append(css,text.concat(".mm-air-window .mode-button { min-height: ",
+    text.concat(string.from_int(state.navigation_height),"px; }\n")))
+  let _=try desk.set_number(session,"navigation_rail","width-request",cast.float(state.navigation_width))
+  let _=try desk.set_bool(session,"navigation_rail","hexpand",false)
+  var panels:array<string> = ["gen_parameter_scroll","gen_batch_panel",
+    "movie_left_panel","movie_right_panel","edit_left_panel","edit_right_panel","qwen_edit_panel"]
+  var index:u64=0
+  loop{if index>=array.len(panels){break}
+    let id=array.borrow(panels,index)
+    let _=try desk.set_bool(session,id,"hexpand",false)
+    let _=try desk.set_number(session,id,"width-request",cast.float(state.panel_width))
+    index=index+1}
+  let _=try desk.set_number(session,"gen_parameter_scroll","min-content-width",cast.float(state.panel_width))
+  let _=try desk.set_number(session,"gen_parameter_scroll","max-content-width",cast.float(state.panel_width))
+  desk.stylesheet(session,css)
+}
+pub fn save(state:ref<State>)->result<string,string>
+    effects{alloc,env,fs.read,fs.meta,fs.write}{
+  let _=try validate_dimensions(state)
+  if text.trim(array.borrow(struct.borrow(state,field=paths),4))==""{
+    return result.err("Choose an output folder before saving")}
+  if not valid_accent(state.accent){return result.err("Accent color must be #RRGGBB, or empty for the theme default")}
+  var names=keys()
+  var values:array<string> = []
+  var i:u64=0
+  loop{if i>=array.len(struct.borrow(state,field=paths)){break}
+    array.push(values,text.trim(array.borrow(struct.borrow(state,field=paths),i)))
+    i=i+1}
+  array.push(names,"MM_AIR_THEME")
+  array.push(values,string.from_int(state.theme))
+  array.push(names,"MM_AIR_ACCENT_COLOR")
+  array.push(values,string.copy(state.accent))
+  array.push(names,"MM_AIR_PANEL_WIDTH")
+  array.push(values,string.from_int(state.panel_width))
+  array.push(names,"MM_AIR_NAV_WIDTH")
+  array.push(values,string.from_int(state.navigation_width))
+  array.push(names,"MM_AIR_NAV_HEIGHT")
+  array.push(values,string.from_int(state.navigation_height))
+  config.save(names,values)
+}
+
+fn validate_dimensions(state:ref<State>)->result<unit,string> effects{alloc}{
+  if state.panel_width<240 or state.panel_width>900 or
+      state.navigation_width<60 or state.navigation_width>200 or
+      state.navigation_height<32 or state.navigation_height>120 {
+    return result.err("Choose side panels 240–900 px, navigation width 60–200 px and navigation height 32–120 px")
+  }
+  result.ok(())
+}

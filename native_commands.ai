@@ -1,0 +1,23 @@
+// Clipboard actions must be handled before the shell drains widget actions.
+module app.mm_air.native_commands
+import std.widgets as w
+import std.shell as shell
+import "../../AIR/toolkits/portable/editing.ai" as editing
+
+pub fn take(ui:ref<w.Ui>)->array<shell.Command>
+    effects{alloc,env,ffi,fs.read,fs.meta,fs.write,process}{
+  let count=w.action_count(ui)
+  var index:u64=0
+  loop{if index>=count{break}
+    let action=w.action_at(ui,index)
+    if action.kind==w.action_dismissed(){
+      w.show(ui,w.find(ui,action.key),false)
+      w.layout(ui)
+    }
+    if action.kind==w.action_copy() or action.kind==w.action_cut() or action.kind==w.action_paste(){
+      match editing.transfer(ui,action,""){
+        ok(_)=>{},err(problem)=>w.set_text(ui,w.find(ui,20),problem),}
+    }
+    index=index+1}
+  shell.take_commands(ui)
+}

@@ -1,0 +1,568 @@
+// MM-Air codec/orchestration boundary for token-aligned H3 repair. AIR owns
+// planning, exact frame selection, seam measurement and sidecar reporting;
+// FFmpeg only decodes/encodes and retimes the bounded repair window.
+module app.mm_air.repair_runtime
+
+import std.files as files
+import std.media as media
+import std.media_input as input
+import std.math as math
+import std.path as path
+import std.process as proc
+import std.text as text
+import ".air/deps/h3/media.ai" as h3_media
+import ".air/deps/h3/timing.ai" as h3_timing
+import ".air/deps/h3_repair/plan.ai" as repair
+import ".air/deps/h3_repair/motion.ai" as motion
+import ".air/deps/h3_repair/analyze.ai" as motion_analysis
+import ".air/deps/h3_repair/splice.ai" as splice
+import "masked_edit.ai" as mask_edit
+
+pub type Settings=struct{
+  bad_first:u64,bad_end_exclusive:u64,handle_before:u64,handle_after:u64,
+  shot_cuts:array<u64>,dilation:f64,memory:repair.MemoryMode,
+  rolling_limit_frames:u64,rolling_overlap_frames:u64,motion_plan_json:string,
+  spatial_mask_path:string,spatial_cleanup:u64,spatial_feather:u64,
+  spatial_expand:i64
+}
+
+pub fn settings(bad_first:u64,bad_end_exclusive:u64,handle_before:u64,
+                handle_after:u64,dilation:f64,memory:repair.MemoryMode,
+                rolling_limit_frames:u64,rolling_overlap_frames:u64)
+    ->Settings effects{alloc}{
+  Settings{bad_first:bad_first,bad_end_exclusive:bad_end_exclusive,
+    handle_before:handle_before,handle_after:handle_after,shot_cuts:[],
+    dilation:dilation,memory:memory,rolling_limit_frames:rolling_limit_frames,
+    rolling_overlap_frames:rolling_overlap_frames,motion_plan_json:string.new(),
+    spatial_mask_path:string.new(),spatial_cleanup:2,spatial_feather:8,
+    spatial_expand:4}
+}
+
+pub fn set_spatial_mask(value:ref<Settings>,mask_path:str,cleanup:u64,
+                        feather:u64,expand:i64)->result<unit,string>
+    effects{alloc}{
+  if str.len(text.trim(mask_path))==0{
+    return result.err("Repair spatial mask path is empty")}
+  if cleanup>16 or feather>64 or expand< -32 or expand>32{
+    return result.err("Repair spatial mask controls are outside their bounds")}
+  let _=ref.swap(struct.borrow(value,field=spatial_mask_path),
+    string.copy(text.trim(mask_path)))
+  struct.set(value,cleanup,field=spatial_cleanup)
+  struct.set(value,feather,field=spatial_feather)
+  struct.set(value,expand,field=spatial_expand)
+  result.ok(())
+}
+
+pub fn set_motion_plan(value:ref<Settings>,encoded:str)->result<unit,string>
+    effects{alloc}{
+  let made=try motion.decode(encoded)
+  let _=ref.swap(struct.borrow(value,field=motion_plan_json),string.copy(encoded))
+  result.ok(())
+}
+
+pub type SourceInfo=struct{width:u64,height:u64,frames:u64,duration_ms:u64}
+pub type Prepared=struct{
+  root:string,source:string,source_raw:string,generated_raw:string,
+  composite_raw:string,h3_source:string,h3_output:string,final_output:string,
+  source_info:SourceInfo,plan:repair.RepairPlan,geometry:h3_media.Geometry,
+  dilation:f64,spatial_mask_path:string,spatial_mask_raw:string,
+  spatial_cleanup:u64,spatial_feather:u64,spatial_expand:i64,
+  target_mask_path:string,target_mask_raw:string,target_mask_preview:string
+}
+
+fn check(arguments:array<string> own,message:str)->result<unit,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process}{
+  match proc.check(arguments){ok(_)=>result.ok(()),err(problem)=>{
+    var held=problem
+    let detail=match held{Launch(error)=>string.copy(error.message),
+      Exit(status)=>text.concat("exit status ",str.view(string.from_int(
+        proc.exit_code(status))))}
+    result.err(text.concat(message,text.concat(": ",str.view(detail))))}}
+}
+
+fn probe_duration_ms(source:str,root:str)->result<u64,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process,time}{
+  let work=path.join(root,"duration")
+  var exit=proc.start(proc.plan(["ffprobe","-v","error","-show_entries",
+    "format=duration","-of","default=noprint_wrappers=1:nokey=1",
+    string.copy(source)],str.view(work)))
+  if not proc.finished(exit){return result.err("Repair duration probe failed")}
+  var raw=match files.read_limited(proc.out_path(str.view(work)),128){
+    ok(value)=>value,err(_)=>{return result.err("Cannot read repair duration probe")}}
+  let seconds:f64=match str.from_bytes(bytes.view(raw)){
+    some(value)=>match text.parse_f64(text.trim(value)){some(found)=>found,
+      none=>{return result.err("Repair source duration is not numeric")}},
+    none=>{return result.err("Repair source duration is not UTF-8")}}
+  if seconds<=0.0{return result.err("Repair source duration must be positive")}
+  result.ok(cast.sat(math.round(seconds*1000.0)))
+}
+
+pub fn inspect(source:str,scratch_root:str)->result<SourceInfo,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process,time}{
+  if input.classify_path(source)!=input.Kind.Video{
+    return result.err("H3 Repair requires a source video")}
+  let root=path.join(scratch_root,text.concat("mm-air-repair-probe-",
+    str.view(string.from_int(time.monotonic_ns()))))
+  var info=try media.probe("/nonexistent/air-image-provider",source,str.view(root))
+  let duration=match info.duration_ms{some(value)=>value,
+    none=>try probe_duration_ms(source,str.view(root))}
+  let _=files.remove(str.view(root))
+  let frames:u64=cast.sat(math.round(cast.float(duration)*24.0/1000.0))
+  if frames<4{return result.err("H3 Repair source is shorter than four frames")}
+  result.ok(SourceInfo{width:cast.wrap(info.width),height:cast.wrap(info.height),
+    frames:frames,duration_ms:duration})
+}
+
+fn decode_source(source:str,output:str,info:SourceInfo)->result<unit,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process}{
+  check(["ffmpeg","-nostdin","-v","error","-y","-i",string.copy(source),
+    "-map","0:v:0","-vf","fps=24","-frames:v",string.from_int(info.frames),
+    "-pix_fmt","rgb24","-f","rawvideo",string.copy(output)],
+    "FFmpeg could not decode the repair source")
+}
+
+fn decode_spatial_mask(source:str,output:str,info:SourceInfo)
+    ->result<mask_edit.Mask,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process}{
+  let expected=info.width*info.height*info.frames
+  let kind=input.classify_path(source)
+  var arguments:array<string> = ["ffmpeg","-nostdin","-v","error","-y"]
+  if kind==input.Kind.Image{array.push(arguments,"-loop")
+    array.push(arguments,"1")}
+  array.push(arguments,"-i")
+  array.push(arguments,string.copy(source))
+  array.push(arguments,"-map")
+  array.push(arguments,"0:v:0")
+  array.push(arguments,"-vf")
+  array.push(arguments,text.concat("fps=24,scale=",text.concat(str.view(
+    string.from_int(info.width)),text.concat(":",text.concat(str.view(
+    string.from_int(info.height)),":flags=neighbor,format=gray")))))
+  array.push(arguments,"-frames:v")
+  array.push(arguments,string.from_int(info.frames))
+  array.push(arguments,"-pix_fmt")
+  array.push(arguments,"gray")
+  array.push(arguments,"-f")
+  array.push(arguments,"rawvideo")
+  array.push(arguments,string.copy(output))
+  let _=try check(arguments,"FFmpeg could not decode the repair spatial mask")
+  var raw=match files.read_limited(output,expected){ok(value)=>value,
+    err(_)=>{return result.err("Repair spatial mask exceeds declared geometry")}}
+  if view.len(bytes.view(raw))!=expected{
+    return result.err("Repair spatial mask does not cover every source frame")}
+  mask_edit.from_gray(info.frames,info.width,info.height,bytes.view(raw))
+}
+
+fn decode_target_mask(source:str,output:str,width:u64,height:u64,frames:u64,
+                      source_frames:u64)
+    ->result<mask_edit.Mask,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process}{
+  let expected=width*height*frames
+  var filter=string.copy("setpts=(PTS-STARTPTS)*")
+  string.append(filter,str.view(string.from_int(frames)))
+  string.append(filter,"/")
+  string.append(filter,str.view(string.from_int(source_frames)))
+  string.append(filter,",fps=24,scale=")
+  string.append(filter,str.view(string.from_int(width)))
+  string.append(filter,":")
+  string.append(filter,str.view(string.from_int(height)))
+  string.append(filter,":flags=neighbor,format=gray")
+  let _=try check(["ffmpeg","-nostdin","-v","error","-y","-i",
+    string.copy(source),"-map","0:v:0","-vf",filter,
+    "-frames:v",string.from_int(frames),"-pix_fmt","gray","-f","rawvideo",
+    string.copy(output)],"FFmpeg could not decode the generated-subject mask")
+  var raw=match files.read_limited(output,expected){ok(value)=>value,
+    err(_)=>{return result.err("Generated-subject mask exceeds declared geometry")}}
+  if view.len(bytes.view(raw))!=expected{
+    return result.err("Generated-subject mask does not cover the repair span")}
+  mask_edit.from_gray(frames,width,height,bytes.view(raw))
+}
+
+pub fn analyze_motion(source:str,scratch_root:str,sensitivity:f32,hold:f32)
+    ->result<motion_analysis.Analysis,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process,time}{
+  var info=try inspect(source,scratch_root)
+  let root=path.join(scratch_root,text.concat("mm-air-motion-analysis-",
+    str.view(string.from_int(time.monotonic_ns()))))
+  match files.create_dir(str.view(root)){ok(_)=>{},err(problem)=>{
+    return result.err(text.concat("Cannot create motion analysis scratch: ",
+      problem.message))}}
+  let raw_path=path.join(str.view(root),"source.rgb")
+  match decode_source(source,str.view(raw_path),info){
+    ok(_)=>{},err(message)=>{let _=files.remove(str.view(root))
+      return result.err(message)}}
+  let expected=info.width*info.height*info.frames*3
+  var raw=match files.read_limited(str.view(raw_path),expected){
+    ok(value)=>value,err(_)=>{let _=files.remove(str.view(raw_path))
+      let _=files.remove(str.view(root))
+      return result.err("Cannot read decoded frames for motion analysis")}}
+  var found=motion_analysis.rgb24(bytes.view(raw),info.frames,info.width,
+    info.height,sensitivity,hold)
+  let _=files.remove(str.view(raw_path))
+  let _=files.remove(str.view(root))
+  found
+}
+
+fn extract_reference(source:str,output:str,value:ref<repair.RepairPlan>,
+                     dilation:f64,frames:u64)->result<unit,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process}{
+  var filter=string.copy("fps=24,trim=start_frame=")
+  string.append(filter,str.view(string.from_int(value.affected.first)))
+  string.append(filter,":end_frame=")
+  string.append(filter,str.view(string.from_int(value.affected.end_exclusive)))
+  string.append(filter,",setpts=(PTS-STARTPTS)*")
+  string.append(filter,str.view(string.from_float(dilation)))
+  string.append(filter,",fps=24,tpad=stop_mode=clone:stop_duration=60")
+  check(["ffmpeg","-nostdin","-v","error","-y","-i",string.copy(source),
+    "-map","0:v:0","-vf",filter,"-frames:v",string.from_int(frames),"-an",
+    "-c:v","libx264rgb","-preset","fast","-crf","0","-pix_fmt","rgb24",
+    string.copy(output)],"FFmpeg could not prepare the bounded repair reference")
+}
+
+fn repeat_counts(value:ref<Settings>,source_frames:u64,affected:repair.Range)
+    ->result<array<u64>,string> effects{alloc}{
+  var out:array<u64> = []
+  if str.len(struct.borrow(value,field=motion_plan_json))!=0{
+    var made=try motion.decode(struct.borrow(value,field=motion_plan_json))
+    if made.frame_count!=source_frames{
+      return result.err("MotionPlan frame count does not match repair source")}
+    var frame=affected.first
+    loop{if frame>=affected.end_exclusive{break}
+      let held=motion.hold_at(made,frame)
+      array.push(out,cast.sat(math.round(cast.float(held))))
+      frame=frame+1}
+  }else{
+    let held:u64=cast.sat(math.round(value.dilation))
+    var frame=affected.first
+    loop{if frame>=affected.end_exclusive{break}
+      array.push(out,held)
+      frame=frame+1}
+  }
+  result.ok(out)
+}
+
+fn held_reference(source_raw:str,output_raw:str,info:SourceInfo,
+                  affected:repair.Range,repeats:view<u64>,output_frames:u64)
+    ->result<unit,string> effects{alloc,fs.read,fs.write}{
+  let frame_bytes=info.width*info.height*3
+  let source_size=frame_bytes*info.frames
+  var source=match files.read_limited(source_raw,source_size){ok(value)=>value,
+    err(_)=>{return result.err("Cannot read decoded source for MotionPlan")}}
+  if view.len(bytes.view(source))!=source_size or
+      view.len(repeats)!=repair.length(affected){
+    return result.err("MotionPlan source geometry is incomplete")}
+  var out:array<byte> = []
+  var local:u64=0
+  var emitted:u64=0
+  loop{if local>=view.len(repeats) or emitted>=output_frames{break}
+    let source_frame=affected.first+local
+    var copy:u64=0
+    loop{if copy>=view.get(repeats,local) or emitted>=output_frames{break}
+      var lane:u64=0
+      loop{if lane>=frame_bytes{break}
+        array.push(out,view.get(bytes.view(source),source_frame*frame_bytes+lane))
+        lane=lane+1}
+      emitted=emitted+1
+      copy=copy+1}
+    local=local+1}
+  let last_frame=affected.end_exclusive-1
+  loop{if emitted>=output_frames{break}
+    var lane:u64=0
+    loop{if lane>=frame_bytes{break}
+      array.push(out,view.get(bytes.view(source),last_frame*frame_bytes+lane))
+      lane=lane+1}
+    emitted=emitted+1}
+  match files.write_bytes(output_raw,array.view(out)){ok(_)=>result.ok(()),
+    err(problem)=>result.err(string.copy(problem.message))}
+}
+
+fn encode_held_reference(raw:str,output:str,info:SourceInfo,frames:u64)
+    ->result<unit,string> effects{alloc,fs.meta,fs.read,fs.write,process}{
+  check(["ffmpeg","-nostdin","-v","error","-y","-f","rawvideo",
+    "-pixel_format","rgb24","-video_size",text.concat(str.view(
+      string.from_int(info.width)),text.concat("x",str.view(string.from_int(
+      info.height)))),"-framerate","24","-i",string.copy(raw),"-frames:v",
+    string.from_int(frames),"-an","-c:v","libx264rgb","-preset","fast",
+    "-crf","0","-pix_fmt","rgb24",string.copy(output)],
+    "FFmpeg could not encode the MotionPlan repair reference")
+}
+
+pub fn prepare(source:str,final_output:str,scratch_root:str,
+               settings:ref<Settings>)->result<Prepared,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process,time}{
+  if settings.dilation<1.0 or settings.dilation>8.0 or
+     not math.is_finite(settings.dilation){
+    return result.err("Motion Repair dilation must be in [1,8]")}
+  var info=try inspect(source,scratch_root)
+  var made=try repair.build(info.frames,settings.bad_first,
+    settings.bad_end_exclusive,settings.handle_before,settings.handle_after,
+    array.view(struct.borrow(settings,field=shot_cuts)),info.width,info.height,
+    settings.memory,settings.rolling_limit_frames,
+    settings.rolling_overlap_frames,0.0)
+  var repeats=try repeat_counts(settings,info.frames,made.affected)
+  var requested_frames:u64=0
+  var repeat_index:u64=0
+  loop{if repeat_index>=array.len(repeats){break}
+    requested_frames=requested_frames+array.get(repeats,repeat_index)
+    repeat_index=repeat_index+1}
+  var geometry=match h3_media.geometry(requested_frames,info.width,info.height){
+    ok(value)=>value,err(problem)=>{var held=problem
+      return result.err(h3_media.error_message(held))}}
+  let root=path.join(scratch_root,text.concat("mm-air-repair-",
+    str.view(string.from_int(time.monotonic_ns()))))
+  match files.create_dir(str.view(root)){ok(_)=>{},err(problem)=>{
+    return result.err(text.concat("Cannot create repair scratch directory: ",
+      problem.message))}}
+  let source_raw=path.join(str.view(root),"source.rgb")
+  let generated_raw=path.join(str.view(root),"generated.rgb")
+  let composite_raw=path.join(str.view(root),"composite.rgb")
+  let spatial_mask_raw=path.join(str.view(root),"spatial-mask.gray")
+  let target_mask_raw=path.join(str.view(root),"target-mask.gray")
+  let target_mask_preview=path.join(str.view(root),"target-mask.mp4")
+  let h3_source=path.join(str.view(root),"repair-reference.mp4")
+  let held_raw=path.join(str.view(root),"repair-reference.rgb")
+  let h3_output=path.join(str.view(root),"repair-generated.mp4")
+  let _=try decode_source(source,str.view(source_raw),info)
+  let _=try held_reference(str.view(source_raw),str.view(held_raw),info,
+    made.affected,array.view(repeats),geometry.frames)
+  let _=try encode_held_reference(str.view(held_raw),str.view(h3_source),info,
+    geometry.frames)
+  let _=files.remove(str.view(held_raw))
+  result.ok(Prepared{root:root,source:string.copy(source),source_raw:source_raw,
+    generated_raw:generated_raw,composite_raw:composite_raw,h3_source:h3_source,
+    h3_output:h3_output,final_output:string.copy(final_output),source_info:info,
+    plan:made,geometry:geometry,dilation:settings.dilation,
+    spatial_mask_path:string.copy(struct.borrow(settings,field=spatial_mask_path)),
+    spatial_mask_raw:spatial_mask_raw,spatial_cleanup:settings.spatial_cleanup,
+    spatial_feather:settings.spatial_feather,spatial_expand:settings.spatial_expand,
+    target_mask_path:string.new(),target_mask_raw:target_mask_raw,
+    target_mask_preview:target_mask_preview})
+}
+
+pub fn set_target_mask(value:ref<Prepared>,mask_path:str)->result<unit,string>
+    effects{alloc}{
+  if str.len(text.trim(mask_path))==0{
+    return result.err("Generated-subject mask path is empty")}
+  let _=ref.swap(struct.borrow(value,field=target_mask_path),
+    string.copy(text.trim(mask_path)))
+  result.ok(())
+}
+
+pub fn target_mask_raw(value:ref<Prepared>)->string effects{alloc}{
+  string.copy(struct.borrow(value,field=target_mask_raw))}
+pub fn target_mask_preview(value:ref<Prepared>)->string effects{alloc}{
+  string.copy(struct.borrow(value,field=target_mask_preview))}
+pub fn generated_frames(value:ref<Prepared>)->u64 effects{}{value.geometry.frames}
+
+pub fn description(value:ref<Prepared>)->string effects{alloc}{repair.report(
+  struct.borrow(value,field=plan))}
+pub fn h3_source(value:ref<Prepared>)->string effects{alloc}{
+  string.copy(struct.borrow(value,field=h3_source))}
+pub fn h3_output(value:ref<Prepared>)->string effects{alloc}{
+  string.copy(struct.borrow(value,field=h3_output))}
+pub fn h3_geometry(value:ref<Prepared>)->h3_media.Geometry effects{}{
+  value.geometry
+}
+
+fn decode_generated(value:ref<Prepared>)->result<unit,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process}{
+  let wanted=repair.length(value.plan.affected)
+  // Recover exactly the source-world duration even when a MotionPlan uses
+  // different per-frame holds or H3 rounds to a legal temporal geometry.
+  var filter=string.copy("setpts=(PTS-STARTPTS)*")
+  string.append(filter,str.view(string.from_int(wanted)))
+  string.append(filter,"/")
+  string.append(filter,str.view(string.from_int(value.geometry.frames)))
+  string.append(filter,",fps=24")
+  check(["ffmpeg","-nostdin","-v","error","-y","-i",
+    string.copy(struct.borrow(value,field=h3_output)),"-map","0:v:0","-vf",
+    filter,"-frames:v",string.from_int(wanted),"-pix_fmt","rgb24","-f",
+    "rawvideo",string.copy(struct.borrow(value,field=generated_raw))],
+    "FFmpeg could not decode and recover the repaired span")
+}
+
+fn timing_name(value:h3_timing.Mode)->string effects{alloc}{
+  string.copy(match value{Stock=>"stock",PhysicalAll=>"physical_all",
+    CompactAll=>"compact_all",PhysicalBlocks=>"physical_blocks",
+    CompactBlocks=>"compact_blocks",
+    FadePhysicalToCompact=>"fade_physical_to_compact",
+    PhysicalSteps=>"physical_steps"})
+}
+
+fn memory_name(value:repair.MemoryMode)->string effects{alloc}{
+  string.copy(match value{Auto=>"auto",Full=>"full",Rolling=>"rolling"})
+}
+
+fn write_diagnostics(final_output:str,info:SourceInfo,
+                     made:ref<repair.RepairPlan>,timing:ref<h3_timing.Config>,
+                     runtime_ms:u64,peak_vram_bytes:u64,report:splice.Report,
+                     spatial_masked:bool,two_matte:bool)
+    ->result<unit,string> effects{alloc,fs.write}{
+  var sidecar=string.copy("{\"schema\":\"air.h3.repair.v1\",\"affected_first\":")
+  string.append(sidecar,str.view(string.from_int(made.affected.first)))
+  string.append(sidecar,",\"affected_end_exclusive\":")
+  string.append(sidecar,str.view(string.from_int(made.affected.end_exclusive)))
+  string.append(sidecar,",\"outside_exact\":true,\"entry_delta\":")
+  string.append(sidecar,str.view(string.from_float(report.entry_delta)))
+  string.append(sidecar,",\"exit_delta\":")
+  string.append(sidecar,str.view(string.from_float(report.exit_delta)))
+  string.append(sidecar,",\"input_width\":")
+  string.append(sidecar,str.view(string.from_int(info.width)))
+  string.append(sidecar,",\"input_height\":")
+  string.append(sidecar,str.view(string.from_int(info.height)))
+  string.append(sidecar,",\"input_frames\":")
+  string.append(sidecar,str.view(string.from_int(info.frames)))
+  string.append(sidecar,",\"requested_bad_first\":")
+  string.append(sidecar,str.view(string.from_int(made.bad.first)))
+  string.append(sidecar,",\"requested_bad_end_exclusive\":")
+  string.append(sidecar,str.view(string.from_int(made.bad.end_exclusive)))
+  string.append(sidecar,",\"handle_before\":")
+  string.append(sidecar,str.view(string.from_int(made.handle_before)))
+  string.append(sidecar,",\"handle_after\":")
+  string.append(sidecar,str.view(string.from_int(made.handle_after)))
+  string.append(sidecar,",\"window_count\":")
+  string.append(sidecar,str.view(string.from_int(array.len(
+    struct.borrow(made,field=windows)))))
+  string.append(sidecar,",\"memory_mode\":\"")
+  let selected_memory=memory_name(made.memory)
+  string.append(sidecar,str.view(selected_memory))
+  string.append(sidecar,"\",\"estimated_vram_bytes\":")
+  string.append(sidecar,str.view(string.from_int(made.estimated_vram_bytes)))
+  string.append(sidecar,",\"vram_estimate_scope\":\"repair_window_incremental_excludes_model_weights\"")
+  string.append(sidecar,",\"runtime_ms\":")
+  string.append(sidecar,str.view(string.from_int(runtime_ms)))
+  string.append(sidecar,",\"peak_vram_bytes\":")
+  string.append(sidecar,str.view(string.from_int(peak_vram_bytes)))
+  string.append(sidecar,",\"timing_mode\":\"")
+  let selected_timing=timing_name(timing.mode)
+  string.append(sidecar,str.view(selected_timing))
+  string.append(sidecar,"\",\"physical_block_lo\":")
+  string.append(sidecar,str.view(string.from_int(timing.block_lo)))
+  string.append(sidecar,",\"physical_block_hi\":")
+  string.append(sidecar,str.view(string.from_int(timing.block_hi)))
+  string.append(sidecar,",\"drift_control\":false,\"audio_prefix_ticks\":0")
+  string.append(sidecar,",\"source_preservation\":\"exact_frame_selection\"")
+  string.append(sidecar,",\"temporal_handle_feather\":true")
+  string.append(sidecar,",\"spatial_mask_preservation\":")
+  string.append(sidecar,if spatial_masked{"true"}else{"false"})
+  string.append(sidecar,",\"two_matte_background_recovery\":")
+  string.append(sidecar,if two_matte{"true"}else{"false"})
+  string.append(sidecar,",\"source_audio_preserved\":true}")
+  let sidecar_path=text.concat(final_output,".repair.json")
+  match files.write_atomic(str.view(sidecar_path),text.concat(str.view(sidecar_path),
+      ".tmp"),str.view(sidecar)){ok(_)=>result.ok(()),err(problem)=>{
+    result.err(text.concat("Repair video saved but sidecar failed: ",problem.message))}}
+}
+
+// Rolling execution exact-splices each local window first, then rewrites the
+// final receipt with the authoritative full plan and aggregate measurements.
+pub fn rewrite_diagnostics(value:ref<Prepared>,made:ref<repair.RepairPlan>,
+                           timing:ref<h3_timing.Config>,runtime_ms:u64,
+                           peak_vram_bytes:u64,entry_delta:f64,exit_delta:f64)
+    ->result<unit,string> effects{alloc,fs.write}{
+  write_diagnostics(struct.borrow(value,field=final_output),value.source_info,
+    made,timing,runtime_ms,peak_vram_bytes,splice.Report{entry_delta:entry_delta,
+      exit_delta:exit_delta,outside_exact:true},
+    str.len(struct.borrow(value,field=spatial_mask_path))!=0,
+    str.len(struct.borrow(value,field=target_mask_path))!=0)
+}
+
+pub fn finish_diagnostics(value:ref<Prepared>,timing:ref<h3_timing.Config>,
+                          runtime_ms:u64,peak_vram_bytes:u64)
+    ->result<splice.Report,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process}{
+  let _=try decode_generated(value)
+  let frame_bytes=value.source_info.width*value.source_info.height*3
+  let source_size=frame_bytes*value.source_info.frames
+  let replacement_size=frame_bytes*repair.length(value.plan.affected)
+  var source=match files.read_limited(struct.borrow(value,field=source_raw),
+      source_size){ok(found)=>found,err(_)=>{
+    return result.err("Cannot read decoded repair source")}}
+  var replacement=match files.read_limited(
+      struct.borrow(value,field=generated_raw),replacement_size){
+    ok(found)=>found,err(_)=>{return result.err("Cannot read decoded repair result")}}
+  if view.len(bytes.view(source))!=source_size or
+     view.len(bytes.view(replacement))!=replacement_size{
+    return result.err("Repair decoder did not produce the exact frame count")}
+  var composed=if str.len(struct.borrow(value,field=spatial_mask_path))!=0 and
+      str.len(struct.borrow(value,field=target_mask_path))!=0{
+    var authored=try decode_spatial_mask(
+      struct.borrow(value,field=spatial_mask_path),
+      struct.borrow(value,field=spatial_mask_raw),value.source_info)
+    var removal=mask_edit.cleanup(authored,value.spatial_cleanup,
+      value.spatial_feather,value.spatial_expand)
+    let local_frames=repair.length(value.plan.affected)
+    var target=try decode_target_mask(struct.borrow(value,field=target_mask_path),
+      struct.borrow(value,field=target_mask_raw),value.source_info.width,
+      value.source_info.height,local_frames,value.geometry.frames)
+    // A one-pixel erosion rejects the generated background antialiasing that
+    // otherwise appears as a bright outline around a smaller replacement.
+    var target_clean=mask_edit.cleanup(target,2,1,-1)
+    try splice.rgb24_two_matte_feathered(bytes.view(source),
+      bytes.view(replacement),array.view(struct.borrow(removal,field=weights)),
+      array.view(struct.borrow(target_clean,field=weights)),
+      value.source_info.width,value.source_info.height,value.source_info.frames,
+      value.plan.affected,value.plan.bad)
+  }else if str.len(struct.borrow(value,field=spatial_mask_path))!=0{
+    var authored=try decode_spatial_mask(
+      struct.borrow(value,field=spatial_mask_path),
+      struct.borrow(value,field=spatial_mask_raw),value.source_info)
+    var cleaned=mask_edit.cleanup(authored,value.spatial_cleanup,
+      value.spatial_feather,value.spatial_expand)
+    try splice.rgb24_masked_feathered(bytes.view(source),bytes.view(replacement),
+      array.view(struct.borrow(cleaned,field=weights)),value.source_info.width,
+      value.source_info.height,value.source_info.frames,value.plan.affected,
+      value.plan.bad)
+  }else{
+    try splice.rgb24_feathered(bytes.view(source),bytes.view(replacement),
+      value.source_info.width,value.source_info.height,value.source_info.frames,
+      value.plan.affected,value.plan.bad)
+  }
+  var report=splice.verify(bytes.view(source),bytes.view(composed),
+    value.source_info.width,value.source_info.height,value.source_info.frames,
+    value.plan.affected)
+  if not report.outside_exact{return result.err(
+    "Repair exactness gate failed outside the affected frame range")}
+  match files.write_bytes(struct.borrow(value,field=composite_raw),
+      bytes.view(composed)){ok(_)=>{},err(problem)=>{
+    return result.err(string.copy(problem.message))}}
+  let _=try check(["ffmpeg","-nostdin","-v","error","-y","-f","rawvideo",
+    "-pixel_format","rgb24","-video_size",text.concat(str.view(
+      string.from_int(value.source_info.width)),text.concat("x",str.view(
+      string.from_int(value.source_info.height)))),"-framerate","24","-i",
+    string.copy(struct.borrow(value,field=composite_raw)),"-i",
+    string.copy(struct.borrow(value,field=source)),"-frames:v",
+    string.from_int(value.source_info.frames),"-map","0:v:0","-map","1:a?",
+    "-c:v","libx264rgb","-preset","fast","-crf","0","-pix_fmt","rgb24",
+    "-c:a","copy",string.copy(struct.borrow(value,field=final_output))],
+    "FFmpeg could not publish the source-exact repaired video")
+  let diagnostic_output=string.copy(struct.borrow(value,field=final_output))
+  let diagnostic_info=value.source_info
+  let _=try write_diagnostics(str.view(diagnostic_output),diagnostic_info,
+    struct.borrow(value,field=plan),timing,runtime_ms,
+    peak_vram_bytes,report,
+    str.len(struct.borrow(value,field=spatial_mask_path))!=0,
+    str.len(struct.borrow(value,field=target_mask_path))!=0)
+  result.ok(report)
+}
+
+pub fn finish(value:ref<Prepared>)->result<splice.Report,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process}{
+  var timing=h3_timing.stock()
+  finish_diagnostics(value,timing,0,0)
+}
+
+pub fn discard(value:ref<Prepared>)->unit effects{alloc,fs.write}{
+  let _=files.remove(struct.borrow(value,field=source_raw))
+  let _=files.remove(struct.borrow(value,field=generated_raw))
+  let _=files.remove(struct.borrow(value,field=composite_raw))
+  let _=files.remove(struct.borrow(value,field=spatial_mask_raw))
+  let _=files.remove(struct.borrow(value,field=target_mask_raw))
+  let _=files.remove(struct.borrow(value,field=target_mask_preview))
+  let _=files.remove(struct.borrow(value,field=h3_source))
+  let _=files.remove(struct.borrow(value,field=h3_output))
+  let context_sidecar=text.concat(struct.borrow(value,field=h3_output),
+    ".airh3ctx")
+  let _=files.remove(str.view(context_sidecar))
+  let _=files.remove(struct.borrow(value,field=root))
+  ()
+}

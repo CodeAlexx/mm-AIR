@@ -1,0 +1,76 @@
+// Bounded real-model receipt for the localized still-image path. The first
+// reference is both the source image and H3's Picture 1 conditioning anchor;
+// the authored brush mask is composited back into a lossless PNG.
+module app.mm_air.tests.masked_image_generate
+
+import "../generate.ai" as generation
+import "../masked_edit.ai" as edit
+import "../masked_runtime.ai" as masked
+import "../.air/deps/h3/media.ai" as media
+import "../.air/deps/h3/session.ai" as session
+import std.channel as channel
+import std.text as text
+
+fn failure(message:str)->i32 effects {io.write} {
+  io.ewrite(message)
+  io.ewrite("\n")
+  1
+}
+
+pub fn main(args:view<str>)->i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
+  if view.len(args)!=3 {
+    io.ewrite("usage: masked-image-generate SOURCE_IMAGE OUTPUT_PNG\n")
+    return 2
+  }
+  var configuration=match generation.configuration() {
+    ok(value)=>value,err(problem)=>{return failure(str.view(problem))},
+  }
+  let geometry=match media.geometry(22,1024,1024) {
+    ok(value)=>value,err(problem)=>{var held=problem
+      return failure(str.view(media.error_message(held)))},
+  }
+  var receiver=match channel.open(128,1024) {
+    ok(value)=>value,err(problem)=>{var held=problem
+      return failure(str.view(channel.message(held)))},
+  }
+  let prompt="subject_definitions:\n<Picture 1>: the source image and composition anchor.\n\nsummary:\n[keyframe completion + reference generation] Localized wardrobe-color edit constrained to the authored mask.\n\nretention_analysis:\n<Picture 1>: partially_preserved; preserve the robot, face, pose, room, lighting, camera, record player, window, and every pixel outside the authored mask.\n\ndetailed_description:\n[Shot 1] Preserve the source still exactly outside the authored mask. Inside the mask only, the existing hair bow remains one continuous bow in its same location: both large loops, both short tails, the center knot, folds, fur trim, lighting, and reflections stay structurally identical while all pink satin fabric becomes rich cobalt-blue satin. The mask contains bow material only, never a separate figure, face, doll, portrait, or new object. The robot's face, hair, body, dress, hands, background, framing, and pose do not change.\n\noverall_soundscape:\nN/A\n\nnon_diegetic_music:\nN/A"
+  var references:array<string> = [string.copy(view.get(args,1))]
+  var audio:array<string> = []
+  var job=generation.job(configuration,prompt,session.Model.Reference,
+    session.Task.Ref2VA,geometry,references,audio,view.get(args,2),0,"",424242,19,
+    session.Projection.ExactBF16,session.Projection.RowScaledI8,
+    session.Attention.DenseInt8,channel.ticket(receiver),session.Schedule.Exponential)
+  var points:array<edit.BrushPoint> = []
+  array.push(points,edit.brush_point(0.510,0.125,0.072,false,true))
+  array.push(points,edit.brush_point(0.545,0.175,0.055,false,false))
+  array.push(points,edit.brush_point(0.575,0.140,0.050,false,false))
+  array.push(points,edit.brush_point(0.640,0.125,0.072,false,false))
+  array.push(points,edit.brush_point(0.610,0.175,0.055,false,false))
+  generation.enable_masked(job,masked.paint_settings(points,2,4,2,0,32,true))
+  var completed=generation.Outcome {succeeded:false,output:string.new(),
+    message:string.copy("masked image worker did not complete"),runtime_ms:0,
+    peak_vram_bytes:0}
+  task.scope {
+    var jobs:array<task<generation.Outcome>> = [task.spawn(job,fn=generation.run)]
+    loop {
+      match channel.recv_now(receiver,time.monotonic_ns()) {
+        ok(value)=>match value {some(item)=>{var update=item
+          match channel.text_of(update) {some(message)=>{io.write(str.view(message))
+            io.write("\n")},none=>{}}},none=>{}},err(_)=>{},
+      }
+      match task.wait_any(jobs,0) {
+        some(_)=>{completed=task.join(option.unwrap(array.pop(jobs)))
+          break},none=>{time.sleep_ms(50)},
+      }
+    }
+  }
+  let _=channel.close(receiver)
+  io.write(text.concat("result=",text.concat(
+    if completed.succeeded{"success"}else{"failure"},"\n")))
+  io.write(text.concat("output=",text.concat(
+    struct.borrow(completed,field=output),"\n")))
+  io.write(text.concat("message=",text.concat(
+    struct.borrow(completed,field=message),"\n")))
+  if completed.succeeded{0}else{1}
+}

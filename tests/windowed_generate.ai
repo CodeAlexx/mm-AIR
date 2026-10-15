@@ -1,0 +1,70 @@
+// Bounded two-window product receipt for native latent overlap carry. This
+// exercises the same generation.Job worker used by the desktop Generate tab.
+module app.mm_air.tests.windowed_generate
+
+import "../generate.ai" as generation
+import "../.air/deps/h3/media.ai" as media
+import "../.air/deps/h3/session.ai" as session
+import std.channel as channel
+import std.text as text
+
+fn failure(message:str)->i32 effects {io.write} {
+  io.ewrite(message)
+  io.ewrite("\n")
+  1
+}
+
+pub fn main(args:view<str>)->i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
+  if view.len(args)!=2 {
+    io.ewrite("usage: windowed-h3-generate OUTPUT_MP4\n")
+    return 2
+  }
+  var configuration=match generation.configuration() {
+    ok(value)=>value,err(problem)=>{return failure(str.view(problem))},
+  }
+  // 56 frames is two real 39-frame H3 windows with a 22-frame overlap.
+  let geometry=match media.geometry(56,256,256) {
+    ok(value)=>value,err(problem)=>{var held=problem
+      return failure(str.view(media.error_message(held)))},
+  }
+  var receiver=match channel.open(128,1024) {
+    ok(value)=>value,err(problem)=>{var held=problem
+      return failure(str.view(channel.message(held)))},
+  }
+  let prompt="A polished friendly cobalt-blue helper robot walks steadily through a sunlit workshop in one continuous shot. Stable identity, proportions, lighting, room layout, and camera direction. Natural synchronized mechanical footsteps and quiet workshop ambience."
+  var references:array<string> = []
+  var audio:array<string> = []
+  var job=generation.job(configuration,prompt,session.Model.Base,
+    session.Task.T2VA,geometry,references,audio,view.get(args,1),0,"",424242,7,
+    session.Projection.ExactBF16,session.Projection.ExactBF16,
+    session.Attention.Exact,channel.ticket(receiver),session.Schedule.Simple)
+  match generation.enable_windowed(job,39,22) {
+    ok(_)=>{},err(message)=>{return failure(str.view(message))},
+  }
+  var completed=generation.Outcome {succeeded:false,output:string.new(),
+    message:string.copy("windowed H3 worker did not complete"),runtime_ms:0,
+    peak_vram_bytes:0}
+  task.scope {
+    var jobs:array<task<generation.Outcome>> = [task.spawn(job,fn=generation.run)]
+    loop {
+      match channel.recv_now(receiver,time.monotonic_ns()) {
+        ok(value)=>match value {some(item)=>{var update=item
+          match channel.text_of(update) {some(message)=>{io.write(str.view(message))
+            io.write("\n")},none=>{}}},none=>{}},err(_)=>{},
+      }
+      match task.wait_any(jobs,0) {
+        some(_)=>{completed=task.join(option.unwrap(array.pop(jobs)))
+          break},none=>{time.sleep_ms(50)},
+      }
+    }
+  }
+  let _=channel.close(receiver)
+  io.write(text.concat("result=",text.concat(
+    if completed.succeeded{"success"}else{"failure"},"\n")))
+  io.write(text.concat("output=",text.concat(
+    struct.borrow(completed,field=output),"\n")))
+  io.write(text.concat("message=",text.concat(
+    struct.borrow(completed,field=message),"\n")))
+  if completed.succeeded{0}else{1}
+}

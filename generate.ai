@@ -1,0 +1,2281 @@
+// Direct in-process MiniMax-H3 generation worker for MM-Air. The worker owns
+// its GPU context and calls the linked pure-AIR H3 session; there is no model
+// process, HTTP boundary, Python runtime, or C++ model adapter.
+module app.mm_air.generate
+
+import std.channel as channel
+import std.compute_offload as offload
+import std.draw as draw
+import std.files as files
+import std.gpu as agpu
+import std.math as math
+import std.media as media_io
+import std.media_input as media_input
+import std.path as path
+import std.process as proc
+import std.telemetry as telemetry
+import std.text as text
+import std.system as system
+import "runtime_config.ai" as runtime_config
+import ".air/deps/qwen/tokenizer.ai" as tokenizer
+import ".air/deps/h3/audio_encode.ai" as audio_encode
+import ".air/deps/h3/checkpoint.ai" as checkpoint
+import ".air/deps/h3/conditioning.ai" as conditioning
+import ".air/deps/h3/deployment.ai" as h3_deployment
+import ".air/deps/h3/image_input.ai" as image_input
+import ".air/deps/h3/lora.ai" as h3_lora
+import ".air/deps/h3/media.ai" as h3_media
+import ".air/deps/h3/packing.ai" as packing
+import ".air/deps/h3/presentation.ai" as presentation
+import ".air/deps/h3/session.ai" as session
+import ".air/deps/h3/request.ai" as h3_request
+import ".air/deps/h3/timeline.ai" as timeline
+import ".air/deps/h3/timing.ai" as h3_timing
+import ".air/deps/h3_repair/plan.ai" as repair_plan
+import ".air/deps/h3/vae.ai" as vae
+import ".air/deps/sam3/mask.ai" as auto_mask
+import ".air/deps/krea2/session.ai" as krea_session
+import ".air/deps/krea2/config.ai" as krea_config
+import ".air/deps/krea2/attention.ai" as krea_attention
+import ".air/deps/krea2/lora.ai" as krea_lora
+import ".air/deps/qwenimage21/session.ai" as qwen_image_session
+import ".air/deps/qwenimage21/generate.ai" as qwen_image_generate
+import ".air/deps/qwenimage21/contract.ai" as qwen_image_contract
+import ".air/deps/qwenimage21/attention.ai" as qwen_image_attention
+import "character_sheet.ai" as character_sheet
+import "masked_runtime.ai" as masked_runtime
+import "outpaint.ai" as outpaint
+import "outpaint_runtime.ai" as outpaint_runtime
+import "repair_runtime.ai" as repair_runtime
+import "seedvr2_post.ai" as seedvr2_post
+import "parameters.ai" as parameters
+
+fn projection_id(value:session.Projection)->u64 effects{}{
+  if value==session.Projection.ExactBF16{return 1}
+  if value==session.Projection.ConvRotI8{return 2}
+  if value==session.Projection.ConvRotI8Streaming{return 2}
+  if value==session.Projection.RowScaledI8{return 3}
+  0
+}
+
+fn attention_id(value:session.Attention)->u64 effects{}{
+  if value==session.Attention.CkInt8{return 4}
+  if value==session.Attention.Exact{return 1}
+  if value==session.Attention.HybridExact3DenseInt8{return 2}
+  if value==session.Attention.DenseInt8{return 3}
+  0
+}
+
+fn schedule_id(value:session.Schedule)->u64 effects{}{
+  if value==session.Schedule.Exponential{1}else{0}
+}
+
+pub type KreaJob = struct {sources:krea_session.Sources,request:parameters.KreaRequest,progress:channel.Ticket}
+pub type KreaCancelableJob = struct {job:KreaJob,cancel_path:string}
+pub type QwenImageJob = struct {request:parameters.QwenImageRequest,progress:channel.Ticket}
+pub type QwenImageCancelableJob = struct {job:QwenImageJob,cancel_path:string}
+
+pub fn run_qwen_image(job:QwenImageJob own)->Outcome
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+  var owned=job
+  run_qwen_image_policy(owned,qwen_image_attention.Policy.CkInt8,"")
+}
+
+// Compatibility entrypoint for existing CK callers. Both operating systems
+// use the same request handling, progress and CK generation policy.
+pub fn run_qwen_image_ck(job:QwenImageJob own)->Outcome
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+  run_qwen_image(job)
+}
+
+pub fn run_qwen_image_ck_cancelable(work:QwenImageCancelableJob own)->Outcome
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+  var owned=work
+  run_qwen_image_policy(struct.borrow(owned,field=job),qwen_image_attention.Policy.CkInt8,
+    struct.borrow(owned,field=cancel_path))
+}
+
+fn run_qwen_image_policy(owned:ref<QwenImageJob>,policy:qwen_image_attention.Policy,cancel_path:str)->Outcome
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+  var ticket=ref.swap(struct.borrow(owned,field=progress),no_progress())
+  var connection=match channel.connect(ticket,time.monotonic_ns()+30000000000){
+    ok(value)=>value,
+    err(_)=>{return outcome(false,struct.borrow(struct.borrow(owned,field=request),field=output),
+      "Cannot connect the MM-Air Qwen-Image-2.1 progress channel")},
+  }
+  var sender:option<channel.Sender> = option.some(connection)
+  let started=time.monotonic_ns()
+  let request=struct.borrow(owned,field=request)
+  var finished=match parameters.validate_qwen_image(request){
+    err(message)=>outcome(false,struct.borrow(request,field=output),message),
+    ok(_)=>{
+      report(sender,"Loading Qwen-Image-2.1 once into pinned host residency")
+      let condition_count=parameters.qwen_condition_count(request)
+      var session=match qwen_image_session.open_with_attention(qwen_image_contract.Request{
+          width:request.width,height:request.height,
+          steps:request.steps,seed:request.seed,
+          true_cfg_scale:qwen_image_contract.default_true_cfg_scale(),
+          condition_images:condition_count,
+          scheduler:request.scheduler,sampler:request.sampler},policy){
+        ok(value)=>value,
+        err(message)=>{var failed=outcome(false,struct.borrow(request,field=output),message)
+          finish_progress(sender,failed)
+          return failed},
+      }
+      qwen_image_session.set_cancel_path(session,cancel_path)
+      report(sender,if condition_count==0{
+        "Running native AIR Qwen-Image-2.1 text-to-image"}else{
+        "Running native AIR Qwen-Image-2.1 image edit"})
+      var sources: array<string> = array.new()
+      if condition_count!=0{
+        if struct.borrow(request,field=source)!=""{
+          array.push(sources,string.copy(struct.borrow(request,field=source)))
+        }
+        var source_index:u64=0
+        loop{
+          if source_index>=array.len(struct.borrow(request,field=references)){break}
+          array.push(sources,string.copy(str.view(array.borrow(
+            struct.borrow(request,field=references),source_index))))
+          source_index=source_index+1
+        }
+      }
+      let root=match runtime_config.value("QWEN_IMAGE21_ROOT"){
+        ok(value)=>match value{some(path)=>path,none=>string.new(),},
+        err(message)=>{return outcome(false,struct.borrow(request,field=output),message)},}
+      let manifests=match runtime_config.value("QWEN_IMAGE21_MANIFEST_DIR"){
+        ok(value)=>match value{some(path)=>path,none=>string.new(),},
+        err(message)=>{return outcome(false,struct.borrow(request,field=output),message)},}
+      let residency=match runtime_config.value("QWEN_IMAGE21_TEXT_RESIDENCY"){
+        ok(value)=>match value{some(value)=>value,none=>string.copy("streaming"),},
+        err(message)=>{return outcome(false,struct.borrow(request,field=output),message)},}
+      let result=qwen_image_generate.run_request_images_configured(
+        if condition_count==0{"t2i"}else{"edit"},
+        struct.borrow(request,field=prompt),struct.borrow(request,field=output),sources,
+        session.request,sender,policy,cancel_path,root,manifests,residency)
+      match result{
+        ok(_)=>outcome_metrics(true,struct.borrow(request,field=output),
+          "Native AIR Qwen-Image-2.1 PNG completed",
+          (time.monotonic_ns()-started)/1000000,0),
+        err(message)=>outcome(false,struct.borrow(request,field=output),message),
+      }
+    },
+  }
+  finish_progress(sender,finished)
+  finished
+}
+pub fn krea_sources() -> result<krea_session.Sources,string> effects {alloc,env,fs.read,fs.meta} {
+  result.ok(krea_session.Sources {
+    model_checkpoint:try required_environment("MM_AIR_KREA_MODEL"),
+    qwen_index:try required_environment("MM_AIR_KREA_QWEN_INDEX"),
+    tokenizer_directory:try required_environment("MM_AIR_KREA_TOKENIZER_DIR"),
+    vae_checkpoint:try required_environment("MM_AIR_KREA_VAE"),
+    vae_config:try required_environment("MM_AIR_KREA_VAE_CONFIG"),
+    manifest_directory:try required_environment("MM_AIR_KREA_MANIFEST_ROOT")})
+}
+pub fn run_krea(job: KreaJob own) -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time} {
+  var owned=job
+  run_krea_policy(owned,krea_attention.Policy.CkInt8,"")
+}
+pub fn run_krea_ck(job:KreaJob own) -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time} {
+  run_krea(job)
+}
+pub fn run_krea_ck_cancelable(work:KreaCancelableJob own)->Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time} {
+  var owned=work
+  run_krea_policy(struct.borrow(owned,field=job),krea_attention.Policy.CkInt8,
+    struct.borrow(owned,field=cancel_path))
+}
+fn run_krea_policy(owned:ref<KreaJob>,policy:krea_attention.Policy,cancel_path:str)
+    -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time} {
+  var ticket = ref.swap(struct.borrow(owned,field=progress),no_progress())
+  var connection = match channel.connect(ticket,time.monotonic_ns()+30000000000) {
+    ok(value) => value,
+    err(_) => { return outcome(false,struct.borrow(struct.borrow(owned,field=request),field=output),
+      "Cannot connect the MM-Air Krea progress channel") },
+  }
+  var sender: option<channel.Sender> = option.some(connection)
+  var finished = run_krea_inner(owned,sender,policy,cancel_path)
+  finish_progress(sender,finished)
+  finished
+}
+fn run_krea_inner(owned: ref<KreaJob>,sender:ref<option<channel.Sender>>,policy:krea_attention.Policy,cancel_path:str) -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time} {
+  let request = struct.borrow(owned,field=request)
+  let seed: u64 = cast.sat(request.seed)
+  let settings = krea_config.Config {width:request.width,height:request.height}
+  match parameters.validate_krea(request) {
+    ok(_) => {},
+    err(message) => { return outcome(false,struct.borrow(request,field=output),message) },
+  }
+  var loras: array<krea_lora.Request> = []
+  let entries = struct.borrow(request,field=loras)
+  var index: u64 = 0
+  loop {
+    if index >= array.len(entries) { break }
+    let entry = array.borrow(entries,index)
+    if entry.enabled {
+      array.push(loras,krea_lora.Request {path:string.copy(struct.borrow(entry,field=path)),
+        strength:cast.float(entry.strength)})
+    }
+    index = index + 1
+  }
+  match krea_session.run_to_png_cancelable(struct.borrow(owned,field=sources),
+      struct.borrow(request,field=prompt),seed,settings,struct.borrow(request,field=output),loras,0,sender,policy,cancel_path) {
+    ok(_) => outcome(true,struct.borrow(request,field=output),"Linked AIR Krea 2 Turbo image completed"),
+    err(message) => outcome(false,struct.borrow(request,field=output),message),
+  }
+}
+
+pub type Job = struct {
+  checkpoint_root: string,
+  reference_checkpoint_root: string,
+  donor_root: string,
+  manifest_root: string,
+  scratch_root: string,
+  prompt: string,
+  model: session.Model,
+  task: session.Task,
+  geometry: h3_media.Geometry,
+  references: array<string>,
+  audio_references: array<string>,
+  output: string,
+  loras: array<parameters.LoraEntry>,
+  masked: bool,
+  masked_denoise: bool,
+  masked_settings: masked_runtime.Settings,
+  masked_token_weights: array<f32>,
+  two_matte:bool,
+  sam3_plugin:string,
+  sam3_model:string,
+  outpaint: bool,
+  outpaint_settings: outpaint_runtime.Settings,
+  repair:bool,
+  repair_settings:repair_runtime.Settings,
+  timing:h3_timing.Config,
+  window_frames: u64,
+  window_overlap_frames: u64,
+  motion_context_path: string,
+  motion_context_frames: u64,
+  motion_output_frames: u64,
+  drift_control:session.DriftControl,
+  character_sheet_mode: u32,
+  character_sheet_output: string,
+  // Encode reference videos at the target resolution (ComfyUI ref_image_size
+  // "match") instead of the 768-short-edge creator canvas.
+  reference_video_match: bool,
+  seed: u64,
+  evaluations: u64,
+  schedule_kind: session.Schedule,
+  conditioner_projection: session.Projection,
+  transformer_projection: session.Projection,
+  attention: session.Attention,
+  seedvr2_enabled:bool,
+  seedvr2_settings:seedvr2_post.Settings,
+  seedvr2_final_output:string,
+  progress: channel.Ticket
+}
+
+pub type Outcome = struct {
+  succeeded: bool,
+  output: string,
+  message: string,
+  runtime_ms:u64,
+  peak_vram_bytes:u64
+}
+
+pub type Configuration = struct {
+  checkpoint_root: string,
+  reference_checkpoint_root: string,
+  donor_root: string,
+  manifest_root: string,
+  scratch_root: string
+}
+
+fn required_environment(name: str) -> result<string,string> effects {alloc,env,fs.read,fs.meta} {
+  match try runtime_config.value(name) {
+    some(value) => {
+      if str.len(str.view(value)) == 0 {
+        return result.err(text.concat(name, " is empty"))
+      }
+      result.ok(value)
+    },
+    none => result.err(text.concat("Set ", name)),
+  }
+}
+
+// Model locations are application configuration, never compiled-in personal
+// paths. This also lets a moved checkpoint set be selected without rebuilding.
+pub fn configuration() -> result<Configuration,string> effects {alloc,env,fs.read,fs.meta} {
+  let checkpoint_root: string = try required_environment(
+    "MM_AIR_H3_CHECKPOINT_ROOT")
+  let reference_checkpoint_root: string = match try runtime_config.value(
+      "MM_AIR_H3_REFERENCE_ROOT") {
+    some(value) => value,
+    none => string.new(),
+  }
+  let donor_root: string = try required_environment("MM_AIR_H3_DONOR_ROOT")
+  let manifest_root: string = try required_environment("MM_AIR_H3_MANIFEST_ROOT")
+  let scratch_root: string = system.temp_directory()
+  result.ok(Configuration {checkpoint_root: checkpoint_root,
+    reference_checkpoint_root: reference_checkpoint_root,
+    donor_root: donor_root, manifest_root: manifest_root,
+    scratch_root: scratch_root})
+}
+
+// Optional Ref2VA root whose ConvRot cache has the Character Swap LoRA baked in
+// by tools/h3_swap_lora_merge.py. Unset, empty or incomplete means plain Ref2VA.
+pub fn character_swap_root() -> option<string> effects {alloc,env,fs.read,fs.meta} {
+  merged_root("MM_AIR_H3_CHARACTER_SWAP_ROOT")
+}
+
+// Same, with the 4-step Ref2VA turbo LoRA also merged; sampled with the
+// four-evaluation turbo profile.
+pub fn character_swap_turbo_root() -> option<string> effects {alloc,env,fs.read,fs.meta} {
+  merged_root("MM_AIR_H3_CHARACTER_SWAP_TURBO_ROOT")
+}
+
+fn merged_root(key: str) -> option<string> effects {alloc,env,fs.read,fs.meta} {
+  let value: string = match runtime_config.value(key) {
+    ok(found) => match found { some(root) => root, none => { return option.none() } },
+    err(_) => { return option.none() },
+  }
+  if str.len(str.view(value)) == 0 { return option.none() }
+  let cache: string = path.join(str.view(value),
+    "serenity_runtime_cache_v1/native_convrot_h256_ref2va_blocks_50.safetensors")
+  match files.exists(str.view(cache)) {
+    ok(found) => if found { option.some(value) } else { option.none() },
+    err(_) => option.none(),
+  }
+}
+
+fn copied_paths(source:ref<array<string>>)->array<string> effects {alloc} {
+  var out:array<string> = []
+  var i:u64=0
+  loop{if i>=array.len(source){break}
+    array.push(out,string.copy(array.borrow(source,i)))
+    i=i+1
+  }
+  out
+}
+fn request_projection(value:u32)->session.Projection effects {} {
+  if value==h3_request.projection_exact_bf16(){return session.Projection.ExactBF16}
+  if value==h3_request.projection_convrot_int8(){return session.Projection.ConvRotI8}
+  session.Projection.RowScaledI8
+}
+
+// Shared request-to-worker boundary. Callers resolve -1 seeds before serializing
+// the request, so history and the actual worker always record the same seed.
+pub fn h3_job(configuration:ref<Configuration>,request:ref<h3_request.Request>,
+    loras:ref<array<parameters.LoraEntry>>,progress:channel.Ticket own)
+    ->result<Job,string> effects {alloc} {
+  match h3_request.validate(request){ok(_)=>{},err(problem)=>{var held=problem
+    return result.err(h3_request.describe(held))},}
+  try parameters.validate_loras(loras)
+  if request.seed<0{return result.err("Resolve the random seed before starting H3")}
+  if (request.model==h3_request.model_reference())!=(request.task==h3_request.task_ref2va()){
+    return result.err("MiniMax-H3 Reference and Ref2VA must be selected together")
+  }
+  let model=if request.model==h3_request.model_base(){session.Model.Base}else{session.Model.Reference}
+  let task=if request.task==0{session.Task.T2VA}else{if request.task==1{session.Task.I2VA}else{
+    if request.task==2{session.Task.FL2VA}else{if request.task==4{session.Task.L2VA}else{session.Task.Ref2VA}}}}
+  let attention=if request.attention==1{session.Attention.Exact}else{
+    if request.attention==2{session.Attention.HybridExact3DenseInt8}else{
+    if request.attention==3{session.Attention.DenseInt8}else{session.Attention.CkInt8}}}
+  result.ok(job_loras(configuration,struct.borrow(request,field=prompt),model,task,
+    request.geometry,copied_paths(struct.borrow(request,field=references)),
+    copied_paths(struct.borrow(request,field=audio_references)),struct.borrow(request,field=output),
+    parameters.clone_loras(loras),character_sheet.off(),"",cast.sat(request.seed),
+    h3_request.evaluations(request.profile),request_projection(request.conditioner_projection),
+    request_projection(request.transformer_projection),attention,progress,
+    if request.profile==h3_request.profile_dc_euler_19(){session.Schedule.Exponential}else{session.Schedule.Simple}))
+}
+
+pub fn job_loras(configuration: ref<Configuration>, prompt: str,
+           model: session.Model, task: session.Task,
+           geometry: h3_media.Geometry, references: array<string> own,
+           audio_references: array<string> own, output: str,
+           loras: array<parameters.LoraEntry> own,
+           character_sheet_mode: u32, character_sheet_output: str, seed: u64,
+           evaluations: u64,
+           conditioner_projection: session.Projection,
+           transformer_projection: session.Projection,
+           attention: session.Attention, progress: channel.Ticket own,
+           schedule_kind: session.Schedule) -> Job
+    effects {alloc} {
+  var owned_references: array<string> = references
+  var owned_audio_references: array<string> = audio_references
+  var owned_loras: array<parameters.LoraEntry> = loras
+  // ConvRotI8 and ConvRotI8Streaming have identical weights and math. MM-Air
+  // uses bounded block residency so a completed request cannot make the next
+  // request fail merely because the desktop's GPU use changed between runs.
+  let bounded_transformer_projection=if transformer_projection==session.Projection.ConvRotI8{
+      session.Projection.ConvRotI8Streaming}else{transformer_projection}
+  Job {
+    checkpoint_root: text.copy(str.view(struct.borrow(configuration,
+      field=checkpoint_root))),
+    reference_checkpoint_root: text.copy(str.view(struct.borrow(configuration,
+      field=reference_checkpoint_root))),
+    donor_root: text.copy(str.view(struct.borrow(configuration,
+      field=donor_root))),
+    manifest_root: text.copy(str.view(struct.borrow(configuration,
+      field=manifest_root))),
+    scratch_root: text.copy(str.view(struct.borrow(configuration,
+      field=scratch_root))),
+    prompt: text.copy(prompt), model: model, task: task, geometry: geometry,
+    references: owned_references, audio_references: owned_audio_references,
+    output: text.copy(output),loras:owned_loras,masked:false,masked_denoise:false,
+    masked_settings:masked_runtime.settings("",false,0.0,0.0,0.0,0.0,
+      0,0,0,0,0,true), masked_token_weights: [], two_matte:false,
+    sam3_plugin:string.new(),sam3_model:string.new(),outpaint:false,
+    outpaint_settings:outpaint_runtime.settings(32,32,outpaint.right(),
+      outpaint.anchor_center(),outpaint.exact(),0,22,0,false),
+    repair:false,repair_settings:repair_runtime.settings(0,1,0,0,1.0,
+      repair_plan.MemoryMode.Auto,124,22),
+    timing:h3_timing.stock(),
+    window_frames:geometry.frames,window_overlap_frames:0,
+    motion_context_path:string.new(),motion_context_frames:0,
+    motion_output_frames:geometry.frames,drift_control:session.no_drift(),
+    character_sheet_mode: character_sheet_mode,
+    character_sheet_output: text.copy(character_sheet_output),
+    reference_video_match: false,
+    seed: seed, evaluations: evaluations,
+    schedule_kind: schedule_kind,
+    conditioner_projection: conditioner_projection,
+    transformer_projection: bounded_transformer_projection, attention: attention,
+    seedvr2_enabled:false,
+    seedvr2_settings:seedvr2_post.settings(0,0,0,0,true,0,0,0),
+    seedvr2_final_output:string.new(),
+    progress: progress}
+}
+
+// Keep the established no-LoRA constructor source-compatible for edit,
+// repair, movie, and focused-test callers. Generate uses job_loras when the
+// user has selected an H3 adapter.
+pub fn job(configuration: ref<Configuration>, prompt: str,
+           model: session.Model, task: session.Task,
+           geometry: h3_media.Geometry, references: array<string> own,
+           audio_references: array<string> own, output: str,
+           character_sheet_mode: u32, character_sheet_output: str, seed: u64,
+           evaluations: u64,
+           conditioner_projection: session.Projection,
+           transformer_projection: session.Projection,
+           attention: session.Attention, progress: channel.Ticket own,
+           schedule_kind: session.Schedule) -> Job
+    effects {alloc} {
+  var loras: array<parameters.LoraEntry> = []
+  job_loras(configuration,prompt,model,task,geometry,references,
+    audio_references,output,loras,character_sheet_mode,
+    character_sheet_output,seed,evaluations,conditioner_projection,
+    transformer_projection,attention,progress,schedule_kind)
+}
+
+// Preserve the generator artifact beside the final result. This also creates
+// the strict residency boundary: execute() closes H3 before postprocess begins.
+pub fn enable_seedvr2(job:ref<Job>,settings:seedvr2_post.Settings)
+    ->result<unit,string> effects {alloc} {
+  if character_sheet.valid(job.character_sheet_mode){
+    return result.err("SeedVR2 post-processing requires a video result, not a character-sheet PNG")
+  }
+  let final_output=string.copy(struct.borrow(job,field=output))
+  let source_output=text.concat(str.view(final_output),".pre-seedvr2.mp4")
+  let _=ref.swap(struct.borrow(job,field=output),source_output)
+  let _=ref.swap(struct.borrow(job,field=seedvr2_final_output),final_output)
+  struct.set(job,settings,field=seedvr2_settings)
+  struct.set(job,true,field=seedvr2_enabled)
+  result.ok(())
+}
+
+pub fn enable_motion_context(job:ref<Job>,filename:str,context_frames:u64,
+                             output_frames:u64)->result<unit,string>
+    effects{alloc} {
+  if str.len(filename)==0{return result.err("H3 continuation needs a latent context artifact")}
+  let _=packing.motion_context_steps(context_frames)
+  var geometry=match h3_media.geometry(context_frames+output_frames,
+      job.geometry.width,job.geometry.height){ok(value)=>value,
+    err(problem)=>{var owned=problem
+      return result.err(h3_media.error_message(owned))}}
+  struct.set(job,geometry,field=geometry)
+  let _=ref.swap(struct.borrow(job,field=motion_context_path),string.copy(filename))
+  struct.set(job,context_frames,field=motion_context_frames)
+  struct.set(job,output_frames,field=motion_output_frames)
+  struct.set(job,geometry.frames,field=window_frames)
+  struct.set(job,0,field=window_overlap_frames)
+  result.ok(())
+}
+
+pub fn enable_drift_control(job:ref<Job>,enabled:bool,matched_steps:u64,
+                            taper_steps:u64,amount:f32)
+    ->result<unit,string> effects{alloc}{
+  if str.len(struct.borrow(job,field=motion_context_path))==0{
+    return result.err("Drift Control requires a Movie Maker continuation")
+  }
+  var settings=try session.drift_control(enabled,job.motion_context_frames,
+    matched_steps,taper_steps,amount)
+  struct.set(job,settings,field=drift_control)
+  result.ok(())
+}
+
+pub fn enable_windowed(job:ref<Job>,window_frames:u64,overlap_frames:u64)
+    -> result<unit,string> effects {alloc} {
+  var made=try timeline.plan(job.geometry.frames,window_frames,overlap_frames)
+  if timeline.window_count(made)<2 {
+    return result.err("H3 window settings produce only one window")
+  }
+  struct.set(job,window_frames,field=window_frames)
+  struct.set(job,overlap_frames,field=window_overlap_frames)
+  result.ok(())
+}
+
+pub fn enable_masked(job:ref<Job>,settings:masked_runtime.Settings own) -> unit
+    effects {alloc} {
+  var owned=settings
+  struct.set(job,true,field=masked)
+  struct.set(job,true,field=masked_denoise)
+  let _=ref.swap(struct.borrow(job,field=masked_settings),owned)
+  ()
+}
+
+pub fn masked_composite_prompt(prompt:str) -> string effects {alloc} {
+  text.concat(prompt,"\n\nmasked_replacement_cleanup:\nFully erase every visual trait, accessory, silhouette, head shape, hair shape, and edge residue belonging to the source subject. Reconstruct the scene background cleanly in every vacated part of the authored mask. Show only the replacement character with one clean silhouette: no ghost, halo, double contour, source ears, source bow, or translucent remnant.")
+}
+
+// Preserve the authored crop and terminal soft composite while letting H3
+// propose every crop token. This gives character replacement a second native
+// strategy when strict token-local denoising retains the source identity.
+pub fn enable_reference_video_match(job: ref<Job>) -> unit effects {} {
+  struct.set(job,true,field=reference_video_match)
+}
+
+pub fn enable_masked_composite(job:ref<Job>,settings:masked_runtime.Settings own)
+    -> unit effects {alloc} {
+  var owned=settings
+  let strengthened=masked_composite_prompt(struct.borrow(job,field=prompt))
+  let _=ref.swap(struct.borrow(job,field=prompt),strengthened)
+  struct.set(job,true,field=masked)
+  struct.set(job,false,field=masked_denoise)
+  let _=ref.swap(struct.borrow(job,field=masked_settings),owned)
+  ()
+}
+
+pub fn enable_two_matte(job:ref<Job>,plugin:str,model:str) -> result<unit,string>
+    effects {alloc} {
+  if str.len(plugin)==0 or str.len(model)==0 {
+    return result.err("Two-matte replacement needs the native SAM 3 plugin and model")
+  }
+  struct.set(job,true,field=two_matte)
+  let _=ref.swap(struct.borrow(job,field=sam3_plugin),string.copy(plugin))
+  let _=ref.swap(struct.borrow(job,field=sam3_model),string.copy(model))
+  result.ok(())
+}
+
+fn masked_background_prompt() -> string effects {alloc} {
+  string.copy("subject_definitions:\n<Video 1>: the exact source scene, framing, camera, environment, lighting, timing, and synchronized soundtrack authority.\n\nsummary:\n[video editing] Remove the entire main performer from <Video 1> and reconstruct the empty scene behind them.\n\nretention_analysis:\n<Video 1>: partially_preserved; preserve the camera, framing, architecture, surfaces, lighting, timing, and original audio, but fully erase the performer and every part of their silhouette.\n\ndetailed_description:\n[Shot 1] The environment is empty for the complete shot. Reconstruct clean uninterrupted background structures, textures, surfaces, and shadows across every area formerly covered by the performer. No person, character, robot, dancer, accessory, limbs, shadow, ghost, halo, double contour, or translucent remnant appears. The camera and environment remain stationary and unchanged.\n\noverall_soundscape:\nReuse the synchronized soundtrack from <Video 1> unchanged.\n\nnon_diegetic_music:\nPreserve source music without adding music.")
+}
+
+pub fn enable_outpaint(job:ref<Job>,settings:outpaint_runtime.Settings) -> unit
+    effects {} {
+  struct.set(job,true,field=outpaint)
+  struct.set(job,settings,field=outpaint_settings)
+  ()
+}
+
+pub fn enable_repair(job:ref<Job>,settings:repair_runtime.Settings own)
+    ->result<unit,string> effects{alloc}{
+  var owned=settings
+  if job.masked or job.outpaint{return result.err(
+    "H3 Repair cannot be combined with masked edit or outpaint")}
+  if job.model!=session.Model.Reference or job.task!=session.Task.Ref2VA{
+    return result.err("H3 Repair requires MiniMax H3 Reference and Ref2VA")}
+  if array.len(struct.borrow(job,field=references))==0{
+    return result.err("H3 Repair requires the source video as Video 1")}
+  if owned.memory==repair_plan.MemoryMode.Rolling{
+    struct.set(job,session.Projection.ConvRotI8Streaming,
+      field=transformer_projection)}
+  struct.set(job,true,field=repair)
+  let _=ref.swap(struct.borrow(job,field=repair_settings),owned)
+  result.ok(())
+}
+
+pub fn enable_timing(job:ref<Job>,settings:h3_timing.Config)->unit effects{}{
+  struct.set(job,settings,field=timing)
+  ()
+}
+
+fn joined(root: str, suffix: str) -> string effects {alloc} {
+  path.join(root, suffix)
+}
+
+fn outcome(succeeded: bool, output: str, message: str) -> Outcome effects {alloc} {
+  Outcome {succeeded: succeeded, output: text.copy(output),
+    message: text.copy(message),runtime_ms:0,peak_vram_bytes:0}
+}
+
+fn outcome_metrics(succeeded:bool,output:str,message:str,runtime_ms:u64,
+                   peak_vram_bytes:u64)->Outcome effects{alloc}{
+  Outcome{succeeded:succeeded,output:text.copy(output),message:text.copy(message),
+    runtime_ms:runtime_ms,peak_vram_bytes:peak_vram_bytes}
+}
+
+fn lora_admission_failure(scratch_root: str, checkpoint: str,
+                          problem: h3_lora.AdmissionError own) -> Outcome
+    effects {alloc,fs.write,time} {
+  var owned: h3_lora.AdmissionError = problem
+  let code: string = h3_lora.admission_code(owned)
+  let detail: string = h3_lora.admission_message(owned)
+  var failure: telemetry.Failure = telemetry.fault(telemetry.cause(
+    "h3_lora", str.view(code), "h3.lora.inspect", str.view(detail), 0))
+  telemetry.because(failure, telemetry.cause("mm_air", "generation_admission",
+    "mm_air.generate", "admitting MiniMax-H3 generation inputs", 0))
+  telemetry.note(failure, telemetry.attr_redacted_path("lora_path", checkpoint))
+  telemetry.note(failure, telemetry.attr_text("model", "minimax_h3_base"))
+  telemetry.note(failure, telemetry.attr_text("boundary", "cpu_lora_admission"))
+  var tools: array<telemetry.Tool> = array.new()
+  array.push(tools, telemetry.tool("mm-air", "0.1.0"))
+  var capabilities: array<telemetry.Attribute> = array.new()
+  array.push(capabilities, telemetry.attr_text("runtime", "native_air"))
+  var source: telemetry.Origin = telemetry.origin("mm-air", "0.1.0", tools,
+    capabilities)
+  var argv: array<string> = [string.copy("airproj"), string.copy("run"),
+    string.copy("--project"), string.copy("models/h3"), string.copy("--bin"),
+    string.copy("h3-inspect-lora"), string.copy("--"), string.copy(checkpoint)]
+  var replay: telemetry.Replay = telemetry.replay(argv,
+    "CPU-only H3 LoRA admission; substitute the redacted checkpoint path")
+  let receipt: string = path.join(scratch_root, "mm-air-last-failure.json")
+  match telemetry.report(failure, source, replay) {
+    ok(record) => {
+      let temporary: string = text.concat(str.view(receipt), ".tmp")
+      match files.write_atomic(str.view(receipt), str.view(temporary), str.view(record)) {
+        ok(_) => {},
+        err(_) => {},
+      }
+    },
+    err(_) => {},
+  }
+  var message: string = telemetry.summary(failure)
+  string.append(message, "; failure receipt: ")
+  string.append(message, str.view(receipt))
+  outcome(false, "", str.view(message))
+}
+
+pub fn inspect_h3_lora(checkpoint: str, scratch_root: str) -> Outcome
+    effects {alloc,fs.read,fs.write,time} {
+  match h3_lora.inspect_diagnostic(checkpoint) {
+    ok(rank) => outcome(true, "", str.view(text.concat(
+      "H3 LoRA admitted; max_rank=", str.view(string.from_int(rank))))),
+    err(problem) => lora_admission_failure(scratch_root, checkpoint, problem),
+  }
+}
+
+fn apply_seedvr2(job:ref<Job>,generated:Outcome own,
+                 sender:ref<option<channel.Sender>>)->Outcome
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,net,process,time} {
+  var finished=generated
+  if not job.seedvr2_enabled or not finished.succeeded{return finished}
+  let source=string.copy(struct.borrow(finished,field=output))
+  let final_output=string.copy(struct.borrow(job,field=seedvr2_final_output))
+  report(sender,"Unloading the generation model and reclaiming its GPU context")
+  report(sender,if job.seedvr2_settings.variant==1{
+    "Loading native AIR SeedVR2 7B"}else{"Loading native AIR SeedVR2 3B"})
+  report(sender,"Restoring / upscaling generated video")
+  match seedvr2_post.run(str.view(source),str.view(final_output),
+      struct.borrow(job,field=scratch_root),job.seedvr2_settings){
+    ok(completed)=>{
+      var held=completed
+      report(sender,"Muxing source audio and saving the SeedVR2 result")
+      outcome(true,struct.borrow(held,field=final_output),
+        "Native AIR SeedVR2 restoration completed; pre-upscale generation retained")},
+    err(message)=>outcome(true,str.view(source),text.concat(
+      "H3 generation completed and is displayed without SeedVR2; optional post-process failed: ",
+      str.view(message))),
+  }
+}
+
+fn no_progress() -> channel.Ticket effects {alloc} {
+  channel.Ticket {port: 0, token: string.new(), capacity: 0, max_message: 0}
+}
+
+fn report(sender: ref<option<channel.Sender>>, message: str) -> unit effects {alloc,net,time} {
+  match sender {
+    some(value) => { let _ = channel.offer(value,1,str.bytes(message)) },
+    none => {},
+  }
+  ()
+}
+fn finish_progress(sender:ref<option<channel.Sender>>,finished:ref<Outcome>) -> unit effects {alloc,net,time} {
+  var empty: option<channel.Sender> = option.none()
+  var owned: option<channel.Sender> = ref.swap(sender,empty)
+  match owned {
+    some(value) => {
+      var held: channel.Sender = value
+      let _ = channel.finish(held,if finished.succeeded {2} else {3},
+        str.bytes(struct.borrow(finished,field=message)),time.monotonic_ns()+30000000000)
+      let _ = channel.hang_up(held)
+    },none => {},
+  }
+  ()
+}
+
+fn rgb_pixels(surface: ref<draw.Surface>) -> array<byte> effects {alloc} {
+  let width: u64 = cast.wrap(surface.width)
+  let height: u64 = cast.wrap(surface.height)
+  if width == 0 or height == 0 or
+     array.len(struct.borrow(surface, field=pixels)) != width * height * 4 {
+    panic "MM-Air reference surface is not RGBA8"
+  }
+  var output: array<byte> = array.new()
+  var pixel: u64 = 0
+  loop {
+    if pixel >= width * height { break }
+    array.push(output, array.get(struct.borrow(surface, field=pixels), pixel * 4))
+    array.push(output, array.get(struct.borrow(surface, field=pixels), pixel * 4 + 1))
+    array.push(output, array.get(struct.borrow(surface, field=pixels), pixel * 4 + 2))
+    pixel = pixel + 1
+  }
+  output
+}
+
+fn round_half_even_positive(value: f64) -> u64 effects {} {
+  let lower: f64 = math.floor(value)
+  let fraction: f64 = value - lower
+  let integer: u64 = cast.sat(lower)
+  if fraction > 0.5 or (fraction == 0.5 and rem(integer, 2) != 0) {
+    integer + 1
+  } else { integer }
+}
+
+pub type CreatorCanvas = struct { width: u64, height: u64 }
+
+// "match" reference canvas: the creator law with the target's short edge
+// (never above 768) so a source clip is encoded at generation resolution.
+// Encoder tiles and reference tokens both scale with this area.
+pub fn match_canvas(width: u64, height: u64, target_width: u64,
+                    target_height: u64) -> result<CreatorCanvas,string>
+    effects {alloc} {
+  if width == 0 or height == 0 or target_width == 0 or target_height == 0 {
+    return result.err("H3 Ref2VA reference dimensions must be positive")
+  }
+  let ratio: f64 = cast.float(width) / cast.float(height)
+  if ratio < 0.25 or ratio > 4.0 {
+    return result.err("H3 Ref2VA reference aspect ratio must be within 1:4..4:1")
+  }
+  let target_short: u64 = if target_width < target_height { target_width }
+    else { target_height }
+  let short: f64 = if target_short < 768 { cast.float(target_short) } else { 768.0 }
+  let resolved_width: f64 = if ratio >= 1.0 { short * ratio } else { short }
+  let resolved_height: f64 = if ratio >= 1.0 { short } else { short / ratio }
+  let rounded_width: u64 = round_half_even_positive(resolved_width / 32.0) * 32
+  let rounded_height: u64 = round_half_even_positive(resolved_height / 32.0) * 32
+  if rounded_width < 256 or rounded_height < 256 {
+    return creator_canvas(width, height)
+  }
+  result.ok(CreatorCanvas {width: rounded_width, height: rounded_height})
+}
+
+// packing_ref2va.py resolve_canvas_size: short edge 768, area cap 768*1344,
+// nearest-even multiple-of-32 rounding. Pixel resampling is the separate
+// parity-gated `image_input.resize` operation.
+fn creator_canvas(width: u64, height: u64) -> result<CreatorCanvas,string>
+    effects {alloc} {
+  if width == 0 or height == 0 {
+    return result.err("H3 Ref2VA reference dimensions must be positive")
+  }
+  let ratio: f64 = cast.float(width) / cast.float(height)
+  if ratio < 0.25 or ratio > 4.0 {
+    return result.err("H3 Ref2VA reference aspect ratio must be within 1:4..4:1")
+  }
+  var resolved_width: f64 = 768.0
+  var resolved_height: f64 = 768.0
+  if ratio >= 1.0 {
+    resolved_width = 768.0 * ratio
+  } else {
+    resolved_height = 768.0 / ratio
+  }
+  let area: f64 = resolved_width * resolved_height
+  let maximum: f64 = 768.0 * 1344.0
+  if area > maximum {
+    let scale: f64 = math.sqrt(maximum / area)
+    resolved_width = resolved_width * scale
+    resolved_height = resolved_height * scale
+  }
+  let rounded_width: u64 = round_half_even_positive(resolved_width / 32.0) * 32
+  let rounded_height: u64 = round_half_even_positive(resolved_height / 32.0) * 32
+  result.ok(CreatorCanvas {width: rounded_width, height: rounded_height})
+}
+
+// The shipped Serenity Ref2VA product profile sets H3_REF_IMAGE_SHORT_EDGE=768,
+// but otherwise keeps the creator's image-specific law: independently scale
+// both axes from the short edge, half-even round to 32, and apply NO video
+// canvas area cap. This is deliberately separate from creator_canvas().
+pub fn reference_image_canvas(width: u64, height: u64)
+    -> result<CreatorCanvas,string> effects {alloc} {
+  if width == 0 or height == 0 {
+    return result.err("H3 Ref2VA image dimensions must be positive")
+  }
+  if width > 4 * height or height > 4 * width {
+    return result.err("H3 Ref2VA image aspect ratio must be within 1:4..4:1")
+  }
+  let short_edge: u64 = if width < height { width } else { height }
+  let scale: f64 = 768.0 / cast.float(short_edge)
+  var rounded_width: u64 = round_half_even_positive(
+    cast.float(width) * scale / 32.0) * 32
+  var rounded_height: u64 = round_half_even_positive(
+    cast.float(height) * scale / 32.0) * 32
+  if rounded_width < 32 { rounded_width = 32 }
+  if rounded_height < 32 { rounded_height = 32 }
+  result.ok(CreatorCanvas {width: rounded_width, height: rounded_height})
+}
+
+// Only the video VAE sees this 17n+5 prefix. Qwen vision continues to sample
+// the complete target-truncated 24 FPS reference, exactly like the Mojo product
+// and creator encoder. Fewer than 22 frames cannot supply the first VAE chunk.
+pub fn reference_video_encode_frames(frames: u64) -> result<u64,string>
+    effects {alloc} {
+  if frames < 22 {
+    return result.err(
+      "H3 Ref2VA video needs at least 22 frames on the 24 FPS grid")
+  }
+  result.ok(((frames - 5) / 17) * 17 + 5)
+}
+
+// Ordinary Ref2VA presentation follows the requested delivery tail. A masked
+// source is also the clean denoising trajectory, so its VAE input must cover
+// the complete internal endpoint represented by the target latent geometry.
+pub fn reference_video_decode_frames(delivery_frames: u64,
+                                     target_latents: u64,
+                                     masked_source: bool) -> u64 effects {} {
+  if masked_source {
+    timeline.model_frames_for_video_latents(target_latents)
+  } else { delivery_frames }
+}
+
+// Geometry record consumed by the existing T1 video-VAE encoder. Ref2VA
+// images keep their own creator canvas instead of being resized to the target.
+fn image_reference_geometry(surface: ref<draw.Surface>)
+    -> result<h3_media.Geometry,string> effects {alloc} {
+  let width: u64 = cast.wrap(surface.width)
+  let height: u64 = cast.wrap(surface.height)
+  if width == 0 or height == 0 or rem(width, 32) != 0 or
+     rem(height, 32) != 0 {
+    return result.err("H3 Ref2VA reference canvas is not 32-aligned")
+  }
+  result.ok(h3_media.Geometry {frames: 1, width: width, height: height,
+    latent_frames: 1, latent_width: width / 16, latent_height: height / 16,
+    audio_latents: 0, audio_samples: 0})
+}
+
+type VideoFrames = struct {
+  pixels: bytes,
+  frames: u64,
+  width: u64,
+  height: u64
+}
+
+fn resize_video_frames(source: view<byte>, frames: u64, width: u64,
+                       height: u64, canvas: CreatorCanvas)
+    -> result<bytes,string> effects {alloc} {
+  if frames == 0 or view.len(source) != frames * width * height * 3 {
+    return result.err("H3 Ref2VA video resize received incomplete RGB24 frames")
+  }
+  if width == canvas.width and height == canvas.height {
+    return result.ok(bytes.copy(source))
+  }
+  var output: array<byte> = array.new()
+  let frame_pixels: u64 = width * height
+  var frame: u64 = 0
+  loop {
+    if frame >= frames { break }
+    var rgba: draw.Surface = match draw.surface(cast.sat(width), cast.sat(height)) {
+      some(value) => value,
+      none => { return result.err("Cannot allocate a Ref2VA video frame") },
+    }
+    var pixel: u64 = 0
+    loop {
+      if pixel >= frame_pixels { break }
+      let source_offset: u64 = frame * frame_pixels * 3 + pixel * 3
+      let target_offset: u64 = pixel * 4
+      array.set(struct.borrow(rgba, field=pixels), target_offset,
+        view.get(source, source_offset))
+      array.set(struct.borrow(rgba, field=pixels), target_offset + 1,
+        view.get(source, source_offset + 1))
+      array.set(struct.borrow(rgba, field=pixels), target_offset + 2,
+        view.get(source, source_offset + 2))
+      let opaque: u8 = 255
+      array.set(struct.borrow(rgba, field=pixels), target_offset + 3,
+        cast.bits(opaque))
+      pixel = pixel + 1
+    }
+    var resized: draw.Surface = try image_input.resize(rgba, canvas.width,
+      canvas.height)
+    var rgb: array<byte> = rgb_pixels(resized)
+    var index: u64 = 0
+    loop {
+      if index >= array.len(rgb) { break }
+      array.push(output, array.get(rgb, index))
+      index = index + 1
+    }
+    frame = frame + 1
+  }
+  result.ok(bytes.copy(array.view(output)))
+}
+
+fn decode_video_reference(source: str, scratch: str, ordinal: u64,
+                          target_frames: u64, exact_canvas: bool,
+                          exact_width: u64, exact_height: u64,
+                          match_target: bool)
+    -> result<VideoFrames,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  var first: draw.Surface = match media_io.frame(source, scratch, 0, 0) {
+    ok(value) => value,
+    err(problem) => { return result.err(problem) },
+  }
+  let width: u64 = cast.wrap(first.width)
+  let height: u64 = cast.wrap(first.height)
+  let canvas: CreatorCanvas = if exact_canvas {
+    if width != exact_width or height != exact_height {
+      return result.err(
+        "Masked H3 source crop does not match its target latent geometry")
+    }
+    CreatorCanvas {width: width, height: height}
+  } else if match_target {
+    try match_canvas(width, height, exact_width, exact_height)
+  } else { try creator_canvas(width, height) }
+  var stem: string = text.concat("reference-video-",
+    str.view(string.from_int(ordinal)))
+  var raw_path: string = path.join(scratch,
+    text.concat(str.view(stem), ".rgb"))
+  match proc.check(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i",
+      text.copy(source), "-map", "0:v:0", "-vf", "fps=24", "-frames:v",
+      string.from_int(target_frames), "-pix_fmt", "rgb24", "-f", "rawvideo",
+      text.copy(str.view(raw_path))]) {
+    ok(_) => {},
+    err(_) => { let _ = files.remove(str.view(raw_path))
+      return result.err("FFmpeg could not decode the Ref2VA video at 24 FPS") },
+  }
+  let frame_bytes: u64 = width * height * 3
+  let maximum: u64 = frame_bytes * target_frames
+  var pixels: bytes = match files.read_limited(str.view(raw_path), maximum) {
+    ok(value) => value,
+    err(_) => { let _ = files.remove(str.view(raw_path))
+      return result.err("H3 Ref2VA decoded video exceeds its request frame cap") },
+  }
+  let _ = files.remove(str.view(raw_path))
+  let size: u64 = view.len(bytes.view(pixels))
+  if size == 0 or rem(size, frame_bytes) != 0 {
+    return result.err("H3 Ref2VA video produced incomplete RGB24 frames")
+  }
+  let frame_count: u64 = size / frame_bytes
+  var resized: bytes = try resize_video_frames(bytes.view(pixels), frame_count,
+    width, height, canvas)
+  result.ok(VideoFrames {pixels: resized, frames: frame_count,
+    width: canvas.width, height: canvas.height})
+}
+
+fn clean_probe(root: str) -> unit effects {alloc,fs.write} {
+  let _ = files.remove(proc.pid_path(root))
+  let _ = files.remove(proc.out_path(root))
+  let _ = files.remove(proc.err_path(root))
+  let _ = files.remove(proc.launch_path(root))
+  let _ = files.remove(root)
+  ()
+}
+
+// Ref2VA video references may carry their own soundtrack. Probe the first
+// audio stream separately so an absent stream is normal, while a malformed
+// container or failed probe remains a visible intake error.
+fn video_has_audio(source: str, scratch: str, ordinal: u64)
+    -> result<bool,string> effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  let root: string = path.join(scratch, text.concat("reference-audio-probe-",
+    str.view(string.from_int(ordinal))))
+  var exit: proc.Exit = proc.start(proc.plan([
+    "ffprobe", "-v", "error", "-select_streams", "a:0",
+    "-show_entries", "stream=codec_type", "-of",
+    "default=noprint_wrappers=1:nokey=1", text.copy(source)], str.view(root)))
+  if not proc.finished(exit) {
+    var message: string = proc.describe(exit)
+    let detail: string = proc.failure_context(str.view(root), 4096)
+    if str.len(detail) != 0 {
+      string.append(message, ": ")
+      string.append(message, text.trim(str.view(detail)))
+    }
+    clean_probe(str.view(root))
+    return result.err(message)
+  }
+  var output: bytes = match files.read_limited(proc.out_path(str.view(root)), 64) {
+    ok(value) => value,
+    err(_) => { clean_probe(str.view(root))
+      return result.err("Cannot read the Ref2VA video audio probe") },
+  }
+  let present: bool = view.len(bytes.view(output)) != 0
+  clean_probe(str.view(root))
+  result.ok(present)
+}
+
+fn video_soundtrack(source: str, scratch: str, ordinal: u64,
+    max_samples: u64)
+    -> result<option<audio_encode.Waveform>,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  if not (try video_has_audio(source, scratch, ordinal)) {
+    return result.ok(option.none())
+  }
+  let stem: string = text.concat("reference-video-audio-",
+    str.view(string.from_int(ordinal)))
+  let wav_path: string = path.join(scratch, text.concat(str.view(stem), ".wav"))
+  var waveform: audio_encode.Waveform = match audio_encode.decode_reference(
+      source, str.view(wav_path), max_samples) {
+    ok(value) => value,
+    err(problem) => { let _ = files.remove(str.view(wav_path))
+      var owned: audio_encode.Error = problem
+      return result.err(audio_encode.error_message(owned)) },
+  }
+  let _ = files.remove(str.view(wav_path))
+  result.ok(option.some(waveform))
+}
+
+// Creator `prepare_reference_waveform` truncates every standalone reference
+// and embedded soundtrack to the generated video's duration. The encoder's
+// own 15-second bound remains the outer safety cap.
+fn reference_audio_sample_cap(target_frames: u64) -> u64 effects {} {
+  let duration_cap: u64 = target_frames * 32000 / 24
+  let encoder_cap: u64 = audio_encode.max_reference_samples()
+  if duration_cap < encoder_cap { duration_cap } else { encoder_cap }
+}
+
+fn append_video_vision(
+    presentations: ref<array<presentation.Reference>>,
+    patches: ref<array<presentation.VisionPatches>>,
+    frames: ref<VideoFrames>, has_audio: bool) -> unit effects {alloc} {
+  let frame_bytes: u64 = frames.width * frames.height * 3
+  let sampled: u64 = (frames.frames + 11) / 12
+  var grids: array<presentation.VisionGrid> = array.new()
+  var timestamps: array<f64> = array.new()
+  var sample: u64 = 0
+  loop {
+    if sample >= sampled { break }
+    let first_index: u64 = sample * 12
+    let second_sample: u64 = if sample + 1 < sampled { sample + 1 } else { sample }
+    let second_index: u64 = second_sample * 12
+    var pair: array<byte> = array.new()
+    var byte_index: u64 = 0
+    loop {
+      if byte_index >= frame_bytes { break }
+      array.push(pair, view.get(bytes.view(struct.borrow(frames, field=pixels)),
+        first_index * frame_bytes + byte_index))
+      byte_index = byte_index + 1
+    }
+    byte_index = 0
+    loop {
+      if byte_index >= frame_bytes { break }
+      array.push(pair, view.get(bytes.view(struct.borrow(frames, field=pixels)),
+        second_index * frame_bytes + byte_index))
+      byte_index = byte_index + 1
+    }
+    var patch: presentation.VisionPatches = presentation.vision_patch_rows(
+      array.view(pair), frames.width, frames.height, 2, true)
+    array.push(grids, patch.grid)
+    array.push(patches, patch)
+    // Sample timestamps are ordinal/2 seconds; Qwen merges each pair and uses
+    // its mean, repeat-padding an odd tail.
+    array.push(timestamps,
+      (cast.float(sample) / 2.0 + cast.float(second_sample) / 2.0) / 2.0)
+    sample = sample + 2
+  }
+  array.push(presentations, presentation.Reference {
+    kind: presentation.ReferenceKind.Video, has_audio: has_audio,
+    block_timestamps: timestamps, grids: grids})
+  ()
+}
+
+pub type ReferenceInputs = struct {
+  rows: array<session.ReferenceRows>,
+  presentations: array<presentation.Reference>,
+  patches: array<presentation.VisionPatches>,
+  has_audio: bool
+}
+
+fn intake_failure(phase: str, source: str, detail: str) -> string
+    effects {alloc} {
+  var message: string = text.copy("Ref2VA intake ")
+  string.append(message, phase)
+  if str.len(source) != 0 {
+    string.append(message, " [")
+    string.append(message, source)
+    string.append(message, "]")
+  }
+  string.append(message, ": ")
+  string.append(message, detail)
+  message
+}
+
+fn intake_report(sender: ref<option<channel.Sender>>, rail: str, index: u64,
+                 count: u64, source: str, phase: str) -> unit
+    effects {alloc,net,time} {
+  var message: string = text.copy("Ref2VA ")
+  string.append(message, rail)
+  string.append(message, " ")
+  string.append(message, str.view(string.from_int(index + 1)))
+  string.append(message, "/")
+  string.append(message, str.view(string.from_int(count)))
+  string.append(message, " ")
+  var name: string = path.basename(source)
+  string.append(message, str.view(name))
+  string.append(message, ": ")
+  string.append(message, phase)
+  report(sender, str.view(message))
+}
+
+// Shared intake boundary also used by checkpoint parity diagnostics.
+pub fn prepare_ref2va_inputs(
+    context: ref<GpuContext>, stream: ref<GpuStream>, job: ref<Job>,
+    sources: ref<session.Sources>, checkpoint_root: str, manifests: str,
+    scratch: str, sender: ref<option<channel.Sender>>) -> result<ReferenceInputs,string>
+    effects {alloc,fs.meta,fs.read,fs.write,gpu,net,process,time} {
+  var rows: array<session.ReferenceRows> = array.new()
+  var presentations: array<presentation.Reference> = array.new()
+  var patches: array<presentation.VisionPatches> = array.new()
+  // Video soundtracks are encoded after the video VAE lease is released, but
+  // their destination row stays attached to the corresponding video block.
+  var audio_waveforms: array<audio_encode.Waveform> = array.new()
+  var audio_sources: array<string> = array.new()
+  var embedded_audio_rows: array<u64> = array.new()
+  let visual_count: u64 = array.len(struct.borrow(job, field=references))
+
+  if visual_count != 0 {
+    var options: offload.Options = offload.Options {
+      mode: offload.Mode.Streaming, fp8_pinned: false, stage_threads: 1}
+    var encoder: offload.Offloader = match offload.open(context,
+        str.view(struct.borrow(sources, field=video_vae_checkpoint)),
+        str.view(struct.borrow(sources, field=video_encoder_manifest)), options) {
+      ok(value) => value,
+      err(problem) => { return result.err(intake_failure(
+        "video encoder open", "", problem.message)) },
+    }
+    var held: offload.Block = match offload.acquire(encoder, stream, 0) {
+      ok(value) => value,
+      err(problem) => { let _ = offload.close(encoder)
+        return result.err(intake_failure(
+          "video encoder acquire", "", problem.message)) },
+    }
+    var visual: u64 = 0
+    loop {
+      if visual >= visual_count { break }
+      let source_path: str = str.view(array.borrow(
+        struct.borrow(job, field=references), visual))
+      let kind: media_input.Kind = media_input.classify_path(source_path)
+      match kind {
+        Image => {
+          intake_report(sender, "visual", visual, visual_count, source_path,
+            "decoding image")
+          var surface: draw.Surface = match media_io.frame(source_path, scratch,
+              0, 0) {
+            ok(value) => value,
+            err(problem) => { let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "image decode", source_path, str.view(problem))) },
+          }
+          let canvas: CreatorCanvas = match reference_image_canvas(
+              cast.wrap(surface.width), cast.wrap(surface.height)) {
+            ok(value) => value,
+            err(problem) => { let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "image canvas", source_path, str.view(problem))) },
+          }
+          intake_report(sender, "visual", visual, visual_count, source_path,
+            "resizing image to Serenity 768-short-edge reference profile")
+          surface = match image_input.resize(surface, canvas.width,
+              canvas.height) {
+            ok(value) => value,
+            err(problem) => { let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "image resize", source_path, str.view(problem))) },
+          }
+          let reference_geometry: h3_media.Geometry = match image_reference_geometry(
+              surface) {
+            ok(value) => value,
+            err(problem) => { let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "image geometry", source_path, str.view(problem))) },
+          }
+          var rgb: array<byte> = rgb_pixels(surface)
+          var patch: presentation.VisionPatches = presentation.vision_patch_rows(
+            array.view(rgb), reference_geometry.width, reference_geometry.height,
+            1, false)
+          let grid: presentation.VisionGrid = patch.grid
+          var pixels: array<f32> = match vae.preprocess_keyframe_geometry(
+              surface, reference_geometry) {
+            ok(value) => value,
+            err(problem) => { var owned: vae.Error = problem
+              var message: string = vae.error_message(owned)
+              let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "image preprocess", source_path, str.view(message))) },
+          }
+          intake_report(sender, "visual", visual, visual_count, source_path,
+            "encoding image")
+          var video_rows: array<f32> = match vae.encode_keyframe_geometry(
+              context, stream, held, array.view(pixels), 42,
+              reference_geometry) {
+            ok(value) => value,
+            err(problem) => { let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "image encode", source_path, problem.message)) },
+          }
+          array.push(rows, session.ReferenceRows {
+            geometry: packing.ReferenceGeometry {
+              kind: packing.ReferenceKind.Image, latent_frames: 1,
+              latent_height: reference_geometry.latent_height,
+              latent_width: reference_geometry.latent_width, audio_latents: 0},
+            video: video_rows, audio: []})
+          var grids: array<presentation.VisionGrid> = [grid]
+          array.push(presentations, presentation.Reference {
+            kind: presentation.ReferenceKind.Image, has_audio: false,
+            block_timestamps: [], grids: grids})
+          array.push(patches, patch)
+        },
+        Video => {
+          intake_report(sender, "visual", visual, visual_count, source_path,
+            "decoding video")
+          let decode_frames: u64 = reference_video_decode_frames(
+            job.geometry.frames, job.geometry.latent_frames, job.masked)
+          var frames: VideoFrames = match decode_video_reference(source_path,
+              scratch, visual, decode_frames, job.masked,
+              job.geometry.width, job.geometry.height,
+              job.reference_video_match) {
+            ok(value) => value,
+            err(problem) => { let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "video decode", source_path, str.view(problem))) },
+          }
+          intake_report(sender, "visual", visual, visual_count, source_path,
+            "decoding soundtrack")
+          var soundtrack: option<audio_encode.Waveform> = match video_soundtrack(
+              source_path, scratch, visual,
+              reference_audio_sample_cap(job.geometry.frames)) {
+            ok(value) => value,
+            err(problem) => { let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "video soundtrack", source_path, str.view(problem))) },
+          }
+          var has_audio: bool = false
+          var soundtrack_latents: u64 = 0
+          match soundtrack {
+            some(waveform) => {
+              has_audio = true
+              soundtrack_latents = audio_encode.latent_frames_for(
+                waveform.samples)
+              array.push(embedded_audio_rows, array.len(rows))
+              array.push(audio_waveforms, waveform)
+              array.push(audio_sources, text.copy(source_path))
+            },
+            none => {},
+          }
+          let encode_frames: u64 = match reference_video_encode_frames(
+              frames.frames) {
+            ok(value) => value,
+            err(problem) => { let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "video VAE frame trim", source_path, str.view(problem))) },
+          }
+          let latent_frames: u64 = vae.video_reference_latent_frames(
+            encode_frames)
+          let reference_geometry: h3_media.Geometry = h3_media.Geometry {
+            frames: encode_frames, width: frames.width, height: frames.height,
+            latent_frames: latent_frames, latent_width: frames.width / 16,
+            latent_height: frames.height / 16, audio_latents: 0,
+            audio_samples: 0}
+          let encode_bytes: u64 = encode_frames * frames.width * frames.height * 3
+          var pixels: array<f32> = match vae.preprocess_video_geometry(
+              view.slice(bytes.view(struct.borrow(frames, field=pixels)),
+                0, encode_bytes), encode_frames,
+              reference_geometry) {
+            ok(value) => value,
+            err(problem) => { var owned: vae.Error = problem
+              var message: string = vae.error_message(owned)
+              let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "video preprocess", source_path, str.view(message))) },
+          }
+          intake_report(sender, "visual", visual, visual_count, source_path,
+            "encoding video")
+          var video_rows: array<f32> = match vae.encode_video_geometry(
+              context, stream, held, array.view(pixels), encode_frames, 42,
+              reference_geometry) {
+            ok(value) => value,
+            err(problem) => { let _ = offload.release(held)
+              let _ = offload.close(encoder)
+              return result.err(intake_failure(
+                "video encode", source_path, problem.message)) },
+          }
+          append_video_vision(presentations, patches, frames, has_audio)
+          array.push(rows, session.ReferenceRows {
+            geometry: packing.ReferenceGeometry {
+              kind: packing.ReferenceKind.Video, latent_frames: latent_frames,
+              latent_height: reference_geometry.latent_height,
+              latent_width: reference_geometry.latent_width,
+              audio_latents: soundtrack_latents},
+            video: video_rows, audio: []})
+        },
+        Audio => {
+          let _ = offload.release(held)
+          let _ = offload.close(encoder)
+          return result.err(intake_failure("visual classification", source_path,
+            "audio files belong in the Ref2VA audio rail"))
+        },
+        Unknown => {
+          let _ = offload.release(held)
+          let _ = offload.close(encoder)
+          return result.err(intake_failure("visual classification", source_path,
+            "file type is not recognized"))
+        },
+      }
+      visual = visual + 1
+    }
+    let released: unit = match offload.release(held) {
+      ok(value) => value,
+      err(problem) => { let _ = offload.close(encoder)
+        return result.err(text.copy(problem.message)) },
+    }
+    match offload.close(encoder) {
+      ok(_) => {},
+      err(problem) => { return result.err(text.copy(problem.message)) },
+    }
+  }
+
+  let explicit_audio_count: u64 = array.len(
+    struct.borrow(job, field=audio_references))
+  let embedded_audio_count: u64 = array.len(embedded_audio_rows)
+  var explicit_audio_index: u64 = 0
+  loop {
+    if explicit_audio_index >= explicit_audio_count { break }
+    let source_path: str = str.view(array.borrow(
+      struct.borrow(job, field=audio_references), explicit_audio_index))
+    let temporary: string = path.join(scratch, text.concat(
+      "reference-audio-", str.view(string.from_int(explicit_audio_index))))
+    var wav_path: string = text.concat(str.view(temporary), ".wav")
+    intake_report(sender, "audio", embedded_audio_count + explicit_audio_index,
+      embedded_audio_count + explicit_audio_count, source_path,
+      "decoding audio")
+    var waveform: audio_encode.Waveform = match audio_encode.decode_reference(
+        source_path, str.view(wav_path),
+        reference_audio_sample_cap(job.geometry.frames)) {
+      ok(value) => value,
+      err(problem) => { let _ = files.remove(str.view(wav_path))
+        var owned: audio_encode.Error = problem
+        var message: string = audio_encode.error_message(owned)
+        return result.err(intake_failure(
+          "audio decode", source_path, str.view(message))) },
+    }
+    let _ = files.remove(str.view(wav_path))
+    array.push(audio_waveforms, waveform)
+    array.push(audio_sources, text.copy(source_path))
+    explicit_audio_index = explicit_audio_index + 1
+  }
+
+  let audio_count: u64 = array.len(audio_waveforms)
+  if audio_count != 0 {
+    var options: offload.Options = offload.Options {
+      mode: offload.Mode.Resident, fp8_pinned: false, stage_threads: 1}
+    var encoder: offload.Offloader = match offload.open(context,
+        str.view(joined(checkpoint_root, "audio_vae/model.safetensors")),
+        str.view(joined(manifests, "h3-audio-encoder.json")), options) {
+      ok(value) => value,
+      err(problem) => { return result.err(text.copy(problem.message)) },
+    }
+    var held: offload.Block = match offload.acquire(encoder, stream, 0) {
+      ok(value) => value,
+      err(problem) => { let _ = offload.close(encoder)
+        return result.err(text.copy(problem.message)) },
+    }
+    var prepared: audio_encode.Prepared = match audio_encode.prepare(
+        context, stream, held) {
+      ok(value) => value,
+      err(problem) => { let _ = offload.release(held)
+        let _ = offload.close(encoder)
+        return result.err(text.copy(problem.message)) },
+    }
+    var audio_index: u64 = 0
+    loop {
+      if audio_index >= audio_count { break }
+      let waveform: ref<audio_encode.Waveform> = array.borrow(audio_waveforms,
+        audio_index)
+      let source_path: str = str.view(array.borrow(audio_sources, audio_index))
+      intake_report(sender, "audio", audio_index, audio_count, source_path,
+        "encoding audio")
+      let latent_frames: u64 = audio_encode.latent_frames_for(waveform.samples)
+      var audio_rows: array<f32> = match audio_encode.encode_rows(context,
+          stream, held, prepared, waveform) {
+        ok(value) => value,
+        err(problem) => { let _ = audio_encode.close(prepared)
+          let _ = offload.release(held)
+          let _ = offload.close(encoder)
+          return result.err(intake_failure(
+            "audio encode", source_path, problem.message)) },
+      }
+      if audio_index < embedded_audio_count {
+        let destination: u64 = array.get(embedded_audio_rows, audio_index)
+        let video_row: ref<session.ReferenceRows> = array.borrow(rows,
+          destination)
+        let _ = ref.swap(struct.borrow(video_row, field=audio), audio_rows)
+      } else {
+        array.push(rows, session.ReferenceRows {
+          geometry: packing.ReferenceGeometry {
+            kind: packing.ReferenceKind.Audio, latent_frames: 0,
+            latent_height: 0, latent_width: 0, audio_latents: latent_frames},
+          video: [], audio: audio_rows})
+        array.push(presentations, presentation.Reference {
+          kind: presentation.ReferenceKind.Audio, has_audio: true,
+          block_timestamps: [], grids: []})
+      }
+      audio_index = audio_index + 1
+    }
+    match audio_encode.close(prepared) {
+      ok(_) => {},
+      err(problem) => { let _ = offload.release(held)
+        let _ = offload.close(encoder)
+        return result.err(text.copy(problem.message)) },
+    }
+    let released: unit = match offload.release(held) {
+      ok(value) => value,
+      err(problem) => { let _ = offload.close(encoder)
+        return result.err(text.copy(problem.message)) },
+    }
+    match offload.close(encoder) {
+      ok(_) => {},
+      err(problem) => { return result.err(text.copy(problem.message)) },
+    }
+  }
+  result.ok(ReferenceInputs {rows: rows, presentations: presentations,
+    patches: patches, has_audio: audio_count != 0})
+}
+
+fn clean_scratch(scratch: str) -> unit effects {alloc,fs.write} {
+  let _ = files.remove(path.join(scratch, "frames.rgb"))
+  let _ = files.remove(path.join(scratch, "audio.wav"))
+  let _ = files.remove(scratch)
+  ()
+}
+
+fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
+    effects {alloc,fs.meta,fs.read,fs.write,gpu,net,process,time} {
+  let started_ns=time.monotonic_ns()
+  let checkpoint_root: string = match job.model {
+    Base => text.copy(str.view(struct.borrow(job, field=checkpoint_root))),
+    Reference => {
+      let selected: string = text.copy(str.view(struct.borrow(job,
+        field=reference_checkpoint_root)))
+      if str.len(str.view(selected)) == 0 {
+        return outcome(false, str.view(struct.borrow(job, field=output)),
+          "Set MM_AIR_H3_REFERENCE_ROOT for the Ref2VA checkpoint")
+      }
+      selected
+    },
+  }
+  let donor_root: string = text.copy(
+    str.view(struct.borrow(job, field=donor_root)))
+  let manifests: string = text.copy(
+    str.view(struct.borrow(job, field=manifest_root)))
+  let output_path: string = text.copy(str.view(struct.borrow(job, field=output)))
+  if (job.model == session.Model.Reference) !=
+     (job.task == session.Task.Ref2VA) {
+    return outcome(false, str.view(output_path),
+      "MiniMax-H3 Reference and Ref2VA must be selected together")
+  }
+  if job.model == session.Model.Base and
+     array.len(struct.borrow(job, field=audio_references)) != 0 {
+    return outcome(false, str.view(output_path),
+      "MiniMax-H3 Base tasks do not accept audio references")
+  }
+  if job.model == session.Model.Reference and
+     array.len(struct.borrow(job, field=references)) == 0 {
+    return outcome(false, str.view(output_path),
+      "MiniMax-H3 Ref2VA needs at least one image or video reference; audio references cannot stand alone")
+  }
+  if job.evaluations != 7 and job.evaluations != 19 and
+     not (job.evaluations == 4 and job.model == session.Model.Reference) {
+    return outcome(false, str.view(output_path),
+      "MiniMax-H3 needs the seven- or nineteen-evaluation schedule, or four for Ref2VA turbo")
+  }
+  match parameters.validate_loras(struct.borrow(job,field=loras)) {
+    ok(_) => {},
+    err(message) => { return outcome(false,str.view(output_path),str.view(message)) },
+  }
+  var adapter_requests: array<h3_lora.Request> = []
+  let adapter_entries = struct.borrow(job,field=loras)
+  var adapter_index: u64 = 0
+  loop {
+    if adapter_index >= array.len(adapter_entries) { break }
+    let entry = array.borrow(adapter_entries,adapter_index)
+    if entry.enabled {
+      array.push(adapter_requests,h3_lora.Request {
+        path:string.copy(struct.borrow(entry,field=path)),
+        strength:cast.float(entry.strength)})
+    }
+    adapter_index = adapter_index + 1
+  }
+  let has_adapter: bool = array.len(adapter_requests) != 0
+  if has_adapter and job.model != session.Model.Base {
+    return outcome(false,str.view(output_path),
+      "H3 LoRA currently supports MiniMax-H3 Base tasks, not Ref2VA")
+  }
+  if has_adapter and (job.transformer_projection == session.Projection.ConvRotI8 or
+      job.transformer_projection == session.Projection.ConvRotI8Streaming) {
+    return outcome(false,str.view(output_path),
+      "H3 LoRA requires Exact BF16 or Row-scaled INT8 transformer projection")
+  }
+  let windowed:bool=job.window_frames<job.geometry.frames
+  let motion_context_enabled=str.len(struct.borrow(job,field=motion_context_path))!=0
+  if has_adapter and (windowed or motion_context_enabled) {
+    return outcome(false,str.view(output_path),
+      "H3 LoRA does not yet support latent windowing or Motion Context")
+  }
+  // Keep format admission ahead of tokenizer/model/GPU setup. A bad adapter is
+  // a CPU-classified application failure, not a late provider string.
+  var admission_index: u64 = 0
+  loop {
+    if admission_index >= array.len(adapter_requests) { break }
+    let adapter: ref<h3_lora.Request> = array.borrow(adapter_requests,
+      admission_index)
+    let adapter_path: string = string.copy(struct.borrow(adapter, field=path))
+    var admission: Outcome = inspect_h3_lora(str.view(adapter_path),
+      struct.borrow(job, field=scratch_root))
+    if not admission.succeeded {
+      return outcome(false, str.view(output_path),
+        struct.borrow(admission, field=message))
+    }
+    admission_index = admission_index + 1
+  }
+  if windowed and (job.model!=session.Model.Base or job.masked) {
+    return outcome(false,str.view(output_path),
+      "Native H3 latent windowing currently supports unmasked Base tasks")
+  }
+  let scratch_name: string = text.concat("mm-air-h3-",
+    str.view(string.from_int(time.monotonic_ns())))
+  let scratch: string = path.join(
+    str.view(struct.borrow(job, field=scratch_root)), str.view(scratch_name))
+  match files.mkdirs(str.view(scratch)) {
+    ok(_) => {},
+    err(_) => { return outcome(false, str.view(output_path),
+      "Cannot create MM-Air H3 scratch directory") },
+  }
+
+  report(sender, "Loading the linked AIR H3 session")
+  var state: tokenizer.Tokenizer = match tokenizer.load(
+      str.view(joined(str.view(checkpoint_root), "text_encoder"))) {
+    ok(value) => value,
+    err(_) => { clean_scratch(str.view(scratch))
+      return outcome(false, str.view(output_path),
+        "Cannot load the MiniMax-H3 tokenizer") },
+  }
+  var reference_surfaces: array<draw.Surface> = array.new()
+  if job.model == session.Model.Base {
+    var reference_index: u64 = 0
+    loop {
+      if reference_index >= array.len(struct.borrow(job, field=references)) { break }
+      let reference_path: str = str.view(array.borrow(
+        struct.borrow(job, field=references), reference_index))
+      if media_input.classify_path(reference_path) != media_input.Kind.Image {
+        clean_scratch(str.view(scratch))
+        return outcome(false, str.view(output_path),
+          "MiniMax-H3 Base keyframes must be images")
+      }
+      var surface: draw.Surface = match media_io.frame(reference_path,
+          str.view(scratch), 0, 0) {
+        ok(value) => value,
+        err(problem) => { clean_scratch(str.view(scratch))
+          return outcome(false, str.view(output_path), str.view(problem)) },
+      }
+      // The creator stretches the first keyframe directly onto the requested
+      // canvas and cover-crops the last keyframe through the same PIL-exact
+      // Lanczos kernel.
+      var prepared: draw.Surface = match image_input.prepare_keyframe(surface,
+          job.geometry.width, job.geometry.height, reference_index == 0) {
+        ok(value) => value,
+        err(problem) => { clean_scratch(str.view(scratch))
+          return outcome(false, str.view(output_path), str.view(problem)) },
+      }
+      array.push(reference_surfaces, prepared)
+      reference_index = reference_index + 1
+    }
+  }
+
+  var deployment_roots: h3_deployment.Roots = h3_deployment.Roots {
+    checkpoint_root: text.copy(str.view(checkpoint_root)), donor_root: text.copy(str.view(donor_root)),
+    manifest_root: text.copy(str.view(manifests))}
+  var sources: session.Sources = h3_deployment.sources(deployment_roots, job.model, job.task,
+    job.evaluations, motion_context_enabled, job.timing, job.schedule_kind)
+
+  var context: GpuContext = match agpu.open(0) {
+    ok(value) => value,
+    err(problem) => { clean_scratch(str.view(scratch))
+      return outcome(false, str.view(output_path), problem.message) },
+  }
+  var stream: GpuStream = match agpu.compute_stream(context) {
+    ok(value) => value,
+    err(problem) => { let _ = agpu.close(context)
+      clean_scratch(str.view(scratch))
+      return outcome(false, str.view(output_path), problem.message) },
+  }
+  if job.model == session.Model.Base {
+    report(sender, "Denoising MiniMax-H3 in AIR")
+  } else {
+    report(sender, "Preparing MiniMax-H3 references")
+  }
+  var drift_settings=job.drift_control
+  var result: result<unit,session.Error> = if job.model == session.Model.Base {
+    if motion_context_enabled { session.run_motion_context_to_mp4_geometry(
+      context,stream,sources,state,str.view(struct.borrow(job,field=prompt)),
+      str.view(struct.borrow(job,field=motion_context_path)),
+      job.motion_context_frames,job.motion_output_frames,job.geometry,job.seed,
+      job.conditioner_projection,job.transformer_projection,job.attention,
+      job.evaluations,str.view(scratch),str.view(output_path),job.schedule_kind,
+      drift_settings,sender)
+    } else if windowed { session.run_windowed_to_mp4_geometry(
+      context,stream,sources,state,str.view(struct.borrow(job,field=prompt)),
+      job.task,reference_surfaces,job.geometry,job.seed,
+      job.conditioner_projection,job.transformer_projection,job.attention,
+      job.evaluations,job.window_frames,job.window_overlap_frames,
+      str.view(scratch),str.view(output_path),job.schedule_kind,sender)
+    } else { session.run_to_mp4_geometry_loras(
+      context, stream, sources, state,
+      str.view(struct.borrow(job, field=prompt)), job.model, job.task,
+      reference_surfaces, job.geometry, job.seed, job.conditioner_projection,
+      job.transformer_projection, job.attention, job.evaluations,
+      str.view(scratch), str.view(output_path), job.schedule_kind,
+      adapter_requests,sender) }
+  } else {
+    var inputs: ReferenceInputs = match prepare_ref2va_inputs(context, stream,
+        job, sources, str.view(checkpoint_root), str.view(manifests),
+        str.view(scratch), sender) {
+      ok(value) => value,
+      err(problem) => {
+        let gpu_message: string = agpu.message(context)
+        var gpu_facts: agpu.Properties = agpu.properties(context)
+        let _ = agpu.close_stream(stream)
+        let _ = agpu.close(context)
+        clean_scratch(str.view(scratch))
+        var message: string = problem
+        if str.len(gpu_message) != 0 {
+          string.append(message, "; GPU: ")
+          string.append(message, str.view(gpu_message))
+        }
+        string.append(message, "; allocated=")
+        string.append(message, str.view(string.from_int(
+          gpu_facts.allocated_bytes / 1048576)))
+        string.append(message, " MiB peak=")
+        string.append(message, str.view(string.from_int(
+          gpu_facts.peak_allocated_bytes / 1048576)))
+        string.append(message, " MiB free=")
+        string.append(message, str.view(string.from_int(
+          gpu_facts.free_memory / 1048576)))
+        string.append(message, " MiB")
+        return outcome(false, str.view(output_path), str.view(message))
+      },
+    }
+    // Ref2VA always has visual conditioning. The donor has separate
+    // sorted-local modulation tables for visual-only (three slots) and mixed
+    // visual/audio (four slots). Select only after media intake has established
+    // whether a video carries a soundtrack.
+    if inputs.has_audio {
+      let _ = ref.swap(struct.borrow(struct.borrow(sources, field=transformer),
+        field=modulation_checkpoint),
+        h3_deployment.ref2va_audio_modulation(deployment_roots, job.evaluations, job.schedule_kind))
+    }
+    report(sender, "Denoising MiniMax-H3 in AIR")
+    if job.masked_denoise {
+      session.run_ref2va_masked_to_mp4_geometry(context, stream, sources, state,
+        str.view(struct.borrow(job, field=prompt)),
+        struct.borrow(inputs, field=rows),
+        struct.borrow(inputs, field=presentations),
+        struct.borrow(inputs, field=patches),
+        array.view(struct.borrow(job, field=masked_token_weights)),
+        job.geometry, job.seed, job.conditioner_projection,
+        job.transformer_projection, job.attention, job.evaluations,
+        str.view(scratch), str.view(output_path), job.schedule_kind, sender)
+    } else {
+      session.run_ref2va_to_mp4_geometry(context, stream, sources, state,
+        str.view(struct.borrow(job, field=prompt)),
+        struct.borrow(inputs, field=rows),
+        struct.borrow(inputs, field=presentations),
+        struct.borrow(inputs, field=patches), job.geometry, job.seed,
+        job.conditioner_projection, job.transformer_projection, job.attention,
+        job.evaluations, str.view(scratch), str.view(output_path),
+        job.schedule_kind, sender)
+    }
+  }
+  // Provider diagnostics and counters belong to the live context. Snapshot
+  // them before teardown so a UI failure reports the real allocation boundary.
+  let gpu_message: string = agpu.message(context)
+  var gpu_facts: agpu.Properties = agpu.properties(context)
+  let _ = agpu.close_stream(stream)
+  let _ = agpu.close(context)
+  clean_scratch(str.view(scratch))
+  let runtime_ms=(time.monotonic_ns()-started_ns)/1000000
+  match result {
+    ok(_) => {
+      if character_sheet.valid(job.character_sheet_mode) {
+        report(sender,"Extracting and stitching H3 character-sheet panels")
+        match character_sheet.from_video(str.view(output_path),
+            struct.borrow(job,field=scratch_root),
+            struct.borrow(job,field=character_sheet_output),
+            job.character_sheet_mode) {
+          ok(_) => outcome_metrics(true,struct.borrow(job,field=character_sheet_output),
+            "H3 character-sheet PNG and source MP4 saved",runtime_ms,
+            gpu_facts.peak_allocated_bytes),
+          err(problem) => outcome_metrics(false,str.view(output_path),text.concat(
+            "H3 MP4 saved, but character-sheet stitching failed: ",problem),
+            runtime_ms,gpu_facts.peak_allocated_bytes),
+        }
+      } else {
+        outcome_metrics(true,str.view(output_path),"MiniMax-H3 MP4 saved",
+          runtime_ms,gpu_facts.peak_allocated_bytes)
+      }
+    },
+    err(problem) => { var owned: session.Error = problem
+      var message: string = session.error_message(owned)
+      if str.len(gpu_message) != 0 {
+        string.append(message, "; GPU: ")
+        string.append(message, str.view(gpu_message))
+      }
+      string.append(message, "; allocated=")
+      string.append(message, str.view(string.from_int(
+        gpu_facts.allocated_bytes / 1048576)))
+      string.append(message, " MiB peak=")
+      string.append(message, str.view(string.from_int(
+        gpu_facts.peak_allocated_bytes / 1048576)))
+      string.append(message, " MiB free=")
+      string.append(message, str.view(string.from_int(
+        gpu_facts.free_memory / 1048576)))
+      string.append(message, " MiB")
+      outcome_metrics(false,str.view(output_path),str.view(message),runtime_ms,
+        gpu_facts.peak_allocated_bytes) },
+  }
+}
+
+// Static task body used by task.spawn. The Job contains only plain owned data;
+// GPU and channel handles are opened inside the worker.
+fn run_outpaint(job:ref<Job>,sender:ref<option<channel.Sender>>)->Outcome
+    effects{alloc,fs.meta,fs.read,fs.write,gpu,net,process,time}{
+  let final_output=string.copy(struct.borrow(job,field=output))
+  if job.model!=session.Model.Reference or job.task!=session.Task.Ref2VA or
+     array.len(struct.borrow(job,field=references))==0{
+    return outcome(false,str.view(final_output),
+      "Video Outpaint requires MiniMax H3 Reference, Ref2VA and a source video")
+  }
+  let source=string.copy(array.borrow(struct.borrow(job,field=references),0))
+  let settings=job.outpaint_settings
+  var info=match outpaint_runtime.inspect(str.view(source),
+      struct.borrow(job,field=scratch_root)){
+    ok(value)=>value,
+    err(message)=>{return outcome(false,str.view(final_output),message)}}
+  var geometry=match outpaint.geometry(info.width,info.height,
+      settings.target_width,settings.target_height,settings.direction,
+      settings.anchor){
+    ok(value)=>value,
+    err(message)=>{return outcome(false,str.view(final_output),message)}}
+  var plan=match outpaint.window_plan(job.geometry.frames,settings.window_frames,
+      settings.overlap_frames){
+    ok(value)=>value,
+    err(message)=>{return outcome(false,str.view(final_output),message)}}
+  let planned_count=timeline.window_count(plan)
+  let run_count:u64=if settings.preview_first_window{1}else{planned_count}
+  let root=path.join(struct.borrow(job,field=scratch_root),text.concat(
+    "mm-air-outpaint-sequence-",str.view(string.from_int(time.monotonic_ns()))))
+  match files.create_dir(str.view(root)){ok(_)=>{},err(problem)=>{
+    return outcome(false,str.view(final_output),text.concat(
+      "Cannot create outpaint sequence directory: ",problem.message))}}
+  var outputs:array<string> = []
+  var owned_paths:array<string> = []
+  var previous_tail=string.new()
+  var index:u64=0
+  loop{if index>=run_count{break}
+    let window=array.borrow(struct.borrow(plan,field=windows),index)
+    let source_span=window.source_frames
+    let model_frames=timeline.span_length(window.model_frames)
+    let sliced=path.join(str.view(root),text.concat("source-",text.concat(
+      str.view(string.from_int(index)),".mp4")))
+    match outpaint_runtime.slice_source(str.view(source),str.view(sliced),
+        source_span,model_frames){
+      ok(_)=>{},err(message)=>{return outcome(false,str.view(final_output),message)}}
+    array.push(owned_paths,string.copy(str.view(sliced)))
+    let window_output=path.join(str.view(root),text.concat("window-",text.concat(
+      str.view(string.from_int(index)),".mp4")))
+    report(sender,text.concat("Preparing Video Outpaint window ",text.concat(
+      str.view(string.from_int(index+1)),text.concat("/",str.view(
+      string.from_int(run_count))))))
+    var prepared=match outpaint_runtime.prepare(str.view(sliced),
+        str.view(window_output),str.view(root),model_frames,
+        struct.borrow(job,field=outpaint_settings)){
+      ok(value)=>value,
+      err(message)=>{return outcome(false,str.view(final_output),message)}}
+    var references:array<string> = [outpaint_runtime.h3_source(prepared)]
+    if str.len(str.view(previous_tail))!=0{
+      array.push(references,string.copy(str.view(previous_tail)))
+    }
+    let _=ref.swap(struct.borrow(job,field=references),references)
+    let _=ref.swap(struct.borrow(job,field=audio_references),array.new())
+    let _=ref.swap(struct.borrow(job,field=output),outpaint_runtime.h3_output(prepared))
+    struct.set(job,outpaint_runtime.h3_geometry(prepared),field=geometry)
+    struct.set(job,true,field=masked)
+    struct.set(job,false,field=outpaint)
+    let _=ref.swap(struct.borrow(job,field=masked_token_weights),
+      outpaint_runtime.copy_token_weights(prepared))
+    struct.set(job,job.geometry.frames,field=window_frames)
+    struct.set(job,0,field=window_overlap_frames)
+    var generated=execute(job,sender)
+    if not generated.succeeded{
+      outpaint_runtime.discard(prepared)
+      return outcome(false,str.view(final_output),struct.borrow(generated,field=message))
+    }
+    report(sender,"Exact-compositing preserved source pixels and generated outer regions")
+    match outpaint_runtime.finish(prepared){
+      ok(_)=>{},err(message)=>{outpaint_runtime.discard(prepared)
+        return outcome(false,str.view(final_output),message)}}
+    outpaint_runtime.discard(prepared)
+    array.push(outputs,string.copy(str.view(window_output)))
+    array.push(owned_paths,string.copy(str.view(window_output)))
+    if index+1<run_count and plan.overlap_frames>0{
+      let tail=path.join(str.view(root),text.concat("tail-",text.concat(
+        str.view(string.from_int(index)),".mp4")))
+      let tail_first:u64=if model_frames>plan.overlap_frames{
+        model_frames-plan.overlap_frames}else{0}
+      let tail_span=timeline.Span{first:tail_first,end_exclusive:model_frames}
+      match outpaint_runtime.slice_visual_tail(str.view(window_output),str.view(tail),
+          tail_span,model_frames){ok(_)=>{},err(message)=>{
+        return outcome(false,str.view(final_output),message)}}
+      previous_tail=string.copy(str.view(tail))
+      array.push(owned_paths,tail)
+    }
+    index=index+1
+  }
+  if settings.preview_first_window or planned_count==1{
+    let delivery_frames=timeline.span_length(array.borrow(
+      struct.borrow(plan,field=windows),0).source_frames)
+    match outpaint_runtime.publish_window(array.borrow(outputs,0),str.view(source),
+        delivery_frames,str.view(final_output)){
+      ok(_)=>{},err(message)=>{return outcome(false,str.view(final_output),message)}}
+  }else{
+    match outpaint_runtime.stitch(outputs,plan,str.view(source),str.view(final_output)){
+      ok(_)=>{},err(message)=>{return outcome(false,str.view(final_output),message)}}
+  }
+  let carry=if planned_count>1{"decoded-tail-reference"}else{"single-window"}
+  var metadata=match outpaint.sidecar(geometry,str.view(source),
+      struct.borrow(job,field=prompt),job.seed,plan.requested_frames,
+      plan.window_frames,plan.overlap_frames,settings.composite_mode,
+      settings.seam_width,settings.preserve_audio,carry,
+      cast.wrap(settings.qwen_model),job.evaluations,
+      projection_id(job.conditioner_projection),
+      projection_id(job.transformer_projection),attention_id(job.attention),
+      schedule_id(job.schedule_kind)){
+    ok(value)=>value,err(message)=>{return outcome(false,str.view(final_output),message)}}
+  let sidecar=text.concat(str.view(final_output),".outpaint.json")
+  match files.write_atomic(str.view(sidecar),text.concat(str.view(sidecar),".tmp"),
+      str.view(metadata)){ok(_)=>{},err(problem)=>{
+    return outcome(false,str.view(final_output),text.concat(
+      "Outpaint media saved but metadata failed: ",problem.message))}}
+  index=0
+  loop{if index>=array.len(owned_paths){break}
+    let _=files.remove(array.borrow(owned_paths,index))
+    index=index+1}
+  let _=files.remove(str.view(root))
+  outcome(true,str.view(final_output),if settings.preview_first_window{
+    "Video Outpaint first-window preview saved"}else{
+    "Native H3 Video Outpaint completed with source audio preserved"})
+}
+
+fn track_repair_target(job:ref<Job>,prepared:ref<repair_runtime.Prepared>)
+    ->result<unit,string>
+    effects{alloc,fs.meta,fs.read,fs.write,gpu,process,time}{
+  if not job.two_matte{return result.ok(())}
+  var target_job=auto_mask.Job{
+    plugin:string.copy(struct.borrow(job,field=sam3_plugin)),
+    model:string.copy(struct.borrow(job,field=sam3_model)),
+    source:repair_runtime.h3_output(prepared),prompt:string.copy("person"),
+    raw_output:repair_runtime.target_mask_raw(prepared),
+    preview_output:repair_runtime.target_mask_preview(prepared),
+    frames:repair_runtime.generated_frames(prepared)}
+  var tracked=auto_mask.run(target_job)
+  if not tracked.succeeded{return result.err(text.concat(
+    "Generated repair subject mask failed: ",
+    struct.borrow(tracked,field=message)))}
+  repair_runtime.set_target_mask(prepared,
+    struct.borrow(tracked,field=mask_path))
+}
+
+// Rolling repair keeps only one bounded H3 generation resident at a time.
+// Each completed exact full-length splice becomes the next window's source;
+// overlap is therefore owned by the later window and no global H3 rerender occurs.
+fn run_rolling_repair(job:ref<Job>,made:ref<repair_plan.RepairPlan>,
+                      sender:ref<option<channel.Sender>>)->Outcome
+    effects{alloc,env,fs.meta,fs.read,fs.write,gpu,net,process,time}{
+  let final_output=string.copy(struct.borrow(job,field=output))
+  // Copy scalar configuration before mutating the job. AIR views are live
+  // borrows, so retaining repair_settings across the loop would prevent the
+  // per-window geometry/output/reference swaps below.
+  let repair_dilation=struct.borrow(job,field=repair_settings).dilation
+  let rolling_limit_frames=struct.borrow(job,field=repair_settings).rolling_limit_frames
+  let rolling_overlap_frames=struct.borrow(job,field=repair_settings).rolling_overlap_frames
+  let motion_plan_json=string.copy(struct.borrow(struct.borrow(job,
+    field=repair_settings),field=motion_plan_json))
+  let spatial_mask_path=string.copy(struct.borrow(struct.borrow(job,
+    field=repair_settings),field=spatial_mask_path))
+  let spatial_cleanup=struct.borrow(job,field=repair_settings).spatial_cleanup
+  let spatial_feather=struct.borrow(job,field=repair_settings).spatial_feather
+  let spatial_expand=struct.borrow(job,field=repair_settings).spatial_expand
+  let scratch_root=string.copy(struct.borrow(job,field=scratch_root))
+  var current_source=string.copy(array.borrow(
+    struct.borrow(job,field=references),0))
+  let root=path.join(str.view(scratch_root),text.concat(
+    "mm-air-rolling-repair-",str.view(string.from_int(time.monotonic_ns()))))
+  match files.create_dir(str.view(root)){ok(_)=>{},err(problem)=>{
+    return outcome(false,str.view(final_output),text.concat(
+      "Cannot create rolling repair directory: ",problem.message))}}
+  var owned_intermediates:array<string> = []
+  var total_runtime_ms:u64=0
+  var peak_vram_bytes:u64=0
+  var entry_delta:f64=0.0
+  var exit_delta:f64=0.0
+  var index:u64=0
+  let count=array.len(struct.borrow(made,field=windows))
+  loop{if index>=count{break}
+    let window_source_first=array.borrow(struct.borrow(made,field=windows),
+      index).source.first
+    let window_source_end=array.borrow(struct.borrow(made,field=windows),
+      index).source.end_exclusive
+    var message=string.copy("H3 rolling repair window ")
+    string.append(message,str.view(string.from_int(index+1)))
+    string.append(message,"/")
+    string.append(message,str.view(string.from_int(count)))
+    report(sender,str.view(message))
+    let window_output=if index+1==count{string.copy(str.view(final_output))}
+      else{path.join(str.view(root),text.concat("assembled-",text.concat(
+        str.view(string.from_int(index)),".mp4")))}
+    let local_bad_first=if index==0{made.bad.first}else{window_source_first}
+    let local_bad_end=if index+1==count{made.bad.end_exclusive}
+      else{window_source_end}
+    var local=repair_runtime.settings(local_bad_first,local_bad_end,
+      local_bad_first-window_source_first,
+      window_source_end-local_bad_end,repair_dilation,
+      repair_plan.MemoryMode.Full,rolling_limit_frames,
+      rolling_overlap_frames)
+    if str.len(str.view(motion_plan_json))!=0{
+      let _=ref.swap(struct.borrow(local,field=motion_plan_json),
+        string.copy(str.view(motion_plan_json)))}
+    if str.len(str.view(spatial_mask_path))!=0{
+      match repair_runtime.set_spatial_mask(local,str.view(spatial_mask_path),
+          spatial_cleanup,spatial_feather,spatial_expand){
+        ok(_)=>{},err(problem)=>{return outcome(false,str.view(final_output),problem)}}
+    }
+    var prepared=match repair_runtime.prepare(str.view(current_source),
+        str.view(window_output),str.view(scratch_root),local){
+      ok(value)=>value,err(problem)=>{
+        return outcome(false,str.view(final_output),problem)},
+    }
+    let prepared_geometry=repair_runtime.h3_geometry(prepared)
+    struct.set(job,prepared_geometry,field=geometry)
+    // Repair changes the active H3 geometry after the job was constructed.
+    // Keep the ordinary single-window terminal in lockstep with that geometry;
+    // otherwise a longer held reference is misclassified as latent windowing.
+    struct.set(job,prepared_geometry.frames,field=window_frames)
+    struct.set(job,0,field=window_overlap_frames)
+    let _=ref.swap(struct.borrow(job,field=output),
+      repair_runtime.h3_output(prepared))
+    let _=ref.swap(array.borrow(struct.borrow(job,field=references),0),
+      repair_runtime.h3_source(prepared))
+    struct.set(job,false,field=repair)
+    var generated=execute(job,sender)
+    total_runtime_ms=total_runtime_ms+generated.runtime_ms
+    if generated.peak_vram_bytes>peak_vram_bytes{
+      peak_vram_bytes=generated.peak_vram_bytes}
+    if not generated.succeeded{
+      repair_runtime.discard(prepared)
+      return outcome(false,str.view(final_output),
+        struct.borrow(generated,field=message))
+    }
+    if job.two_matte{
+      report(sender,"Tracking the generated repair subject for two-matte compositing")
+      match track_repair_target(job,prepared){ok(_)=>{},err(problem)=>{
+        repair_runtime.discard(prepared)
+        return outcome(false,str.view(final_output),problem)}}}
+    match repair_runtime.finish_diagnostics(prepared,
+        struct.borrow(job,field=timing),total_runtime_ms,peak_vram_bytes){
+      ok(metrics)=>{
+        if index==0{entry_delta=metrics.entry_delta}
+        if index+1==count{
+          exit_delta=metrics.exit_delta
+          match repair_runtime.rewrite_diagnostics(prepared,made,
+              struct.borrow(job,field=timing),total_runtime_ms,
+              peak_vram_bytes,entry_delta,exit_delta){ok(_)=>{},err(problem)=>{
+            repair_runtime.discard(prepared)
+            return outcome(false,str.view(final_output),problem)}}
+        }
+      },err(problem)=>{
+      repair_runtime.discard(prepared)
+      return outcome(false,str.view(final_output),problem)}}
+    repair_runtime.discard(prepared)
+    if index+1<count{
+      array.push(owned_intermediates,string.copy(str.view(window_output)))
+      current_source=string.copy(str.view(window_output))
+    }
+    index=index+1
+  }
+  index=0
+  loop{if index>=array.len(owned_intermediates){break}
+    let _=files.remove(array.borrow(owned_intermediates,index))
+    let sidecar=text.concat(array.borrow(owned_intermediates,index),
+      ".repair.json")
+    let _=files.remove(str.view(sidecar))
+    index=index+1}
+  let _=files.remove(str.view(root))
+  outcome_metrics(true,str.view(final_output),
+    "Native H3 rolling repair completed; each window was exact-spliced and source audio preserved",
+    total_runtime_ms,peak_vram_bytes)
+}
+
+pub fn run(source: Job own) -> Outcome
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,net,process,time} {
+  var job: Job = source
+  var ticket: channel.Ticket = ref.swap(
+    struct.borrow(job, field=progress), no_progress())
+  var connection: channel.Sender = match channel.connect(ticket,
+      time.monotonic_ns() + 30000000000) {
+    ok(value) => value,
+    err(_) => { return outcome(false, str.view(struct.borrow(job, field=output)),
+      "Cannot connect the MM-Air H3 progress channel") },
+  }
+  var sender: option<channel.Sender> = option.some(connection)
+  if job.outpaint {
+    var finished=run_outpaint(job,sender)
+    finished=apply_seedvr2(job,finished,sender)
+    finish_progress(sender,finished)
+    return finished
+  }
+  if job.repair {
+    let repair_source=string.copy(array.borrow(
+      struct.borrow(job,field=references),0))
+    var info=match repair_runtime.inspect(str.view(repair_source),
+        struct.borrow(job,field=scratch_root)){
+      ok(value)=>value,err(message)=>{
+        var failed=outcome(false,struct.borrow(job,field=output),message)
+        finish_progress(sender,failed)
+        return failed
+      },
+    }
+    let source_settings=struct.borrow(job,field=repair_settings)
+    var made=match repair_plan.build(info.frames,source_settings.bad_first,
+        source_settings.bad_end_exclusive,source_settings.handle_before,
+        source_settings.handle_after,array.view(struct.borrow(source_settings,
+          field=shot_cuts)),info.width,info.height,source_settings.memory,
+        source_settings.rolling_limit_frames,
+        source_settings.rolling_overlap_frames,0.0){
+      ok(value)=>value,err(message)=>{
+        var failed=outcome(false,struct.borrow(job,field=output),message)
+        finish_progress(sender,failed)
+        return failed
+      },
+    }
+    if array.len(struct.borrow(made,field=windows))>1{
+      // Auto may resolve to Rolling only after source geometry is known.
+      // Give it the same bounded transformer residency as explicit Rolling.
+      struct.set(job,session.Projection.ConvRotI8Streaming,
+        field=transformer_projection)
+      var finished=run_rolling_repair(job,made,sender)
+      finished=apply_seedvr2(job,finished,sender)
+      finish_progress(sender,finished)
+      return finished
+    }
+  }
+  var repaired:option<repair_runtime.Prepared> = option.none()
+  if job.repair {
+    let final_output=string.copy(struct.borrow(job,field=output))
+    if array.len(struct.borrow(job,field=references))==0{
+      var failed=outcome(false,str.view(final_output),
+        "H3 Repair requires a source video")
+      finish_progress(sender,failed)
+      return failed
+    }
+    let source_video=string.copy(array.borrow(
+      struct.borrow(job,field=references),0))
+    let repair_scratch=string.copy(struct.borrow(job,field=scratch_root))
+    report(sender,"Planning the exact token-aligned repair window")
+    var made=match repair_runtime.prepare(str.view(source_video),
+        str.view(final_output),str.view(repair_scratch),
+        struct.borrow(job,field=repair_settings)){
+      ok(value)=>value,
+      err(message)=>{
+        var failed=outcome(false,str.view(final_output),message)
+        finish_progress(sender,failed)
+        return failed
+      },
+    }
+    report(sender,str.view(repair_runtime.description(made)))
+    let prepared_geometry=repair_runtime.h3_geometry(made)
+    struct.set(job,prepared_geometry,field=geometry)
+    // The prepared repair span can be longer than the source-world span after
+    // motion holds/dilation and H3 temporal snapping.  It is still one Ref2VA
+    // invocation, not Base latent windowing.
+    struct.set(job,prepared_geometry.frames,field=window_frames)
+    struct.set(job,0,field=window_overlap_frames)
+    let _=ref.swap(struct.borrow(job,field=output),repair_runtime.h3_output(made))
+    let _=ref.swap(array.borrow(struct.borrow(job,field=references),0),
+      repair_runtime.h3_source(made))
+    struct.set(job,false,field=repair)
+    repaired=option.some(made)
+  }
+  var prepared:option<masked_runtime.Prepared> = option.none()
+  if job.masked {
+    report(sender,"Preparing authored mask, stable crop and H3 latent influence geometry")
+    let source_video:string = if array.len(struct.borrow(job,field=references)) == 0 {
+      string.new()
+    } else {string.copy(array.borrow(struct.borrow(job,field=references),0))}
+    let final_output=string.copy(struct.borrow(job,field=output))
+    let scratch_root=string.copy(struct.borrow(job,field=scratch_root))
+    let source_settings=struct.borrow(job,field=masked_settings)
+    var settings=if source_settings.painted {
+      masked_runtime.paint_settings(masked_runtime.copy_brush_points(source_settings),
+        source_settings.cleanup,source_settings.feather,source_settings.expand,
+        source_settings.crop_strategy,source_settings.padding,
+        source_settings.preserve_outside)
+    } else {
+      masked_runtime.settings(struct.borrow(source_settings,field=mask_path),
+        source_settings.manual,source_settings.manual_x,source_settings.manual_y,
+        source_settings.manual_width,source_settings.manual_height,
+        source_settings.cleanup,source_settings.feather,source_settings.expand,
+        source_settings.crop_strategy,source_settings.padding,
+        source_settings.preserve_outside)
+    }
+    var made=match masked_runtime.prepare(str.view(source_video),str.view(final_output),
+        str.view(scratch_root),job.geometry.frames,settings) {
+      ok(value)=>value,
+      err(message)=>{var failed=outcome(false,str.view(final_output),message)
+        finish_progress(sender,failed)
+        return failed},
+    }
+    report(sender,str.view(masked_runtime.description(made)))
+    struct.set(job,masked_runtime.working_geometry(made),field=geometry)
+    var token_weights:array<f32> = array.new()
+    var token_index:u64 = 0
+    loop {
+      if token_index >= array.len(struct.borrow(struct.borrow(made,field=latent),
+          field=token_weights)) { break }
+      array.push(token_weights,array.get(struct.borrow(struct.borrow(made,
+        field=latent),field=token_weights),token_index))
+      token_index=token_index+1
+    }
+    let _=ref.swap(struct.borrow(job,field=masked_token_weights),token_weights)
+    let _=ref.swap(struct.borrow(job,field=output),
+      string.copy(struct.borrow(made,field=h3_output)))
+    let old_reference:string=ref.swap(array.borrow(
+      struct.borrow(job,field=references),0),
+      string.copy(struct.borrow(made,field=cropped_source)))
+    prepared=option.some(made)
+  }
+  var finished: Outcome = execute(job, sender)
+  match repaired {
+    some(value)=>{
+      var held=value
+      if finished.succeeded{
+        let repair_runtime_ms=finished.runtime_ms
+        let repair_peak_vram_bytes=finished.peak_vram_bytes
+        if job.two_matte{
+          report(sender,"Tracking the generated repair subject for two-matte compositing")
+          match track_repair_target(job,held){ok(_)=>{},err(message)=>{
+            finished=outcome(false,struct.borrow(held,field=final_output),message)}}}
+        if not finished.succeeded{
+          repair_runtime.discard(held)
+          finish_progress(sender,finished)
+          return finished
+        }
+        report(sender,"Exact-splicing the repaired frames and restoring source audio")
+        match repair_runtime.finish_diagnostics(held,
+            struct.borrow(job,field=timing),repair_runtime_ms,
+            repair_peak_vram_bytes){
+          ok(metrics)=>{
+            var message=string.copy("Native H3 repair completed; outside frames exact; seam MAD entry=")
+            string.append(message,str.view(string.from_float(metrics.entry_delta)))
+            string.append(message," exit=")
+            string.append(message,str.view(string.from_float(metrics.exit_delta)))
+            finished=outcome_metrics(true,struct.borrow(held,field=final_output),
+              str.view(message),repair_runtime_ms,repair_peak_vram_bytes)
+          },
+          err(message)=>{finished=outcome(false,
+            struct.borrow(held,field=final_output),message)},
+        }
+      }else{
+        finished=outcome(false,struct.borrow(held,field=final_output),
+          struct.borrow(finished,field=message))
+      }
+      repair_runtime.discard(held)
+    },
+    none=>{},
+  }
+  match prepared {
+    some(value)=>{
+      var held=value
+      if finished.succeeded and job.two_matte {
+        report(sender,"Tracking the generated replacement with native SAM 3")
+        var target_job=auto_mask.Job{
+          plugin:string.copy(struct.borrow(job,field=sam3_plugin)),
+          model:string.copy(struct.borrow(job,field=sam3_model)),
+          source:string.copy(struct.borrow(held,field=h3_output)),
+          prompt:string.copy("person"),
+          raw_output:string.copy(struct.borrow(held,field=target_mask_raw)),
+          preview_output:string.copy(struct.borrow(held,field=target_mask_preview)),
+          frames:held.frames}
+        var target=auto_mask.run(target_job)
+        if not target.succeeded {
+          finished=outcome(false,struct.borrow(held,field=final_output),
+            text.concat("Generated-subject SAM 3 mask failed: ",
+              struct.borrow(target,field=message)))
+        } else {
+          report(sender,"Generating the clean background behind the old silhouette")
+          let background_prompt=masked_background_prompt()
+          let _=ref.swap(struct.borrow(job,field=prompt),background_prompt)
+          let _=ref.swap(struct.borrow(job,field=output),
+            string.copy(struct.borrow(held,field=background_output)))
+          var background_references:array<string> = [
+            string.copy(struct.borrow(held,field=cropped_source))]
+          let _=ref.swap(struct.borrow(job,field=references),background_references)
+          var no_weights:array<f32> = []
+          let _=ref.swap(struct.borrow(job,field=masked_token_weights),no_weights)
+          struct.set(job,false,field=masked)
+          struct.set(job,false,field=masked_denoise)
+          finished=execute(job,sender)
+          if finished.succeeded {
+            report(sender,"Compositing reconstructed background and replacement under separate native mattes")
+            match masked_runtime.finish_two_matte(held) {
+              ok(_)=>{finished=outcome(true,struct.borrow(held,field=final_output),
+                "Linked AIR H3 two-matte edit completed; old silhouette removed and source outside the authored region preserved")},
+              err(message)=>{finished=outcome(false,struct.borrow(held,field=final_output),message)},
+            }
+          } else {
+            finished=outcome(false,struct.borrow(held,field=final_output),
+              text.concat("Background reconstruction failed: ",
+                struct.borrow(finished,field=message)))
+          }
+        }
+      } else if finished.succeeded {
+        report(sender,"Compositing the localized H3 crop under the authored soft mask")
+        match masked_runtime.finish(held) {
+          ok(_)=>{finished=outcome(true,struct.borrow(held,field=final_output),
+            "Linked AIR H3 masked edit completed; authored mask preserved the source outside its influence")},
+          err(message)=>{finished=outcome(false,struct.borrow(held,field=final_output),message)},
+        }
+      } else {
+        finished=outcome(false,struct.borrow(held,field=final_output),
+          struct.borrow(finished,field=message))
+      }
+      masked_runtime.discard(held)
+    },
+    none=>{},
+  }
+  finished=apply_seedvr2(job,finished,sender)
+  finish_progress(sender,finished)
+  finished
+}

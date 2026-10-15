@@ -1,0 +1,54 @@
+module app.mm_air.tests.native_krea_cancel
+import "../generate.ai" as generation
+import "../parameters.ai" as parameters
+import "../.air/deps/krea2/session.ai" as krea
+import std.channel as channel
+import std.tasks as tasks
+import std.system as system
+import std.path as path
+import std.text as text
+import std.files as files
+
+// Execute the real CK worker and its channel/task lifetime. A pre-raised signal
+// must finish before model intake, without requiring or producing model assets.
+pub fn main(args:view<str>)->i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
+  let root=path.join(system.temp_directory(),text.concat("mm-air-worker-cancel-",
+    string.from_int(time.monotonic_ns())))
+  let output=text.concat(root,".png")
+  var token=match tasks.token(root){ok(value)=>value,err(_)=>{return 1},}
+  if not tasks.request(token){return 2}
+  var receiver=match channel.open(128,1024){ok(value)=>value,err(_)=>{
+    let _=tasks.release(token)
+    return 3},}
+  var request=parameters.KreaRequest{prompt:"A robot in a garden",seed:42,
+    width:1024,height:1024,output:string.copy(output),loras:[]}
+  var sources=krea.Sources{model_checkpoint:"missing.safetensors",qwen_index:"missing.json",
+    tokenizer_directory:"missing",vae_checkpoint:"missing-vae.safetensors",
+    vae_config:"missing-vae.json",manifest_directory:"missing"}
+  var work=generation.KreaCancelableJob{
+    job:generation.KreaJob{sources:sources,request:request,progress:channel.ticket(receiver)},
+    cancel_path:root}
+  var code:i32=4
+  var updates:u64=0
+  task.scope {
+    var jobs:array<task<generation.Outcome>> = [
+      task.spawn(work,fn=generation.run_krea_ck_cancelable)]
+    loop{
+      match channel.recv_now(receiver,time.monotonic_ns()){
+        ok(value)=>match value{some(_)=>{updates=updates+1},none=>{},},err(_)=>{},
+      }
+      match task.wait_any(jobs,0){some(_)=>{
+        var finished=task.join(option.unwrap(array.pop(jobs)))
+        if not finished.succeeded and finished.message=="Generation cancelled"{code=0}
+        break
+      },none=>{time.sleep_ms(10)},}
+    }
+  }
+  let _=channel.close(receiver)
+  let _=tasks.release(token)
+  if updates==0{return 5}
+  if match files.exists(output){ok(value)=>value,err(_)=>true,}{return 6}
+  if code==0{io.write("Native Krea CK worker cancellation, progress and teardown passed\n")}
+  code
+}

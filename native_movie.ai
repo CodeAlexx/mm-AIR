@@ -1,0 +1,203 @@
+// Native Movie project editing over the shared Linux project/shot contract.
+module app.mm_air.native_movie
+import std.widgets as w
+import std.text as text
+import std.math as math
+import std.path as path
+import "movie_project.ai" as movie
+import ".air/deps/h3/request.ai" as h3
+
+// Match Movie Maker's routing: continuation, cast/reference, then keyframes.
+pub fn request(project:ref<movie.Project>,index:u64,output:str)->result<h3.Request,string> effects{alloc}{
+  if index>=array.len(struct.borrow(project,field=shots)){return result.err("Select a shot to generate")}
+  var shot=movie.snapshot_shot(project,index)
+  try movie.validate(shot)
+  if shot.locked{return result.err("Unlock the approved shot before generating another take")}
+  var references=movie.effective_references(project,index)
+  var model=h3.model_base()
+  var task=h3.task_t2va()
+  if struct.borrow(shot,field=continue_from)!=""{references=[]}
+  else{if array.len(references)!=0{model=h3.model_reference()
+    task=h3.task_ref2va()}
+  else{
+    let first=struct.borrow(shot,field=first_frame)!=""
+    let last=struct.borrow(shot,field=last_frame)!=""
+    if first{array.push(references,string.copy(struct.borrow(shot,field=first_frame)))}
+    if last{array.push(references,string.copy(struct.borrow(shot,field=last_frame)))}
+    task=if first and last{h3.task_fl2va()}else{if first{h3.task_i2va()}else{if last{h3.task_l2va()}else{h3.task_t2va()}}}
+  }}
+  var value=h3.request(movie.compile_project_prompt(project,index),model,task,
+    h3.profile_dc_euler_19(),h3.projection_convrot_int8(),h3.projection_convrot_int8(),
+    h3.attention_ck_int8(),shot.seed,h3.resolution_custom(),references,output)
+  match h3.set_geometry(value,shot.width,shot.height,shot.duration){ok(_)=>{},err(problem)=>{var held=problem
+    return result.err(h3.describe(held))},}
+  match h3.validate(value){ok(_)=>result.ok(value),err(problem)=>{var held=problem
+    result.err(h3.describe(held))},}
+}
+
+pub fn generating(ui:ref<w.Ui>,busy:bool)->unit effects{}{
+  var key:u64=9002
+  loop{if key>9059{break}
+    let node=w.find(ui,key)
+    if key!=9034 and node!=0{w.enable(ui,node,not busy)}
+    key=key+1}
+  ()
+}
+
+pub type ExportJob=struct{project:string,output:string,scratch:string}
+pub type ExportOutcome=struct{succeeded:bool,message:string,output:string}
+pub fn export_movie(job:ExportJob own)->ExportOutcome
+    effects{alloc,env,fs.meta,fs.write,process,time}{
+  var work=job
+  var project=match movie.decode(string.copy(struct.borrow(work,field=project))){
+    ok(value)=>value,err(problem)=>{return ExportOutcome{succeeded:false,message:problem,
+      output:string.copy(struct.borrow(work,field=output))}},}
+  match movie.stitch(project,struct.borrow(work,field=output),struct.borrow(work,field=scratch)){
+    ok(_)=>ExportOutcome{succeeded:true,message:text.concat("Movie exported: ",struct.borrow(work,field=output)),
+      output:string.copy(struct.borrow(work,field=output))},
+    err(problem)=>ExportOutcome{succeeded:false,message:problem,
+      output:string.copy(struct.borrow(work,field=output))},
+  }
+}
+
+pub fn active(ui:ref<w.Ui>)->bool effects{}{w.checked_of(ui,w.find(ui,63))}
+pub fn fields(ui:ref<w.Ui>,parent:u64)->unit effects{alloc}{
+  let panel=w.panel(ui,9000,parent,true,0,1,8,0)
+  let bar=w.toolbar(ui,9001,panel,34,8,0)
+  let _=w.button(ui,9002,bar,140,"Open project")
+  let _=w.button(ui,9003,bar,140,"Save project")
+  let _=w.button(ui,9004,bar,110,"Add shot")
+  let _=w.button(ui,9005,bar,120,"Duplicate")
+  let _=w.button(ui,9006,bar,110,"Delete shot")
+  let _=w.label(ui,9007,panel,24,"Project title")
+  let _=w.field(ui,9008,panel,30,"")
+  let body=w.panel(ui,9009,panel,false,0,1,12,0)
+  let shots=w.panel(ui,9010,body,true,230,0,8,0)
+  let _=w.label(ui,9011,shots,24,"Shots")
+  let _=w.list(ui,9012,shots,0,1)
+  let _=w.label(ui,9030,shots,24,"Takes for selected shot")
+  let _=w.list(ui,9031,shots,160,0)
+  let _=w.button(ui,9032,shots,32,"Import finished take")
+  let _=w.button(ui,9033,shots,32,"Use selected take")
+  let _=w.button(ui,9034,shots,32,"Export movie")
+  let _=w.button(ui,9035,shots,36,"Generate H3 take · CK INT8")
+  let _=w.button(ui,9036,shots,30,"Choose first frame")
+  let _=w.button(ui,9037,shots,30,"Choose last frame")
+  let _=w.button(ui,9038,shots,30,"Clear frame references")
+  let _=w.button(ui,9039,shots,30,"Continue selected take")
+  let editor=w.panel(ui,9013,body,true,0,1,6,0)
+  let _=w.label(ui,9014,editor,24,"Shot title")
+  let _=w.field(ui,9015,editor,30,"")
+  let geometry=w.panel(ui,9040,editor,false,56,0,8,0)
+  let duration=w.panel(ui,9041,geometry,true,0,1,2,0)
+  let width=w.panel(ui,9042,geometry,true,0,1,2,0)
+  let height=w.panel(ui,9043,geometry,true,0,1,2,0)
+  let seed=w.panel(ui,9044,geometry,true,0,2,2,0)
+  let _=w.label(ui,9016,duration,24,"Seconds")
+  let _=w.field(ui,9017,duration,30,"")
+  let _=w.label(ui,9045,width,24,"Width")
+  let _=w.field(ui,9046,width,30,"")
+  let _=w.label(ui,9047,height,24,"Height")
+  let _=w.field(ui,9048,height,30,"")
+  let _=w.label(ui,9049,seed,24,"Seed (-1 random)")
+  let _=w.field(ui,9050,seed,30,"")
+  let _=w.label(ui,9018,editor,24,"Brief")
+  let _=w.textarea(ui,9019,editor,100,"")
+  let _=w.label(ui,9020,editor,24,"Director plan")
+  let _=w.textarea(ui,9021,editor,100,"")
+  let _=w.label(ui,9022,editor,24,"Soundscape")
+  let _=w.field(ui,9023,editor,30,"")
+  let _=w.label(ui,9024,editor,24,"Music")
+  let _=w.field(ui,9025,editor,30,"")
+  let _=w.label(ui,9026,editor,24,"Prompt override (optional)")
+  let _=w.textarea(ui,9027,editor,100,"")
+  let _=w.label(ui,9028,panel,30,"Select a shot to edit its plan, soundscape and prompt")
+  w.show(ui,panel,false)
+}
+pub fn restore(ui:ref<w.Ui>,project:ref<movie.Project>)->unit effects{alloc}{
+  w.set_text(ui,w.find(ui,9008),struct.borrow(project,field=title))
+  let list=w.find(ui,9012)
+  w.clear_cells(ui,list)
+  var i:u64=0
+  loop{if i>=array.len(struct.borrow(project,field=shots)){break}
+    w.push_cell(ui,list,struct.borrow(array.borrow(struct.borrow(project,field=shots),i),field=title))
+    i=i+1}
+  w.select_row(ui,list,project.selected_shot,0)
+  let shot=array.borrow(struct.borrow(project,field=shots),project.selected_shot)
+  w.set_text(ui,w.find(ui,9015),struct.borrow(shot,field=title))
+  w.set_text(ui,w.find(ui,9017),string.from_float(shot.duration))
+  w.set_text(ui,w.find(ui,9046),string.from_int(shot.width))
+  w.set_text(ui,w.find(ui,9048),string.from_int(shot.height))
+  w.set_text(ui,w.find(ui,9050),string.from_int(shot.seed))
+  w.set_text(ui,w.find(ui,9028),text.concat("First: ",text.concat(struct.borrow(shot,field=first_frame),
+    text.concat(" | Last: ",text.concat(struct.borrow(shot,field=last_frame),
+    text.concat(" | Continuation: ",struct.borrow(shot,field=continue_from)))))))
+  w.set_text(ui,w.find(ui,9019),struct.borrow(shot,field=brief))
+  w.set_text(ui,w.find(ui,9021),struct.borrow(shot,field=plan))
+  w.set_text(ui,w.find(ui,9023),struct.borrow(shot,field=soundscape))
+  w.set_text(ui,w.find(ui,9025),struct.borrow(shot,field=music))
+  w.set_text(ui,w.find(ui,9027),struct.borrow(shot,field=prompt_override))
+  let takes=w.find(ui,9031)
+  w.clear_cells(ui,takes)
+  var take_index:u64=0
+  loop{if take_index>=array.len(struct.borrow(shot,field=takes)){break}
+    let chosen=shot.selected_take==cast.sat(take_index)
+    let take=array.borrow(struct.borrow(shot,field=takes),take_index)
+    let name=path.basename(struct.borrow(take,field=output))
+    let state=string.copy(struct.borrow(take,field=state))
+    w.push_cell(ui,takes,text.concat(if chosen{"Selected · "}else{""},
+      text.concat(state,text.concat(" · ",name))))
+    take_index=take_index+1}
+  if shot.selected_take>=0{w.select_row(ui,takes,cast.sat(shot.selected_take),0)}
+  ()
+}
+
+pub fn choose_take(ui:ref<w.Ui>,project:ref<movie.Project>)->result<unit,string> effects{alloc}{
+  let selected=w.selected_of(ui,w.find(ui,9031))
+  if selected==0{return result.err("Choose a finished take from the list")}
+  let shot=array.borrow(struct.borrow(project,field=shots),project.selected_shot)
+  if selected>array.len(struct.borrow(shot,field=takes)){return result.err("The selected take no longer exists")}
+  if struct.borrow(array.borrow(struct.borrow(shot,field=takes),selected-1),field=state)!="done"{
+    return result.err("Only a finished take can be selected")}
+  if not movie.select_take(project,project.selected_shot,cast.sat(selected-1)){
+    return result.err("Cannot select this take")}
+  restore(ui,project)
+  result.ok(())
+}
+pub fn commit(ui:ref<w.Ui>,project:ref<movie.Project>)->result<unit,string> effects{alloc}{
+  let duration=match text.parse_f64(w.text_of(ui,w.find(ui,9017))){some(v)=>v,none=>{return result.err("Shot duration must be a number")},}
+  if not math.is_finite(duration) or duration<=0.0{return result.err("Shot duration must be positive and finite")}
+  let width=match text.parse_u64(w.text_of(ui,w.find(ui,9046))){some(v)=>v,none=>{return result.err("Width must be a positive integer")},}
+  let height=match text.parse_u64(w.text_of(ui,w.find(ui,9048))){some(v)=>v,none=>{return result.err("Height must be a positive integer")},}
+  if width==0 or height==0 or width>1032192 or height>1032192 or width%32!=0 or height%32!=0 or width*height>1032192{
+    return result.err("Shot resolution must use multiples of 32 within 1,032,192 pixels")}
+  let seed=match text.parse_i64(w.text_of(ui,w.find(ui,9050))){some(v)=>v,none=>{return result.err("Seed must be an integer")},}
+  if seed < -1{return result.err("Seed must be -1 or nonnegative")}
+  let index=project.selected_shot
+  let shot=array.borrow(struct.borrow(project,field=shots),index)
+  struct.set(shot,width,field=width)
+  struct.set(shot,height,field=height)
+  struct.set(shot,seed,field=seed)
+  let _=ref.swap(struct.borrow(project,field=title),string.copy(w.text_of(ui,w.find(ui,9008))))
+  movie.set_duration(project,index,duration)
+  movie.set_shot_text(project,index,0,w.text_of(ui,w.find(ui,9015)))
+  movie.set_shot_text(project,index,1,w.text_of(ui,w.find(ui,9019)))
+  movie.set_shot_text(project,index,2,w.text_of(ui,w.find(ui,9021)))
+  movie.set_shot_text(project,index,4,w.text_of(ui,w.find(ui,9023)))
+  movie.set_shot_text(project,index,5,w.text_of(ui,w.find(ui,9025)))
+  movie.set_shot_text(project,index,3,w.text_of(ui,w.find(ui,9027)))
+  result.ok(())
+}
+pub fn select(ui:ref<w.Ui>,project:ref<movie.Project>)->unit effects{alloc}{
+  w.check(ui,w.find(ui,60),false)
+  w.check(ui,w.find(ui,62),false)
+  w.check(ui,w.find(ui,63),true)
+  w.show(ui,w.find(ui,3),false)
+  w.show(ui,w.find(ui,2),false)
+  w.show(ui,w.find(ui,30),false)
+  w.show(ui,w.find(ui,9000),true)
+  w.set_text(ui,w.find(ui,73),"Movie")
+  w.set_text(ui,w.find(ui,20),"Movie project editor")
+  restore(ui,project)
+  w.layout(ui)
+}

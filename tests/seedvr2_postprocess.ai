@@ -1,0 +1,66 @@
+// Focused no-model contract gate for Generate's SeedVR2 handoff. It verifies
+// that the generator writes to a retained intermediate, preserves the intended
+// final output, and refuses PNG character-sheet jobs.
+module app.mm_air.tests.seedvr2_postprocess
+
+import "../generate.ai" as generation
+import "../seedvr2_post.ai" as seedvr2
+import "../character_sheet.ai" as sheet
+import "../.air/deps/h3/media.ai" as media
+import "../.air/deps/h3/session.ai" as session
+import std.channel as channel
+
+fn require(value:bool,message:str)->unit effects {io.write} {
+  if not value{io.ewrite("MM-Air SeedVR2 post-process FAIL: ")
+    io.ewrite(message)
+    io.ewrite("\n")
+    panic "MM-Air SeedVR2 post-process regression failed"}
+}
+
+fn make_job(receiver:ref<channel.Receiver>,mode:u32,output:str,
+            transformer:session.Projection)
+    ->generation.Job effects {alloc} {
+  var configuration=generation.Configuration {checkpoint_root:string.copy("/h3"),
+    reference_checkpoint_root:string.copy("/h3-ref"),donor_root:string.copy("/donor"),
+    manifest_root:string.copy("/manifests"),scratch_root:string.copy("/tmp")}
+  var references:array<string> = []
+  var audio:array<string> = []
+  var geometry=match media.geometry(22,256,256){ok(value)=>value,err(_)=>{
+    panic "fixed H3 geometry rejected"},}
+  generation.job(configuration,"restore this",session.Model.Base,session.Task.T2VA,
+    geometry,references,audio,output,mode,"/tmp/sheet.png",42,7,
+    session.Projection.ExactBF16,transformer,
+    session.Attention.Exact,channel.ticket(receiver),session.Schedule.Simple)
+}
+
+pub fn main(args:view<str>)->i32 effects {alloc,io.write,net,time} {
+  var receiver=match channel.open(4,64){ok(value)=>value,err(_)=>{return 1},}
+  var job=make_job(receiver,0,"/tmp/final.mp4",session.Projection.ConvRotI8)
+  require(job.transformer_projection==session.Projection.ConvRotI8Streaming,
+    "MM-Air converts resident ConvRot to identical-math bounded streaming")
+  let settings=seedvr2.settings(1,1,0,0,true,7311,1,1)
+  match generation.enable_seedvr2(job,settings){ok(_)=>{},err(_)=>{return 1},}
+  require(job.seedvr2_enabled,"job is enabled")
+  require(job.output=="/tmp/final.mp4.pre-seedvr2.mp4",
+    "H3 output becomes a retained pre-SeedVR2 MP4")
+  require(job.seedvr2_final_output=="/tmp/final.mp4",
+    "requested final output remains the SeedVR2 destination")
+  require(job.seedvr2_settings.size_mode==1 and job.seedvr2_settings.quality==1 and
+    job.seedvr2_settings.memory==1 and job.seedvr2_settings.seed==7311 and
+    job.seedvr2_settings.variant==1,
+    "all selected settings reach the job")
+  let _=channel.close(receiver)
+
+  var sheet_receiver=match channel.open(4,64){ok(value)=>value,err(_)=>{return 1},}
+  var sheet_job=make_job(sheet_receiver,sheet.six_panel(),"/tmp/final.mp4",
+    session.Projection.ExactBF16)
+  require(sheet_job.transformer_projection==session.Projection.ExactBF16,
+    "already-streamed exact BF16 projection remains exact")
+  match generation.enable_seedvr2(sheet_job,settings){ok(_)=>{
+    require(false,"character-sheet PNG must be rejected")},err(_)=>{},}
+  require(not sheet_job.seedvr2_enabled and sheet_job.output=="/tmp/final.mp4",
+    "rejected request remains unchanged")
+  let _=channel.close(sheet_receiver)
+  io.write("MM-Air SeedVR2 3B/7B Generate handoff: PASS\n")
+  0
+}

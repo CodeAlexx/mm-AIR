@@ -1,0 +1,142 @@
+module app.mm_air.tests.native_view
+import "../native_view.ai" as presenter
+import "../native_h3.ai" as h3_form
+import "../parameters.ai" as parameters
+import "../library.ai" as library
+import "../native_movie.ai" as movie_view
+import "../movie_project.ai" as movie
+import "../.air/deps/h3/request.ai" as h3
+import "../../../AIR/toolkits/portable/fonts.ai" as fonts
+import std.widgets as w
+import std.shell as shell
+import std.image as image
+import std.files as files
+
+fn render(ui:ref<w.Ui>,file:str)->bool effects {alloc,ffi,fs.write,ui} {
+  var app=match shell.offscreen("MM-Air native workspace test",1600,1000){ok(v)=>v,err(_)=>{return false},}
+  shell.paint(app,ui)
+  let png=image.encode_png(struct.borrow(struct.borrow(app,field=canvas),field=surface))
+  let saved=files.write_bytes(file,png)
+  shell.close(app)
+  match saved{ok(_)=>true,err(_)=>false,}
+}
+pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write,io.write,ui} {
+  var qwen=parameters.QwenImageRequest{prompt:"Change the daylight to sunset, preserving the subject.",
+    seed:42,width:2048,height:2048,steps:40,scheduler:0,sampler:0,source:"",references:[],output:"edit.png"}
+  var krea=parameters.KreaRequest{prompt:"",seed:42,width:1024,height:1024,output:"krea.png",loras:[]}
+  var state=parameters.H3Parameters{request:h3.request("A cinematic landscape with natural motion and synchronized environmental audio.",0,0,3,1,2,4,42,6,[],"movie.mp4"),loras:[]}
+  var history:array<library.Item> = []
+  var ui=w.new(1600,1000)
+  presenter.configure(ui)
+  let _=fonts.configure(ui,14)
+  presenter.layout(ui,qwen,krea,false,0,history,state,true)
+  if not w.checked_of(ui,w.find(ui,18)) or not w.visible_of(ui,w.find(ui,38)){return 1}
+  let rail=w.bounds_of(ui,w.find(ui,74))
+  let editor=w.bounds_of(ui,w.find(ui,31))
+  let preview=w.bounds_of(ui,w.find(ui,32))
+  let history_bounds=w.bounds_of(ui,w.find(ui,76))
+  if rail.x+cast.sat(rail.width)>editor.x or editor.x+cast.sat(editor.width)>preview.x or preview.x+cast.sat(preview.width)>history_bounds.x{return 2}
+  let output=w.bounds_of(ui,w.find(ui,715))
+  if output.y+cast.sat(output.height)>editor.y+cast.sat(editor.height){return 3}
+  if w.enabled_of(ui,w.find(ui,61)) or not w.enabled_of(ui,w.find(ui,63)) or w.enabled_of(ui,w.find(ui,64)) or w.enabled_of(ui,w.find(ui,65)){return 4}
+  // The rightmost CK choice must be fully visible in the parameter panel.
+  let ck=w.bounds_of(ui,w.find(ui,778))
+  if ck.x+cast.sat(ck.width)>editor.x+cast.sat(editor.width) or ck.width<95{return 5}
+  if view.len(args)>1{if not render(ui,view.get(args,1)){return 6}}
+  w.set_text(ui,w.find(ui,701),"Unsaved H3 prompt")
+  let _=h3_form.select(ui,700,753)
+  presenter.select_image_edit(ui)
+  if not presenter.image_edit(ui) or w.visible_of(ui,w.find(ui,2)) or w.visible_of(ui,w.find(ui,38)) or not w.visible_of(ui,w.find(ui,36)){return 7}
+  match presenter.qwen_request(ui,qwen){ok(_)=>{return 8},err(_)=>{},}
+  // Reference-only edits are valid and keep their order, including duplicates.
+  w.set_text(ui,w.find(ui,113),"C:/images/first.png\nD:/images/second.png\nC:/images/first.png")
+  var edit=match presenter.qwen_request(ui,qwen){ok(v)=>v,err(p)=>{io.ewrite(p)
+    return 9},}
+  if array.len(struct.borrow(edit,field=references))!=3{return 10}
+  // Rebuilding for another form must preserve unsaved H3 fields and policy.
+  presenter.layout(ui,qwen,krea,false,0,history,state,false)
+  if not presenter.image_edit(ui) or w.text_of(ui,w.find(ui,701))!="Unsaved H3 prompt" or not w.checked_of(ui,w.find(ui,753)){return 11}
+  if view.len(args)>2{if not render(ui,view.get(args,2)){return 12}}
+  presenter.select_model(ui,false,true)
+  if presenter.image_edit(ui) or not w.visible_of(ui,w.find(ui,38)) or w.text_of(ui,w.find(ui,701))!="Unsaved H3 prompt"{return 13}
+  var project=movie.create()
+  movie.add_character(project,"D:/Cast/robot.png")
+  movie.record_take_at(project,0,"D:/Movies/first.mp4",42,true)
+  movie_view.select(ui,project)
+  movie.record_take_at(project,0,"D:/Movies/failed.mp4",43,false)
+  movie_view.restore(ui,project)
+  match movie_view.choose_take(ui,project){ok(_)=>{return 27},err(_)=>{},}
+  match movie.create_continuation(project,0){ok(_)=>{return 47},err(_)=>{},}
+  if array.len(struct.borrow(project,field=shots))!=1{return 48}
+  w.select_row(ui,w.find(ui,9031),0,0)
+  match movie_view.choose_take(ui,project){ok(_)=>{},err(_)=>{return 28},}
+  if array.borrow(struct.borrow(project,field=shots),0).selected_take!=0{return 29}
+  if not movie_view.active(ui) or w.visible_of(ui,w.find(ui,30)) or not w.visible_of(ui,w.find(ui,9000)){return 14}
+  let movie_brief=w.bounds_of(ui,w.find(ui,9019))
+  if movie_brief.width<500 or movie_brief.height<90{return 26}
+  w.set_text(ui,w.find(ui,9008),"Robot rescue")
+  w.set_text(ui,w.find(ui,9015),"The rain begins")
+  w.set_text(ui,w.find(ui,9019),"A robot reaches through the rain to help its companion.")
+  w.set_text(ui,w.find(ui,9017),"bad duration")
+  match movie_view.commit(ui,project){ok(_)=>{return 15},err(_)=>{},}
+  if struct.borrow(project,field=title)=="Robot rescue"{return 16}
+  w.set_text(ui,w.find(ui,9017),"6.5")
+  match movie_view.commit(ui,project){ok(_)=>{},err(_)=>{return 17},}
+  var encoded=match movie.encode(project){ok(v)=>v,err(_)=>{return 18},}
+  var restored=match movie.decode(encoded){ok(v)=>v,err(_)=>{return 19},}
+  if array.len(struct.borrow(restored,field=characters))!=1 or array.len(struct.borrow(array.borrow(struct.borrow(restored,field=shots),0),field=takes))!=2{return 20}
+  if array.borrow(struct.borrow(restored,field=shots),0).duration!=6.5{return 21}
+  movie.add_shot(project)
+  movie_view.restore(ui,project)
+  if w.selected_of(ui,w.find(ui,9012))!=2{return 22}
+  struct.set(project,0,field=selected_shot)
+  movie_view.restore(ui,project)
+  if w.text_of(ui,w.find(ui,9015))!="The rain begins"{return 23}
+  w.set_text(ui,w.find(ui,9046),"768")
+  w.set_text(ui,w.find(ui,9048),"1344")
+  w.set_text(ui,w.find(ui,9050),"-1")
+  match movie_view.commit(ui,project){ok(_)=>{},err(_)=>{return 30},}
+  var reference=match movie_view.request(project,0,"take.mp4"){ok(value)=>value,err(p)=>{io.ewrite(p)
+    return 31},}
+  if reference.model!=1 or reference.task!=3 or reference.attention!=4 or reference.seed!= -1 or
+      reference.geometry.width!=768 or reference.geometry.height!=1344 or reference.seconds!=6.5{return 32}
+  let _=movie.remove_character(project,0)
+  movie.set_frame(project,0,"C:/images/first.png",true)
+  movie.set_frame(project,0,"D:/images/last.png",false)
+  var endpoints=match movie_view.request(project,0,"take.mp4"){ok(value)=>value,err(_)=>{return 33},}
+  if endpoints.task!=2 or endpoints.model!=0 or array.len(struct.borrow(endpoints,field=references))!=2 or
+      array.borrow(struct.borrow(endpoints,field=references),0)!="C:/images/first.png" or
+      array.borrow(struct.borrow(endpoints,field=references),1)!="D:/images/last.png"{return 34}
+  movie.set_frame(project,0,"",false)
+  var first=match movie_view.request(project,0,"take.mp4"){ok(value)=>value,err(_)=>{return 35},}
+  if first.task!=1{return 36}
+  movie.set_frame(project,0,"",true)
+  movie.set_frame(project,0,"D:/images/last.png",false)
+  var last=match movie_view.request(project,0,"take.mp4"){ok(value)=>value,err(_)=>{return 37},}
+  if last.task!=4{return 38}
+  movie.set_frame(project,0,"",false)
+  var plain=match movie_view.request(project,0,"take.mp4"){ok(value)=>value,err(_)=>{return 39},}
+  if plain.task!=0 or plain.profile!=3 or plain.conditioner_projection!=2 or plain.transformer_projection!=2{return 40}
+  movie.set_locked(project,0,true)
+  match movie_view.request(project,0,"take.mp4"){ok(_)=>{return 41},err(_)=>{},}
+  movie.set_locked(project,0,false)
+  let shot=array.borrow(struct.borrow(project,field=shots),0)
+  let _=ref.swap(struct.borrow(shot,field=continue_from),string.copy("D:/take.context.json"))
+  movie.add_character(project,"D:/cast.png")
+  var continuation=match movie_view.request(project,0,"take.mp4"){ok(value)=>value,err(_)=>{return 42},}
+  if continuation.model!=0 or continuation.task!=0 or array.len(struct.borrow(continuation,field=references))!=0{return 43}
+  movie_view.generating(ui,true)
+  if w.enabled_of(ui,w.find(ui,9002)) or w.enabled_of(ui,w.find(ui,9035)) or w.enabled_of(ui,w.find(ui,9019)){return 44}
+  movie_view.generating(ui,false)
+  if not w.enabled_of(ui,w.find(ui,9035)){return 45}
+  movie_view.restore(ui,project)
+  let generate=w.bounds_of(ui,w.find(ui,9035))
+  let continuation_button=w.bounds_of(ui,w.find(ui,9039))
+  let panel=w.bounds_of(ui,w.find(ui,9000))
+  if generate.width<200 or continuation_button.y+cast.sat(continuation_button.height)>panel.y+cast.sat(panel.height){return 46}
+  if view.len(args)>3{if not render(ui,view.get(args,3)){return 24}}
+  presenter.select_model(ui,false,true)
+  if movie_view.active(ui) or w.visible_of(ui,w.find(ui,9000)) or w.text_of(ui,w.find(ui,701))!="Unsaved H3 prompt"{return 25}
+  io.write("Native MM-Air workspace layout, edit admission and draft retention passed\n")
+  0
+}

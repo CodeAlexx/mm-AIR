@@ -1,0 +1,60 @@
+// Run via air_ui_clipboard_test on its isolated Windows clipboard station.
+module app.mm_air.tests.native_clipboard
+import std.widgets as w
+import "../native_commands.ai" as commands
+import "../../../AIR/toolkits/portable/clipboard.ai" as clipboard
+
+fn shortcut(ui:ref<w.Ui>,code:u32)->unit effects{alloc}{
+  let _=w.dispatch(ui,w.Input.Key(w.KeyPress{code:code,shift:false,control:true}))
+  ()
+}
+
+pub fn main(args:view<str>)->i32 effects{alloc,env,ffi,fs.read,fs.meta,fs.write,process}{
+  var ui=w.new(720,500)
+  w.begin(ui)
+  let root=w.panel(ui,1,0,true,0,1,4,4)
+  let prompt=w.textarea(ui,701,root,200,"Original prompt")
+  let output=w.field(ui,715,root,30,"movie.mp4")
+  let _=w.label(ui,20,root,30,"")
+  w.finish(ui)
+  w.set_focus(ui,prompt)
+  w.select_range(ui,prompt,0,15)
+  w.clear_actions(ui)
+  if view.len(args)>1{
+    shortcut(ui,w.key_x())
+    let _=commands.take(ui)
+    if w.text_of(ui,prompt)!="Original prompt" or not w.has_selection(ui,prompt){return 1}
+    if w.text_of(ui,w.find(ui,20))==""{return 2}
+    return 0
+  }
+  let sample="Rain over a café.\n日本語 — swordswoman ⚔"
+  match clipboard.write("",sample){ok(_)=>{},err(_)=>{return 3},}
+  shortcut(ui,w.key_v())
+  var found=commands.take(ui)
+  if array.len(found)!=0 or w.text_of(ui,prompt)!=sample{return 4}
+  shortcut(ui,w.key_z())
+  let _=commands.take(ui)
+  if w.text_of(ui,prompt)!="Original prompt"{return 5}
+  shortcut(ui,w.key_y())
+  let _=commands.take(ui)
+  if w.text_of(ui,prompt)!=sample{return 6}
+  shortcut(ui,w.key_a())
+  shortcut(ui,w.key_c())
+  let _=commands.take(ui)
+  let copied=match clipboard.read(""){ok(value)=>value,err(_)=>{return 7},}
+  if copied!=sample{return 8}
+  shortcut(ui,w.key_x())
+  let _=commands.take(ui)
+  if w.text_of(ui,prompt)!=""{return 9}
+  shortcut(ui,w.key_v())
+  let _=commands.take(ui)
+  if w.text_of(ui,prompt)!=sample{return 10}
+  // Single-line output paths use the same clipboard routing.
+  match clipboard.write("","D:/Movies/café 日本語.mp4"){ok(_)=>{},err(_)=>{return 11},}
+  w.set_focus(ui,output)
+  shortcut(ui,w.key_a())
+  shortcut(ui,w.key_v())
+  let _=commands.take(ui)
+  if w.text_of(ui,output)!="D:/Movies/café 日本語.mp4"{return 12}
+  0
+}

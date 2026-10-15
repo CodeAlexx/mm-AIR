@@ -1,0 +1,26 @@
+// CPU-only MM-Air boundary regression for a real H3 dotted down/up LoRA.
+// The supplied checkpoint stays at its caller-selected path and no GPU context
+// is opened by this test.
+module app.mm_air.tests.h3_lora_admission
+
+import "../generate.ai" as generate
+import std.text as text
+
+fn expect(value: bool) -> unit effects {} {
+  if not value { panic "MM-Air H3 LoRA admission regression" }
+  ()
+}
+
+pub fn main(args: view<str>) -> i32
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,time} {
+  if view.len(args) != 3 {
+    io.ewrite("usage: h3-lora-admission CHECKPOINT.safetensors SCRATCH_DIR\n")
+    return 2
+  }
+  var outcome: generate.Outcome = generate.inspect_h3_lora(view.get(args, 1),
+    view.get(args, 2))
+  expect(outcome.succeeded)
+  expect(text.contains(str.view(outcome.message), "max_rank=32"))
+  io.write("MM-Air H3 dotted LoRA admission: PASS\n")
+  0
+}

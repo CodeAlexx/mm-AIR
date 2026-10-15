@@ -1,0 +1,230 @@
+// Reusable geometry and conditioning contract for native H3 video outpaint.
+// Source pixels live in `preserved`; every pixel outside it is generated.
+module app.mm_air.outpaint
+
+import std.codec as codec
+import std.text as text
+import ".air/deps/h3/timeline.ai" as timeline
+import ".air/deps/prompt/types.ai" as prompt_types
+import "masked_edit.ai" as edit
+
+pub fn left()->u32 effects{}{0}
+pub fn right()->u32 effects{}{1}
+pub fn top()->u32 effects{}{2}
+pub fn bottom()->u32 effects{}{3}
+pub fn horizontal()->u32 effects{}{4}
+pub fn vertical()->u32 effects{}{5}
+pub fn all_sides()->u32 effects{}{6}
+pub fn anchor_start()->u32 effects{}{0}
+pub fn anchor_center()->u32 effects{}{1}
+pub fn anchor_end()->u32 effects{}{2}
+pub fn exact()->u32 effects{}{0}
+pub fn blended()->u32 effects{}{1}
+
+pub type Rect=struct{x:u64,y:u64,width:u64,height:u64}
+pub type Geometry=struct{
+  source_width:u64,source_height:u64,target_width:u64,target_height:u64,
+  direction:u32,anchor:u32,placement_x:u64,placement_y:u64,
+  expand_left:u64,expand_right:u64,expand_top:u64,expand_bottom:u64,
+  preserved:Rect,generated:array<Rect>
+}
+
+fn axis(delta:u64,anchor:u32)->u64 effects{}{
+  if anchor==anchor_start(){0}else if anchor==anchor_end(){delta}else{delta/2}
+}
+
+pub fn geometry(source_width:u64,source_height:u64,target_width:u64,
+                target_height:u64,direction:u32,anchor:u32)
+    ->result<Geometry,string> effects{alloc}{
+  if source_width==0 or source_height==0 or target_width<source_width or
+     target_height<source_height{return result.err("Outpaint target must contain the source canvas")}
+  if rem(target_width,32)!=0 or rem(target_height,32)!=0{return result.err(
+    "H3 outpaint target width and height must be 32-pixel aligned")}
+  if direction>all_sides() or anchor>anchor_end(){return result.err(
+    "Unknown outpaint direction or anchor")}
+  let dx=target_width-source_width
+  let dy=target_height-source_height
+  if dx==0 and dy==0{return result.err("Outpaint target must add pixels on at least one edge")}
+  if direction<=right() and (dx==0 or dy!=0){return result.err(
+    "Left or right outpaint changes width only")}
+  if direction>=top() and direction<=bottom() and (dy==0 or dx!=0){return result.err(
+    "Top or bottom outpaint changes height only")}
+  if direction==horizontal() and (dx==0 or dy!=0){return result.err(
+    "Horizontal outpaint changes width only")}
+  if direction==vertical() and (dy==0 or dx!=0){return result.err(
+    "Vertical outpaint changes height only")}
+  let x:u64=if direction==left(){dx}else if direction==right(){0}
+    else if direction==horizontal() or direction==all_sides(){axis(dx,anchor)}
+    else{0}
+  let y:u64=if direction==top(){dy}else if direction==bottom(){0}
+    else if direction==vertical() or direction==all_sides(){axis(dy,anchor)}
+    else{0}
+  let preserved=Rect{x:x,y:y,width:source_width,height:source_height}
+  var regions:array<Rect> = []
+  if y>0{array.push(regions,Rect{x:0,y:0,width:target_width,height:y})}
+  if y+source_height<target_height{array.push(regions,Rect{x:0,y:y+source_height,
+    width:target_width,height:target_height-y-source_height})}
+  if x>0{array.push(regions,Rect{x:0,y:y,width:x,height:source_height})}
+  if x+source_width<target_width{array.push(regions,Rect{x:x+source_width,y:y,
+    width:target_width-x-source_width,height:source_height})}
+  result.ok(Geometry{source_width:source_width,source_height:source_height,
+    target_width:target_width,target_height:target_height,direction:direction,
+    anchor:anchor,placement_x:x,placement_y:y,expand_left:x,
+    expand_right:target_width-x-source_width,expand_top:y,
+    expand_bottom:target_height-y-source_height,preserved:preserved,
+    generated:regions})
+}
+
+fn distance_to_edge(position:u64,first:u64,end_exclusive:u64)->u64 effects{}{
+  if position<first{first-position}else if position>=end_exclusive{
+    position-end_exclusive+1}else{
+    let low=position-first+1
+    let high=end_exclusive-position
+    if low<high{low}else{high}}
+}
+
+pub fn mask(frames:u64,value:ref<Geometry>,mode:u32,seam_width:u64)
+    ->result<edit.Mask,string> effects{alloc}{
+  if frames<4{return result.err("H3 outpaint needs at least four frames")}
+  if mode>blended(){return result.err("Unknown outpaint composite mode")}
+  if mode==exact() and seam_width!=0{return result.err(
+    "Exact Source outpaint must use a zero-pixel seam")}
+  let p=value.preserved
+  var weights:array<f32> = []
+  var frame:u64=0
+  loop{if frame>=frames{break}
+    var y:u64=0
+    loop{if y>=value.target_height{break}
+      var x:u64=0
+      loop{if x>=value.target_width{break}
+        let inside=x>=p.x and x<p.x+p.width and y>=p.y and y<p.y+p.height
+        var weight:f32=if inside{0.0}else{1.0}
+        if mode==blended() and seam_width>0{
+          let dx=distance_to_edge(x,p.x,p.x+p.width)
+          let dy=distance_to_edge(y,p.y,p.y+p.height)
+          let distance=if dx<dy{dx}else{dy}
+          if distance<=seam_width{
+            if inside{weight=cast.float(seam_width-distance+1)/cast.float(seam_width+1)}
+            else{weight=cast.float(distance)/cast.float(seam_width+1)}
+          }
+        }
+        array.push(weights,weight)
+        x=x+1}
+      y=y+1}
+    frame=frame+1}
+  edit.create(frames,value.target_width,value.target_height,weights)
+}
+
+pub fn direction_name(value:u32)->string effects{alloc}{
+  string.copy(if value==left(){"left"}else if value==right(){"right"}
+    else if value==top(){"top"}else if value==bottom(){"bottom"}
+    else if value==horizontal(){"horizontal"}else if value==vertical(){"vertical"}
+    else{"all-sides"})
+}
+
+pub fn window_plan(frames:u64,window_frames:u64,overlap_frames:u64)
+    ->result<timeline.Plan,string> effects{alloc}{
+  timeline.plan(frames,window_frames,overlap_frames)
+}
+
+pub fn qwen_instruction(value:ref<Geometry>,prompt:str,plan:ref<timeline.Plan>)
+    ->string effects{alloc}{
+  var out=string.copy("Video outpaint request. Preserve <Video 1> exactly inside rectangle x=")
+  string.append(out,str.view(string.from_int(value.placement_x)))
+  string.append(out," y=")
+  string.append(out,str.view(string.from_int(value.placement_y)))
+  string.append(out," width=")
+  string.append(out,str.view(string.from_int(value.source_width)))
+  string.append(out," height=")
+  string.append(out,str.view(string.from_int(value.source_height)))
+  string.append(out," on target ")
+  string.append(out,str.view(string.from_int(value.target_width)))
+  string.append(out,"x")
+  string.append(out,str.view(string.from_int(value.target_height)))
+  string.append(out,". Extend only ")
+  string.append(out,str.view(direction_name(value.direction)))
+  string.append(out,". Authoritative sequential plan: ")
+  string.append(out,str.view(string.from_int(timeline.window_count(plan))))
+  string.append(out," windows, model window frames=")
+  string.append(out,str.view(string.from_int(plan.window_frames)))
+  string.append(out,", overlap frames=")
+  string.append(out,str.view(string.from_int(plan.overlap_frames)))
+  string.append(out,". User intent: ")
+  string.append(out,prompt)
+  out
+}
+
+pub fn validate_prompt(value:str)->result<unit,string> effects{alloc}{
+  if not str.starts_with(value,"subject_definitions:") or
+     not text.contains(value,"summary:") or
+     not text.contains(value,"retention_analysis:") or
+     not text.contains(value,"detailed_description:") or
+     not text.contains(value,"overall_soundscape:") or
+     not text.contains(value,"non_diegetic_music:") or
+     not text.contains(value,"<Video 1>") or
+     not text.contains(value,"[Shot 1]") or text.contains(value,"[Shot 1] At"){
+    return result.err("Video Outpaint prompt needs all six Ref2VA sections, <Video 1>, and an untimed [Shot 1]")
+  }
+  result.ok(())
+}
+
+pub fn prompt_request(model:prompt_types.ModelChoice,source:str,
+    source_width:u64,source_height:u64,target_width:u64,target_height:u64,
+    direction:u32,anchor:u32,frames:u64,window_frames:u64,overlap_frames:u64,
+    user_prompt:str)->result<prompt_types.Request,string> effects{alloc}{
+  var made=try geometry(source_width,source_height,target_width,target_height,
+    direction,anchor)
+  var planned=try window_plan(frames,window_frames,overlap_frames)
+  let instruction=qwen_instruction(made,user_prompt,planned)
+  var attachments:array<prompt_types.Attachment> = [prompt_types.attachment(
+    source,prompt_types.AttachmentKind.Video,1)]
+  var built=prompt_types.request(model,prompt_types.Task.Outpaint,
+    prompt_types.Transform.None,str.view(instruction),[],attachments)
+  struct.set(built,768,field=maximum_new_tokens)
+  result.ok(built)
+}
+
+pub fn sidecar(value:ref<Geometry>,source:str,prompt:str,seed:u64,frames:u64,
+               window_frames:u64,overlap_frames:u64,mode:u32,seam_width:u64,
+               audio_preserved:bool,carry:str,qwen_model:u64,evaluations:u64,
+               conditioner_projection:u64,transformer_projection:u64,
+               attention:u64,schedule:u64)->result<string,string> effects{alloc}{
+  var out=codec.writer()
+  codec.begin_object(out)
+  codec.field_text(out,"schema","mm-air.h3-video-outpaint")
+  codec.field_u64(out,"version",1)
+  codec.field_text(out,"source_video",source)
+  codec.field_text(out,"prompt",prompt)
+  codec.field_u64(out,"seed",seed)
+  codec.field_u64(out,"frames",frames)
+  codec.field_u64(out,"source_width",value.source_width)
+  codec.field_u64(out,"source_height",value.source_height)
+  codec.field_u64(out,"target_width",value.target_width)
+  codec.field_u64(out,"target_height",value.target_height)
+  codec.field_u64(out,"placement_x",value.placement_x)
+  codec.field_u64(out,"placement_y",value.placement_y)
+  codec.field_text(out,"direction",str.view(direction_name(value.direction)))
+  codec.field_u64(out,"anchor",cast.wrap(value.anchor))
+  codec.field_u64(out,"window_frames",window_frames)
+  codec.field_u64(out,"overlap_frames",overlap_frames)
+  codec.field_text(out,"composite",if mode==exact(){"exact-source"}else{"blended"})
+  codec.field_u64(out,"seam_width",seam_width)
+  codec.field_bool(out,"source_audio_preserved",audio_preserved)
+  codec.field_text(out,"continuity_carry",carry)
+  codec.field_text(out,"qwen_model",if qwen_model==0{"qwen3-vl-4b"}
+    else if qwen_model==1{"qwen3-vl-8b"}else{"qwen3-vl-32b"})
+  codec.field_text(out,"qwen_quantization",if qwen_model==2{
+    "row-i8-language-bf16-vision"}else{"bf16"})
+  codec.field_text(out,"h3_model","minimax-h3-reference")
+  codec.field_text(out,"h3_task","ref2va")
+  codec.field_u64(out,"h3_evaluations",evaluations)
+  codec.field_u64(out,"h3_conditioner_projection",conditioner_projection)
+  codec.field_u64(out,"h3_transformer_projection",transformer_projection)
+  codec.field_u64(out,"h3_attention",attention)
+  codec.field_u64(out,"h3_schedule",schedule)
+  codec.end_object(out)
+  match codec.finish(out){
+    ok(encoded)=>result.ok(encoded),
+    err(error)=>result.err(codec.describe(error)),
+  }
+}

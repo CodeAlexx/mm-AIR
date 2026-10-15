@@ -1,0 +1,175 @@
+// Native H3 request presenter. Model policy stays in the shared H3 package.
+module app.mm_air.native_h3
+import std.widgets as w
+import std.text as text
+import ".air/deps/h3/request.ai" as h3
+
+fn choices(ui:ref<w.Ui>,parent:u64,key:u64,label:str,labels:array<string> own,selected:u32)->unit effects {alloc} {
+  var names=labels
+  let group=w.panel(ui,key,parent,true,50,0,0,0)
+  let _=w.label(ui,key+1,group,22,label)
+  let row=w.panel(ui,key+7,group,false,28,0,4,0)
+  let selected_row:u64=cast.wrap(selected)
+  var i:u64=0
+  loop{if i>=array.len(names){break}
+    let choice=w.radio(ui,key+2+i,row,0,array.borrow(names,i),selected_row==i)
+    w.stretch(ui,choice,1)
+    i=i+1
+  }
+}
+
+// Caller reserves [base,base+80). Choice values follow the shared request enums.
+pub fn fields(ui:ref<w.Ui>,parent:u64,base:u64,request:ref<h3.Request>)->unit effects {alloc} {
+  let _=w.label(ui,base,parent,22,"H3 prompt — video and audio")
+  let _=w.textarea(ui,base+1,parent,80,struct.borrow(request,field=prompt))
+  choices(ui,parent,base+32,"Model",["H3 Base","H3 Reference"],request.model)
+  choices(ui,parent,base+40,"Task",["T2VA","I2VA","FL2VA","Ref2VA","L2VA"],request.task)
+  let row=w.panel(ui,base+20,parent,false,54,0,8,0)
+  let seed=w.panel(ui,base+21,row,true,0,2,2,0)
+  let width=w.panel(ui,base+22,row,true,0,1,2,0)
+  let height=w.panel(ui,base+23,row,true,0,1,2,0)
+  let seconds=w.panel(ui,base+24,row,true,0,1,2,0)
+  let _=w.label(ui,base+2,seed,22,"Seed (-1 random)")
+  let _=w.field(ui,base+3,seed,30,string.from_int(request.seed))
+  let _=w.label(ui,base+4,width,22,"Width")
+  let _=w.field(ui,base+5,width,30,string.from_int(request.geometry.width))
+  let _=w.label(ui,base+6,height,22,"Height")
+  let _=w.field(ui,base+7,height,30,string.from_int(request.geometry.height))
+  let _=w.label(ui,base+8,seconds,22,"Seconds")
+  let _=w.field(ui,base+9,seconds,30,string.from_float(request.seconds))
+  let visuals=w.panel(ui,base+16,parent,false,28,0,4,0)
+  let label=w.label(ui,base+10,visuals,0,"Visual references — in order")
+  w.stretch(ui,label,1)
+  let _=w.button(ui,base+17,visuals,90,"Add media")
+  let _=w.button(ui,base+25,visuals,60,"Clear")
+  let _=w.textarea(ui,base+11,parent,54,text.join(struct.borrow(request,field=references),"\n"))
+  let sounds=w.panel(ui,base+18,parent,false,28,0,4,0)
+  let audio_label=w.label(ui,base+12,sounds,0,"Audio references — Ref2VA")
+  w.stretch(ui,audio_label,1)
+  let _=w.button(ui,base+19,sounds,90,"Add audio")
+  let _=w.button(ui,base+26,sounds,60,"Clear")
+  let _=w.textarea(ui,base+13,parent,40,text.join(struct.borrow(request,field=audio_references),"\n"))
+  choices(ui,parent,base+48,"Schedule",["Unselected","Donor 7","Quality 19","DC Euler 19"],request.profile)
+  choices(ui,parent,base+56,"Encoder",["Unselected","BF16","ConvRot INT8"],request.conditioner_projection)
+  choices(ui,parent,base+64,"Transformer",["Unselected","BF16","ConvRot I8","Row I8"],request.transformer_projection)
+  choices(ui,parent,base+72,"Attention",["Unselected","Exact","Hybrid","Dense I8","CK INT8"],request.attention)
+  let _=w.label(ui,base+14,parent,22,"Output MP4")
+  let _=w.field(ui,base+15,parent,30,struct.borrow(request,field=output))
+}
+
+pub fn select(ui:ref<w.Ui>,base:u64,key:u64)->bool effects {} {
+  var group:u64=32
+  loop{if group>72{break}
+    let count:u64=if group==32{2}else{if group==40 or group==72{5}else{if group==56{3}else{4}}}
+    if key>=base+group+2 and key<base+group+2+count{
+      var i:u64=0
+      loop{if i>=count{break}
+        w.check(ui,w.find(ui,base+group+2+i),key==base+group+2+i)
+        i=i+1
+      }
+      return true
+    }
+    group=group+8
+  }
+  false
+}
+
+pub fn methods(ui:ref<w.Ui>,base:u64)->array<u32> effects {alloc} {
+  var values:array<u32> = []
+  var group:u64=32
+  loop{if group>72{break}
+    let count:u64=if group==32{2}else{if group==40 or group==72{5}else{if group==56{3}else{4}}}
+    array.push(values,match selected(ui,base+group,count){ok(v)=>v,err(_)=>0,})
+    group=group+8
+  }
+  values
+}
+pub fn restore_methods(ui:ref<w.Ui>,base:u64,values:ref<array<u32>>)->unit effects {} {
+  var i:u64=0
+  loop{if i>=array.len(values){break}
+    let value:u64=cast.wrap(array.get(values,i))
+    let _=select(ui,base,base+32+i*8+2+value)
+    i=i+1
+  }
+}
+pub fn restore(ui:ref<w.Ui>,base:u64,value:ref<h3.Request>)->unit effects {alloc} {
+  var values:array<u32> = [value.model,value.task,value.profile,value.conditioner_projection,value.transformer_projection,value.attention]
+  restore_methods(ui,base,values)
+  w.set_text(ui,w.find(ui,base+1),struct.borrow(value,field=prompt))
+  w.set_text(ui,w.find(ui,base+3),string.from_int(value.seed))
+  w.set_text(ui,w.find(ui,base+5),string.from_int(value.geometry.width))
+  w.set_text(ui,w.find(ui,base+7),string.from_int(value.geometry.height))
+  w.set_text(ui,w.find(ui,base+9),string.from_float(value.seconds))
+  w.set_text(ui,w.find(ui,base+11),text.join(struct.borrow(value,field=references),"\n"))
+  w.set_text(ui,w.find(ui,base+13),text.join(struct.borrow(value,field=audio_references),"\n"))
+  w.set_text(ui,w.find(ui,base+15),struct.borrow(value,field=output))
+}
+
+fn selected(ui:ref<w.Ui>,key:u64,count:u64)->result<u32,string> effects {alloc} {
+  var found:u32=0
+  var matches:u64=0
+  var i:u64=0
+  loop{if i>=count{break}
+    if w.checked_of(ui,w.find(ui,key+2+i)){found=cast.sat(i)
+      matches=matches+1}
+    i=i+1
+  }
+  if matches!=1{return result.err("Select exactly one value in each H3 option group")}
+  result.ok(found)
+}
+fn paths(source:str)->array<string> effects {alloc} {
+  var rows=text.split(source,"\n")
+  var result:array<string> = []
+  var i:u64=0
+  loop{if i>=array.len(rows){break}
+    let value=text.trim_newline(array.borrow(rows,i))
+    if value!=""{array.push(result,value)}
+    i=i+1
+  }
+  result
+}
+
+// Native picker order is conditioning order. Validate the complete change
+// before touching the draft, preserving repeated first/last images.
+pub fn add_references(ui:ref<w.Ui>,base:u64,files:ref<array<string>>,audio:bool)
+    ->result<unit,string> effects{alloc}{
+  if array.len(files)==0{return result.ok(())}
+  let task=try selected(ui,base+40,5)
+  if audio and task!=h3.task_ref2va(){return result.err("Select Ref2VA to use audio references")}
+  let control=w.find(ui,base+if audio{13}else{11})
+  var combined=paths(w.text_of(ui,control))
+  let count=array.len(combined)+array.len(files)
+  var target=task
+  if not audio and task==h3.task_t2va(){
+    if count==1{target=h3.task_i2va()}else{if count==2{target=h3.task_fl2va()}else{
+      return result.err("Choose Ref2VA for more than two visual references")}}
+  }
+  let limit:u64=if audio{3}else{if target==h3.task_ref2va(){9}else{h3.required_references(target)}}
+  if count>limit{return result.err("Too many references for the selected H3 task")}
+  var i:u64=0
+  loop{if i>=array.len(files){break}
+    let file=array.borrow(files,i)
+    if file=="" or text.contains(file,"\n") or text.contains(file,"\r"){
+      return result.err("Reference paths must be nonempty and cannot contain line breaks")}
+    array.push(combined,string.copy(file))
+    i=i+1}
+  w.set_text(ui,control,text.join(combined,"\n"))
+  if target!=task{let _=select(ui,base,base+42+cast.wrap(target))}
+  result.ok(())
+}
+
+pub fn request(ui:ref<w.Ui>,base:u64)->result<h3.Request,string> effects {alloc} {
+  let seed=match text.parse_i64(w.text_of(ui,w.find(ui,base+3))){some(v)=>v,none=>{return result.err("Seed must be -1 or a nonnegative integer")},}
+  let width=match text.parse_u64(w.text_of(ui,w.find(ui,base+5))){some(v)=>v,none=>{return result.err("Width must be a positive integer")},}
+  let height=match text.parse_u64(w.text_of(ui,w.find(ui,base+7))){some(v)=>v,none=>{return result.err("Height must be a positive integer")},}
+  let seconds=match text.parse_f64(w.text_of(ui,w.find(ui,base+9))){some(v)=>v,none=>{return result.err("Seconds must be a number")},}
+  var value=h3.request(w.text_of(ui,w.find(ui,base+1)),try selected(ui,base+32,2),
+    try selected(ui,base+40,5),try selected(ui,base+48,4),try selected(ui,base+56,3),
+    try selected(ui,base+64,4),try selected(ui,base+72,5),seed,h3.resolution_custom(),
+    paths(w.text_of(ui,w.find(ui,base+11))),w.text_of(ui,w.find(ui,base+15)))
+  let old=ref.swap(struct.borrow(value,field=audio_references),paths(w.text_of(ui,w.find(ui,base+13))))
+  match h3.set_geometry(value,width,height,seconds){ok(_)=>{},err(problem)=>{var held=problem
+    return result.err(h3.describe(held))},}
+  match h3.validate(value){ok(_)=>result.ok(value),err(problem)=>{var held=problem
+    result.err(h3.describe(held))},}
+}

@@ -1,0 +1,17 @@
+module app.mm_air.native_seed
+import std.system as system
+
+pub fn resolve(seed:i64)->result<i64,string> effects {alloc,random} {
+  if seed < -1{return result.err("Seed must be nonnegative or -1")}
+  if seed!= -1{return result.ok(seed)}
+  let data=match system.secure_random(7){ok(value)=>value,
+    err(problem)=>{return result.err(string.copy(problem.message))},}
+  var value:u64=0
+  var index:u64=0
+  loop{if index>=7{break}
+    let octet:u8=cast.bits(view.get(data,index))
+    value=value*256+cast.wrap(octet)
+    index=index+1
+  }
+  result.ok(cast.sat(value))
+}

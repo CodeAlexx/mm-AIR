@@ -1,0 +1,27 @@
+// Run an already-finished MM-Air video through the same native SeedVR2
+// adapter used by Generate, including its durable receipt sidecar.
+module app.mm_air.tests.seedvr2_existing_video
+
+import "../seedvr2_post.ai" as seedvr2
+import std.system as system
+
+pub fn main(args:view<str>)->i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,process,time} {
+  if view.len(args)<3 or view.len(args)>4 {
+    io.ewrite("usage: seedvr2-existing-video SOURCE OUTPUT [3b|7b]\n")
+    return 2
+  }
+  let variant:u32=if view.len(args)==4 and view.get(args,3)=="7b"{1}else{0}
+  let selected=seedvr2.settings(variant,0,0,0,true,42,0,0)
+  match seedvr2.run(view.get(args,1),view.get(args,2),system.temp_directory(),selected) {
+    ok(value)=>{var completed=value
+      io.write("MM-Air SeedVR2 existing-video delivery: PASS\n")
+      io.write(struct.borrow(completed,field=metadata))
+      io.write("\n")
+      0
+    },
+    err(message)=>{io.ewrite(str.view(message))
+      io.ewrite("\n")
+      1},
+  }
+}

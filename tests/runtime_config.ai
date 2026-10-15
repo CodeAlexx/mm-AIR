@@ -1,0 +1,52 @@
+module app.mm_air.tests.runtime_config
+import "../runtime_config.ai" as config
+import "../settings.ai" as settings
+import std.text as text
+
+pub fn main(args:view<str>)->i32 effects{alloc,io.write}{
+  let source="{\"schema\":\"mm-air.runtime.v1\",\"MM_AIR_H3_CHECKPOINT_ROOT\":\"D:/Models/H3 日本語\",\"MM_AIR_H3_REFERENCE_ROOT\":\"\"}"
+  match config.field(source,"MM_AIR_H3_CHECKPOINT_ROOT"){
+    ok(value)=>match value{some(root)=>{if root!="D:/Models/H3 日本語"{return 1}},none=>{return 2}},
+    err(_)=>{return 3},
+  }
+  match config.field(source,"MM_AIR_H3_REFERENCE_ROOT"){
+    ok(value)=>match value{some(root)=>{if root!=""{return 4}},none=>{return 5}},
+    err(_)=>{return 6},
+  }
+  match config.field(source,"MM_AIR_OUTPUT_ROOT"){
+    ok(value)=>match value{none=>{},some(_)=>{return 7}},err(_)=>{return 8},
+  }
+  match config.field("{broken","MM_AIR_H3_CHECKPOINT_ROOT"){
+    err(_)=>{},ok(_)=>{return 9},
+  }
+  match config.field("{\"schema\":\"unknown\"}","MM_AIR_H3_CHECKPOINT_ROOT"){
+    err(_)=>{},ok(_)=>{return 10},
+  }
+  match config.field("{\"schema\":\"mm-air.runtime.v1\",\"MM_AIR_H3_CHECKPOINT_ROOT\":42}","MM_AIR_H3_CHECKPOINT_ROOT"){
+    err(_)=>{},ok(_)=>{return 11},
+  }
+  var keys:array<string> = ["MM_AIR_OUTPUT_ROOT"]
+  var values:array<string> = ["D:/Output 日本語"]
+  let merged=match config.update("{\"schema\":\"mm-air.runtime.v1\",\"MM_AIR_UI_HOST\":\"host.exe\",\"future\":{\"kept\":true},\"MM_AIR_OUTPUT_ROOT\":\"old\"}",keys,values){
+    ok(value)=>value,err(_)=>{return 12},}
+  match config.field(merged,"MM_AIR_UI_HOST"){
+    ok(value)=>match value{some(host)=>{if host!="host.exe"{return 13}},none=>{return 14}},err(_)=>{return 15},}
+  match config.field(merged,"MM_AIR_OUTPUT_ROOT"){
+    ok(value)=>match value{some(folder)=>{if folder!="D:/Output 日本語"{return 16}},none=>{return 17}},err(_)=>{return 18},}
+  if not text.contains(merged,"\"kept\":true"){return 19}
+  if not settings.valid_accent("#Ab12Ef") or not settings.valid_accent(""){
+    return 20}
+  if settings.valid_accent("#bad") or settings.valid_accent("red; } * { color: red"){
+    return 21}
+  match settings.index("settings_path_12",false){some(value)=>{if value!=12{return 22}},none=>{return 23},}
+  match settings.index("settings_browse_7",true){some(value)=>{if value!=7{return 24}},none=>{return 25},}
+  match settings.index("settings_path_16",false){some(value)=>{if value!=16{return 26}},none=>{return 26},}
+  match settings.index("settings_path_21",false){some(value)=>{if value!=21{return 26}},none=>{return 26},}
+  match settings.index("settings_path_22",false){some(_)=>{return 26},none=>{},}
+  if not settings.is_file(7) or not settings.is_file(8) or
+      not settings.is_file(10) or not settings.is_file(11) or settings.is_file(12) or
+      not settings.is_file(17) or not settings.is_file(18) or not settings.is_file(19) or
+      settings.is_file(20) or settings.is_file(21){return 27}
+  io.write("MM-Air settings: Unicode paths, optional roots, JSON refusal, preserved unknown fields and validated accent colors passed\n")
+  0
+}

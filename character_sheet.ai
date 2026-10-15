@@ -1,0 +1,155 @@
+// Native MM-Air adaptation of PoopMan333/H3_Character_Sheet_Generator,
+// revision 13c095e84c6d651d49ddcbdb672779cc66a7d44d (2026-09-10).
+// The source workflow generates one continuous Ref2VA orbit, selects fixed
+// frame indices, and stitches them with six-pixel black gutters. MM-Air keeps
+// that behavior in AIR; it does not execute the ComfyUI graph.
+module app.mm_air.character_sheet
+
+import std.draw as draw
+import std.files as files
+import std.geometry as geometry
+import std.image as image
+import std.media as media
+import std.text as text
+
+pub fn off() -> u32 effects {} { 0 }
+pub fn four_panel() -> u32 effects {} { 1 }
+pub fn six_panel() -> u32 effects {} { 2 }
+pub fn keep_picture_style() -> u32 effects {} { 0 }
+pub fn anime_to_real() -> u32 effects {} { 1 }
+
+pub fn valid(mode: u32) -> bool effects {} {
+  mode == four_panel() or mode == six_panel()
+}
+
+pub fn width(mode: u32) -> u64 effects {} {
+  if mode == four_panel() { return 480 }
+  if mode == six_panel() { return 768 }
+  0
+}
+
+pub fn height(mode: u32) -> u64 effects {} {
+  if mode == four_panel() { return 864 }
+  if mode == six_panel() { return 1376 }
+  0
+}
+
+pub fn seconds(mode: u32) -> f64 effects {} {
+  if mode == four_panel() { return 3.0 }
+  if mode == six_panel() { return 5.0 }
+  0.0
+}
+
+pub fn frame_indices(mode: u32) -> array<u64> effects {alloc} {
+  if mode == four_panel() { return [2,24,45,68] }
+  if mode == six_panel() { return [2,21,42,63,84,113] }
+  []
+}
+
+pub fn general_input() -> string effects {alloc} {
+  string.copy("<Subject 1> is the character shown in <Picture 1>.\n\nTake from <Picture 1> the character's identity: face shape and features, eye colour, hair colour, length and style, complete outfit including footwear, and any distinctive markings, tattoos, jewellery, or accessories that are part of who they are.\n\nDo not carry over anything the character is holding in <Picture 1>.\n\nDo not carry over their pose in <Picture 1>.\n\nDo not carry over the background or setting of <Picture 1>.")
+}
+
+fn style(style_mode: u32) -> string effects {alloc} {
+  if style_mode == anime_to_real() {
+    return string.copy("Completely discard the anime face, large stylized eyes, line art, flat cel-shaded colors from the references. Generate a brand-new photorealistic human face and completely natural hair and skin.\n\n[STYLE]\nFully photorealistic live-action, unretouched studio photograph. Completely natural bare face and body — zero makeup of any kind. Natural lip color, natural eyelashes and eyebrows only. Skin shows real texture. Mild natural film grain. Style never drifts.")
+  }
+  string.copy("[STYLE]\nThe output is matches the style of <Picture 1>. Sharp detail on eyes and face. The style never changes and never drifts between shots. No shadows.")
+}
+
+fn staging() -> string effects {alloc} {
+  string.copy("[STAGING]\nSolid light grey seamless backdrop, one flat uniform tone edge to edge, with no gradient, no vignette, no texture and no floor line. Nothing else is in frame. the subject casts no shadow onto the backdrop and no contact shadow on the ground beneath it, and it does not sit in its own shadow. Soft form shading on the subject itself is fine and should read its shape. Long telephoto lens, near-orthographic.\n\nThe character holds one relaxed A-pose throughout: arms hanging slightly away from the body, palms toward the thighs, feet shoulder-width apart, head level, calm neutral expression, eyes open and looking forward.\nThe subject is completely frozen, as rigid and motionless as a statue. Only the camera moves. There is no wind, no breeze, no air movement, no breathing, no settling, no sway, no secondary motion of any kind. Orientation, surfaces and lighting are identical in every shot, and the subject stays the same size in frame.")
+}
+
+fn timeline(mode: u32) -> string effects {alloc} {
+  if mode == four_panel() {
+    return string.copy("[0-2 seconds] tight full shot of the subject. The camera makes one smooth fixed-speed orbit to the left around it, sweeping 180 degrees: starting square on the back, passing the left side a third of the way through this move, and ending square on the front at 2 seconds. The subject does not move at all. Ends on the back view at 2 seconds.\n\n[2-3 seconds] Camera whip-pans front and snaps into a fast push-in on the character's upper body. Locked-off head and shoulders close-up, face square to camera, eyes into the lens. Ends on a sharp front-on face at 3 seconds.\n\n[CAMERA] One constant-speed 180-degree orbit in beat 1, then a hard whip-pan back to front and a push-in for beat 2. No zoom, no dolly, no tilt, no roll, no handheld shake, no motion blur, no dissolves beyond the one whip-pan cut.\n[AUDIO] Silence. No music, no room tone, no voices.")
+  }
+  string.copy("[0-3 seconds] tight full shot of the subject. The camera makes one smooth fixed-speed orbit right around it, a full 360 degrees: starting square on the front, passing the left side a quarter of the way round, directly behind at halfway, the right side three quarters of the way round, and returning to the front. The subject does not move at all. Ends back on the front view at 3 seconds.\n\n[3-4 seconds] Camera snaps into a fast push-in on the character's face. Locked-off head and shoulders close-up, face square to camera, eyes into the lens. Ends on a sharp front-on face.\n\n[4-5 seconds] camera whip-pans and rotates to a orthogonal angle. Locked-off head and shoulders close-up, head turned to a three-quarter angle, eyes still forward. Ends on a clean three-quarter face.\n\n[CAMERA] One constant-speed orbit in beat 1, then locked off and static. The camera is the only thing in the scene that moves at any point. No zoom, no push in, no dolly, no tilt, no roll, no handheld shake, no motion blur, no dissolves.\n[AUDIO] Silence. No music, no room tone, no voices.")
+}
+
+pub fn prompt(input: str, mode: u32, style_mode: u32) -> result<string,string>
+    effects {alloc} {
+  if not valid(mode) { return result.err(string.copy("Select a four- or six-panel character sheet")) }
+  var out: string = if str.len(input) == 0 { general_input() } else { string.copy(input) }
+  string.append(out,"\n\n")
+  string.append(out,str.view(style(style_mode)))
+  string.append(out,"\n\n")
+  string.append(out,str.view(staging()))
+  string.append(out,"\n\n")
+  string.append(out,str.view(timeline(mode)))
+  result.ok(out)
+}
+
+pub fn stitch(frames: ref<array<draw.Surface>>, mode: u32)
+    -> result<draw.Surface,string> effects {alloc} {
+  let count: u64 = if mode == four_panel() { 4 } else if mode == six_panel() { 6 } else { 0 }
+  if count == 0 or array.len(frames) != count {
+    return result.err(string.copy("Character-sheet frame count does not match the selected layout"))
+  }
+  let first = array.borrow(frames,0)
+  let frame_width: u64 = cast.wrap(first.width)
+  let frame_height: u64 = cast.wrap(first.height)
+  if frame_width == 0 or frame_height == 0 {
+    return result.err(string.copy("Character-sheet frames must be non-empty"))
+  }
+  var index: u64 = 1
+  loop {
+    if index >= count { break }
+    let current = array.borrow(frames,index)
+    let current_width: u64 = cast.wrap(current.width)
+    let current_height: u64 = cast.wrap(current.height)
+    if current_width != frame_width or current_height != frame_height {
+      return result.err(string.copy("Character-sheet frames must have identical dimensions"))
+    }
+    index = index + 1
+  }
+  let columns: u64 = if mode == four_panel() { 2 } else { 3 }
+  let gutter: u64 = 6
+  let output_width: u64 = columns * frame_width + (columns - 1) * gutter
+  let output_height: u64 = 2 * frame_height + gutter
+  var surface: draw.Surface = match draw.surface(cast.sat(output_width),cast.sat(output_height)) {
+    some(value) => value,
+    none => { return result.err(string.copy("Character sheet exceeds AIR's image-size limit")) },
+  }
+  var canvas = draw.canvas(surface)
+  draw.clear(canvas,draw.rgb(0,0,0))
+  index = 0
+  loop {
+    if index >= count { break }
+    let column: u64 = index % columns
+    let row: u64 = index / columns
+    let left: u64 = column * (frame_width + gutter)
+    let top: u64 = row * (frame_height + gutter)
+    let area = match geometry.rect(cast.float(left),cast.float(top),
+        cast.float(left + frame_width),cast.float(top + frame_height)) {
+      some(value) => value,
+      none => { return result.err(string.copy("Cannot place a character-sheet panel")) },
+    }
+    draw.draw_image(canvas,array.borrow(frames,index),area)
+    index = index + 1
+  }
+  result.ok(draw.finish(canvas))
+}
+
+pub fn from_video(video: str, scratch_root: str, output: str, mode: u32)
+    -> result<unit,string> effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  if not valid(mode) { return result.err(string.copy("Select a four- or six-panel character sheet")) }
+  var frames: array<draw.Surface> = []
+  var indices = frame_indices(mode)
+  var index: u64 = 0
+  loop {
+    if index >= array.len(indices) { break }
+    let position_ms: u64 = array.get(indices,index) * 1000 / 24
+    var frame = try media.frame(video,scratch_root,position_ms,0)
+    array.push(frames,frame)
+    index = index + 1
+  }
+  var sheet = try stitch(frames,mode)
+  let encoded = image.encode_png(sheet)
+  let temporary = text.concat(output,text.concat(".tmp-",string.from_int(time.monotonic_ns())))
+  match files.write_atomic_bytes(output,str.view(temporary),bytes.view(encoded)) {
+    ok(_) => result.ok(()),
+    err(problem) => result.err(text.concat("Cannot save character sheet: ",fs.error.message(problem))),
+  }
+}

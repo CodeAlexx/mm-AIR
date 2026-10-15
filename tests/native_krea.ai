@@ -1,0 +1,76 @@
+module app.mm_air.tests.native_krea
+import "../native_krea.ai" as form
+import "../parameters.ai" as parameters
+import std.widgets as w
+
+pub fn main(args:view<str>)->i32 effects {alloc,io.write,random} {
+  var original=parameters.KreaRequest{prompt:"A café garden",seed:-1,width:1024,height:1024,
+    output:"D:/images/first.png",loras:[
+      parameters.LoraEntry{path:"D:/loras/café.safetensors",strength:0.75,enabled:true},
+      parameters.LoraEntry{path:"D:/loras/second.safetensors",strength:-0.5,enabled:false}]}
+  var ui=w.new(900,900)
+  w.begin(ui)
+  let root=w.panel(ui,1,0,true,0,1,8,8)
+  form.fields(ui,root,100,original)
+  w.finish(ui)
+  var restored=match form.request(ui,100,original){ok(value)=>value,err(_)=>{return 1},}
+  if restored.seed!= -1 or array.len(struct.borrow(restored,field=loras))!=2{return 2}
+  if array.borrow(struct.borrow(restored,field=loras),0).strength!=0.75{return 3}
+  w.set_text(ui,w.find(ui,103),"9223372036854775807")
+  w.set_text(ui,w.find(ui,106),"D:/images/edited.png")
+  w.check(ui,w.find(ui,133),false)
+  w.check(ui,w.find(ui,138),true)
+  w.set_text(ui,w.find(ui,140),"-1.25")
+  var edited=match form.request(ui,100,original){ok(value)=>value,err(_)=>{return 4},}
+  if edited.seed!=9223372036854775807 or edited.output!="D:/images/edited.png"{return 5}
+  if array.borrow(struct.borrow(edited,field=loras),1).strength!= -1.25{return 6}
+  let encoded=match parameters.encode_krea(edited){ok(value)=>value,err(_)=>{return 7},}
+  var decoded=match parameters.decode_krea(encoded){ok(value)=>value,err(_)=>{return 8},}
+  if decoded.seed!=edited.seed or array.borrow(struct.borrow(decoded,field=loras),1).strength!= -1.25{return 9}
+  w.check(ui,w.find(ui,133),true)
+  match form.request(ui,100,original){ok(_)=>{return 10},err(_)=>{},}
+  w.check(ui,w.find(ui,133),false)
+  w.set_text(ui,w.find(ui,140),"NaN")
+  match form.request(ui,100,original){ok(_)=>{return 11},err(_)=>{},}
+  w.set_text(ui,w.find(ui,140),"0.5")
+  w.set_text(ui,w.find(ui,103),"9223372036854775808")
+  match form.request(ui,100,original){ok(_)=>{return 12},err(_)=>{},}
+  w.set_text(ui,w.find(ui,103),"-2")
+  match form.request(ui,100,original){ok(_)=>{return 13},err(_)=>{},}
+  if original.seed!= -1 or original.output!="D:/images/first.png"{return 14}
+  if not array.borrow(struct.borrow(original,field=loras),0).enabled{return 15}
+  match form.resolve_seed(original){ok(_)=>{},err(_)=>{return 16},}
+  if original.seed<0 or original.seed>72057594037927935{return 17}
+  let chosen=original.seed
+  match form.resolve_seed(original){ok(_)=>{},err(_)=>{return 18},}
+  if original.seed!=chosen{return 19}
+  w.set_text(ui,w.find(ui,103),"42")
+  w.set_text(ui,w.find(ui,101),"")
+  var draft=match form.snapshot(ui,100,original){ok(value)=>value,err(_)=>{return 20},}
+  if draft.prompt!=""{return 21}
+  match form.add_lora(draft,"invalid.txt"){ok(_)=>{return 22},err(_)=>{},}
+  match form.add_lora(draft,"third.safetensors"){ok(_)=>{},err(_)=>{return 23},}
+  match form.add_lora(draft,"fourth.safetensors"){ok(_)=>{},err(_)=>{return 24},}
+  match form.add_lora(draft,"fifth.safetensors"){ok(_)=>{},err(_)=>{return 25},}
+  w.begin(ui)
+  let second_root=w.panel(ui,1,0,true,0,1,8,8)
+  form.fields_page(ui,second_root,100,draft,1)
+  w.finish(ui)
+  form.restore(ui,100,draft)
+  if w.find(ui,134)!=0 or w.find(ui,149)==0{return 26}
+  w.set_text(ui,w.find(ui,150),"0.25")
+  var paged=match form.snapshot(ui,100,draft){ok(value)=>value,err(_)=>{return 27},}
+  if array.len(struct.borrow(paged,field=loras))!=5{return 28}
+  if array.borrow(struct.borrow(paged,field=loras),1).strength!=0.5{return 29}
+  if array.borrow(struct.borrow(paged,field=loras),3).strength!=0.25{return 30}
+  if not form.remove_lora(paged,0) or form.remove_lora(paged,99){return 31}
+  w.begin(ui)
+  let third_root=w.panel(ui,1,0,true,0,1,8,8)
+  form.fields_page(ui,third_root,100,paged,1)
+  w.finish(ui)
+  form.restore(ui,100,paged)
+  if w.text_of(ui,w.find(ui,149))!="fifth.safetensors"{return 32}
+  if array.borrow(struct.borrow(paged,field=loras),2).strength!=0.25{return 33}
+  io.write("Native Krea controls: exact signed seeds, LoRA edits, validation and parameter round-trip passed.\n")
+  0
+}

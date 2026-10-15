@@ -1,0 +1,83 @@
+module app.mm_air.tests.character_sheet_generate
+
+import "../character_sheet.ai" as sheet
+import "../generate.ai" as generation
+import "../.air/deps/h3/media.ai" as media
+import "../.air/deps/h3/session.ai" as session
+import std.channel as channel
+import std.text as text
+
+fn failure(message: str) -> i32 effects {io.write} {
+  io.ewrite(message)
+  io.ewrite("\n")
+  1
+}
+
+pub fn main(args: view<str>) -> i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
+  if view.len(args) != 4 {
+    io.ewrite("usage: character-sheet-generate REFERENCE SOURCE_MP4 SHEET_PNG\n")
+    return 2
+  }
+  var configuration = match generation.configuration() {
+    ok(value) => value,
+    err(problem) => { return failure(str.view(problem)) },
+  }
+  var prompt = match sheet.prompt(str.view(sheet.general_input()),
+      sheet.six_panel(),sheet.keep_picture_style()) {
+    ok(value) => value,
+    err(problem) => { return failure(str.view(problem)) },
+  }
+  let geometry = match media.geometry(120,768,1376) {
+    ok(value) => value,
+    err(problem) => { var held = problem
+      var message = media.error_message(held)
+      return failure(str.view(message)) },
+  }
+  var receiver = match channel.open(128,1024) {
+    ok(value) => value,
+    err(problem) => { var held = problem
+      return failure(str.view(channel.message(held))) },
+  }
+  var references: array<string> = [string.copy(view.get(args,1))]
+  var audio: array<string> = []
+  var job = generation.job(configuration,str.view(prompt),session.Model.Reference,
+    session.Task.Ref2VA,geometry,references,audio,view.get(args,2),
+    sheet.six_panel(),view.get(args,3),20260831,19,
+    session.Projection.ExactBF16,session.Projection.RowScaledI8,
+    session.Attention.DenseInt8,channel.ticket(receiver),
+    session.Schedule.Exponential)
+  var completed = generation.Outcome {succeeded:false,output:string.new(),
+    message:string.copy("H3 character-sheet worker did not complete"),runtime_ms:0,
+    peak_vram_bytes:0}
+  task.scope {
+    var jobs: array<task<generation.Outcome>> = [task.spawn(job,fn=generation.run)]
+    loop {
+      match channel.recv_now(receiver,time.monotonic_ns()) {
+        ok(value) => match value {
+          some(item) => { var update = item
+            match channel.text_of(update) {
+              some(message) => { io.write(str.view(message))
+                io.write("\n") },
+              none => {},
+            } },
+          none => {},
+        },
+        err(_) => {},
+      }
+      match task.wait_any(jobs,0) {
+        some(_) => { completed = task.join(option.unwrap(array.pop(jobs)))
+          break },
+        none => { time.sleep_ms(50) },
+      }
+    }
+  }
+  let _ = channel.close(receiver)
+  io.write(text.concat("result=",text.concat(
+    if completed.succeeded {"success"} else {"failure"},"\n")))
+  io.write(text.concat("output=",text.concat(
+    struct.borrow(completed,field=output),"\n")))
+  io.write(text.concat("message=",text.concat(
+    struct.borrow(completed,field=message),"\n")))
+  if completed.succeeded { 0 } else { 1 }
+}

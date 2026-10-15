@@ -1,0 +1,73 @@
+// Two-window native Ref2VA repair gate using the explicit streaming ConvRot
+// transformer policy selected by Rolling mode. This proves actual rolling
+// execution and records the aggregate receipt; it does not infer a memory
+// target from planning alone.
+module app.mm_air.tests.rolling_repair_generate
+
+import "../generate.ai" as generation
+import "../repair_runtime.ai" as repair_runtime
+import "../.air/deps/h3/media.ai" as media
+import "../.air/deps/h3/session.ai" as session
+import "../.air/deps/h3_repair/plan.ai" as repair_plan
+import std.channel as channel
+import std.files as files
+
+fn fail(message:str)->i32 effects{io.write}{
+  io.ewrite(message)
+  io.ewrite("\n")
+  1
+}
+
+pub fn main(args:view<str>)->i32
+    effects{alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+  if view.len(args)!=7{
+    io.ewrite("usage: rolling-repair-generate SOURCE_VIDEO IDENTITY_IMAGE SOURCE_MASK SAM_PLUGIN SAM_MODEL OUTPUT_MP4\n")
+    return 2
+  }
+  let source=view.get(args,1)
+  let identity=view.get(args,2)
+  let source_mask=view.get(args,3)
+  let output=view.get(args,6)
+  var configuration=match generation.configuration(){ok(value)=>value,
+    err(message)=>{return fail(str.view(message))}}
+  var facts=match repair_runtime.inspect(source,"/tmp"){ok(value)=>value,
+    err(message)=>{return fail(str.view(message))}}
+  if facts.frames<60{return fail("Rolling Repair GPU gate needs at least 60 source frames")}
+  var geometry=match media.geometry(facts.frames,facts.width,facts.height){
+    ok(value)=>value,err(problem)=>{var held=problem
+      return fail(str.view(media.error_message(held)))}}
+  // The production UI continuously drains progress. This synchronous GPU gate
+  // does not, so keep enough bounded capacity for both windows instead of
+  // allowing progress reporting to become the thing under test.
+  var receiver=match channel.open(4096,128){ok(value)=>value,
+    err(problem)=>{var held=problem
+      return fail(str.view(channel.message(held)))}}
+  var references:array<string> = [string.copy(source),string.copy(identity)]
+  var job=generation.job(configuration,
+    "Replace the source dancer with the claymation dancer shown in the image reference. Preserve the source action, body trajectory, camera, background, lighting, timing, and soundtrack.",
+    session.Model.Reference,session.Task.Ref2VA,geometry,references,[],output,
+    0,"",202609131337,7,session.Projection.ConvRotI8,
+    session.Projection.RowScaledI8,session.Attention.DenseInt8,
+    channel.ticket(receiver),session.Schedule.Exponential)
+  var settings=repair_runtime.settings(12,48,5,5,1.0,
+    repair_plan.MemoryMode.Rolling,39,22)
+  match repair_runtime.set_spatial_mask(settings,source_mask,2,8,4){
+    ok(_)=>{},err(message)=>{return fail(message)}}
+  match generation.enable_repair(job,settings){ok(_)=>{},err(message)=>{
+    return fail(str.view(message))}}
+  match generation.enable_two_matte(job,view.get(args,4),view.get(args,5)){
+    ok(_)=>{},err(message)=>{return fail(message)}}
+  var completed=generation.run(job)
+  let _=channel.close(receiver)
+  io.write("rolling-repair runtime_ms=")
+  io.write(str.view(string.from_int(completed.runtime_ms)))
+  io.write(" peak_vram_bytes=")
+  io.write(str.view(string.from_int(completed.peak_vram_bytes)))
+  io.write("\n")
+  if not completed.succeeded{return fail(struct.borrow(completed,field=message))}
+  let saved=match files.is_file(output){ok(value)=>value,err(problem)=>{
+    return fail(problem.message)}}
+  if not saved{return fail("Rolling Repair output was not saved")}
+  io.write("MM-Air native two-window Rolling Repair GPU PASS\n")
+  0
+}

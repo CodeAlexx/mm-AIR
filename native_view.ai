@@ -1,0 +1,145 @@
+// Shared native presenter. Full application and Windows UI validation use this tree.
+module app.mm_air.native_view
+import std.widgets as w
+import std.draw as draw
+import std.path as path
+import "native_generate.ai" as form
+import "native_krea.ai" as krea_form
+import "native_h3.ai" as h3_form
+import "parameters.ai" as parameters
+import "library.ai" as library
+import "native_movie.ai" as movie_view
+
+// MM-Air desktop.css semantic palette, rendered by AIR's Windows toolkit.
+pub fn configure(ui:ref<w.Ui>)->unit effects {} {
+  struct.set(ui,w.Theme{background:draw.rgb(22,24,27),surface:draw.rgb(28,31,35),
+    ink:draw.rgb(227,229,232),faint:draw.rgb(150,156,165),line:draw.rgb(48,53,59),
+    accent:draw.rgb(111,148,200),accent_ink:draw.rgb(16,20,21),danger:draw.rgb(235,80,80),
+    selection:draw.rgb(45,58,76),shade:draw.rgb(35,39,44)},field=theme)
+}
+pub fn history_rows(ui:ref<w.Ui>,history:ref<array<library.Item>>)->unit effects {alloc} {
+  let list=w.find(ui,41)
+  w.clear_cells(ui,list)
+  var index:u64=0
+  loop{if index>=array.len(history){break}
+    w.push_cell(ui,list,path.basename(struct.borrow(array.borrow(history,index),field=path)))
+    index=index+1
+  }
+}
+pub fn image_edit(ui:ref<w.Ui>)->bool effects {} {w.checked_of(ui,w.find(ui,62))}
+pub fn select_model(ui:ref<w.Ui>,krea:bool,h3_active:bool)->unit effects {alloc} {
+  w.check(ui,w.find(ui,63),false)
+  w.show(ui,w.find(ui,9000),false)
+  w.show(ui,w.find(ui,3),true)
+  w.show(ui,w.find(ui,30),true)
+  w.check(ui,w.find(ui,16),not krea and not h3_active)
+  w.check(ui,w.find(ui,18),h3_active)
+  w.show(ui,w.find(ui,38),h3_active)
+  w.check(ui,w.find(ui,17),krea)
+  w.show(ui,w.find(ui,36),not krea and not h3_active)
+  w.show(ui,w.find(ui,37),krea)
+  w.enable(ui,w.find(ui,12),not krea and not h3_active)
+  w.check(ui,w.find(ui,60),true)
+  w.check(ui,w.find(ui,62),false)
+  w.show(ui,w.find(ui,2),true)
+  w.set_text(ui,w.find(ui,73),"Generate")
+  w.set_text(ui,w.find(ui,14),"Generate")
+  w.set_text(ui,w.find(ui,110),"Source image (optional)")
+  w.set_text(ui,w.find(ui,20),if h3_active{"H3 video and audio generation"}else{""})
+  w.layout(ui)
+}
+pub fn select_image_edit(ui:ref<w.Ui>)->unit effects {alloc} {
+  select_model(ui,false,false)
+  w.check(ui,w.find(ui,60),false)
+  w.check(ui,w.find(ui,62),true)
+  w.show(ui,w.find(ui,2),false)
+  w.set_text(ui,w.find(ui,73),"Image Edit · Qwen-Image-2.1")
+  w.set_text(ui,w.find(ui,14),"Generate Edit")
+  w.set_text(ui,w.find(ui,110),"Source image (or supply references below)")
+  w.set_text(ui,w.find(ui,20),"Image Edit · choose source images and describe the change")
+  w.layout(ui)
+}
+pub fn qwen_request(ui:ref<w.Ui>,prior:ref<parameters.QwenImageRequest>)->result<parameters.QwenImageRequest,string> effects {alloc} {
+  var request=try form.qwen_request(ui,100,prior)
+  if image_edit(ui) and struct.borrow(request,field=source)=="" and array.len(struct.borrow(request,field=references))==0{
+    return result.err("Image Edit requires at least one source image or reference")
+  }
+  result.ok(request)
+}
+pub fn layout(ui:ref<w.Ui>,request:ref<parameters.QwenImageRequest>,krea_request:ref<parameters.KreaRequest>,krea:bool,krea_page:u64,history:ref<array<library.Item>>,h3_state:ref<parameters.H3Parameters>,h3_active:bool)->unit effects {alloc} {
+  let editing=image_edit(ui) and not krea and not h3_active
+  let had_h3=w.find(ui,701)!=0
+  var h3_methods=h3_form.methods(ui,700)
+  let had_qwen=w.find(ui,116)!=0
+  let scheduler:u32=if w.checked_of(ui,w.find(ui,117)){1}else{0}
+  let sampler:u32=if w.checked_of(ui,w.find(ui,119)){1}else{0}
+  w.begin(ui)
+  let root=w.panel(ui,1,0,true,0,1,0,0)
+  let header=w.panel(ui,71,root,false,52,0,16,12)
+  let brand=w.label(ui,72,header,100,"MM-Air")
+  let _=w.set_label_style(ui,brand,draw.rgb(227,229,232),0,w.label_left(),0)
+  let _=w.label(ui,73,header,500,"Generate")
+  w.set_chrome(ui,header,draw.rgb(16,20,21),draw.rgb(48,53,59),1)
+  let body=w.panel(ui,70,root,false,0,1,0,0)
+  let rail=w.panel(ui,74,body,true,100,0,8,8)
+  w.set_chrome(ui,rail,draw.rgb(17,21,22),draw.rgb(48,53,59),1)
+  let _=w.tab(ui,60,rail,52,"Generate",true)
+  let _=w.tab(ui,61,rail,52,"Edit",false)
+  let _=w.tab(ui,62,rail,52,"Image Edit",false)
+  let _=w.tab(ui,63,rail,52,"Movie",false)
+  let _=w.tab(ui,64,rail,52,"Control",false)
+  let _=w.tab(ui,65,rail,52,"Prompt",false)
+  // Expose the real workspace map without advertising unfinished handlers.
+  var unavailable:array<u64> = [61,64,65]
+  var i:u64=0
+  loop{if i>=array.len(unavailable){break}
+    let widget=w.find(ui,array.get(unavailable,i))
+    w.enable(ui,widget,false)
+    w.set_semantics(ui,widget,"tab",w.text_of(ui,widget),"Windows workspace not yet connected")
+    i=i+1
+  }
+  let workspace=w.panel(ui,75,body,true,0,1,10,12)
+  let bar=w.toolbar(ui,3,workspace,34,8,0)
+  let _=w.button(ui,10,bar,140,"Load Parameters")
+  let _=w.button(ui,11,bar,140,"Save Parameters")
+  let _=w.button(ui,12,bar,120,"Source Image")
+  let _=w.button(ui,13,bar,120,"Output File")
+  let _=w.button(ui,14,bar,140,"Generate")
+  let _=w.button(ui,15,bar,100,"Cancel")
+  w.enable(ui,w.find(ui,15),false)
+  let models=w.toolbar(ui,2,workspace,32,8,0)
+  let _=w.tab(ui,18,models,180,"MiniMax H3",h3_active)
+  let _=w.tab(ui,16,models,200,"Qwen-Image-2.1",not krea and not h3_active)
+  let _=w.tab(ui,17,models,180,"Krea 2 Turbo",krea)
+  let content=w.panel(ui,30,workspace,false,0,1,12,0)
+  let editor=w.panel(ui,31,content,true,600,0,6,12)
+  w.set_chrome(ui,editor,draw.rgb(28,31,35),draw.rgb(48,53,59),1)
+  let _=w.label(ui,78,editor,26,"Parameters")
+  let qwen_panel=w.panel(ui,36,editor,true,0,1,8,0)
+  form.qwen_fields(ui,qwen_panel,100,request)
+  let krea_panel=w.panel(ui,37,editor,true,0,1,8,0)
+  krea_form.fields_page(ui,krea_panel,300,krea_request,krea_page)
+  let h3_panel=w.panel(ui,38,editor,true,0,1,4,0)
+  h3_form.fields(ui,h3_panel,700,struct.borrow(h3_state,field=request))
+  let preview=w.panel(ui,32,content,true,0,1,8,12)
+  w.set_chrome(ui,preview,draw.rgb(16,20,21),draw.rgb(48,53,59),1)
+  let _=w.label(ui,33,preview,26,"Preview")
+  var empty=option.unwrap(draw.surface(1,1))
+  let _=w.image(ui,34,preview,0,1,empty)
+  let _=w.label(ui,35,preview,48,"Select a result to preview")
+  let history_panel=w.panel(ui,76,content,true,220,0,8,12)
+  w.set_chrome(ui,history_panel,draw.rgb(28,31,35),draw.rgb(48,53,59),1)
+  let _=w.label(ui,40,history_panel,26,"History")
+  let _=w.list(ui,41,history_panel,0,1)
+  let _=w.button(ui,42,history_panel,32,"Reuse parameters")
+  let _=w.button(ui,43,history_panel,32,"Clear history")
+  history_rows(ui,history)
+  movie_view.fields(ui,workspace)
+  let _=w.label(ui,20,root,30,"")
+  select_model(ui,krea,h3_active)
+  if editing{select_image_edit(ui)}
+  w.finish(ui)
+  if had_h3{h3_form.restore_methods(ui,700,h3_methods)}
+  if had_qwen{form.restore_methods(ui,100,scheduler,sampler)}
+  ()
+}

@@ -1,0 +1,183 @@
+// H3 reference-video encoder timing and drift check.
+// Usage: video-encode-bench CHECKPOINT MANIFEST OUT.f32 FRAMES [BASELINE.f32]
+// Encodes a deterministic FRAMES-long 832x480 clip twice through the same
+// moments path as Ref2VA intake, reports wall times, writes the moments, and
+// compares them with BASELINE.
+module app.mm_air.tests.video_encode_bench
+
+import "../.air/deps/h3/media.ai" as media
+import "../.air/deps/h3/vae.ai" as vae
+import std.compute_offload as offload
+import std.files as files
+import std.gpu as agpu
+import std.math as math
+import std.text as text
+
+fn width() -> u64 effects {} { 832 }
+fn height() -> u64 effects {} { 480 }
+
+fn pixels(frames: u64) -> array<f32> effects {alloc} {
+  var out: array<f32> = array.new()
+  var channel: u64 = 0
+  loop {
+    if channel >= 3 { break }
+    var frame: u64 = 0
+    loop {
+      if frame >= frames { break }
+      var y: u64 = 0
+      loop {
+        if y >= height() { break }
+        var x: u64 = 0
+        loop {
+          if x >= width() { break }
+          let code: u64 = rem(frame * 17 + y * 5 + x * 3 + channel * 29 +
+            (x / 37) * (y / 41), 251)
+          let value: f32 = cast.float(code)
+          array.push(out, value / 125.5 - 1.0)
+          x = x + 1
+        }
+        y = y + 1
+      }
+      frame = frame + 1
+    }
+    channel = channel + 1
+  }
+  out
+}
+
+fn byte_of(value: u64) -> byte effects {} {
+  let lane: u8 = cast.wrap(value)
+  cast.bits(lane)
+}
+
+fn to_bytes(values: ref<array<f32>>) -> array<byte> effects {alloc} {
+  var out: array<byte> = array.new()
+  var i: u64 = 0
+  loop {
+    if i >= array.len(values) { break }
+    let bits: u32 = cast.bits(array.get(values, i))
+    array.push(out, byte_of(cast.wrap(and(bits, 255))))
+    array.push(out, byte_of(cast.wrap(and(shr(bits, 8), 255))))
+    array.push(out, byte_of(cast.wrap(and(shr(bits, 16), 255))))
+    array.push(out, byte_of(cast.wrap(and(shr(bits, 24), 255))))
+    i = i + 1
+  }
+  out
+}
+
+fn lane(data: view<byte>, offset: u64) -> u32 effects {} {
+  let value: u8 = cast.bits(view.get(data, offset))
+  cast.wrap(value)
+}
+
+fn f32_at(data: view<byte>, index: u64) -> f32 effects {} {
+  let at: u64 = index * 4
+  let bits: u32 = lane(data, at) + lane(data, at + 1) * 256 +
+    lane(data, at + 2) * 65536 + lane(data, at + 3) * 16777216
+  cast.bits(bits)
+}
+
+pub fn main(args: view<str>) -> i32
+    effects {alloc, fs.read, fs.write, gpu, io.write, time} {
+  if view.len(args) != 5 and view.len(args) != 6 {
+    io.ewrite("Usage: video-encode-bench CHECKPOINT MANIFEST OUT.f32 [BASELINE.f32]\n")
+    return 2
+  }
+  let frames: u64 = match text.parse_u64(view.get(args, 4)) {
+    some(value) => value, none => { return 2 },
+  }
+  let geometry: media.Geometry = media.Geometry {frames: frames, width: width(),
+    height: height(), latent_frames: 5, latent_width: width() / 16,
+    latent_height: height() / 16, audio_latents: 0, audio_samples: 0}
+  var input: array<f32> = pixels(frames)
+  var context: GpuContext = match agpu.open(0) {
+    ok(value) => value, err(problem) => { io.ewrite(problem.message)
+      return 1 },
+  }
+  var stream: GpuStream = match agpu.compute_stream(context) {
+    ok(value) => value, err(problem) => { io.ewrite(problem.message)
+      return 1 },
+  }
+  var options: offload.Options = offload.Options {
+    mode: offload.Mode.Streaming, fp8_pinned: false, stage_threads: 1}
+  var loader: offload.Offloader = match offload.open(context, view.get(args, 1),
+      view.get(args, 2), options) {
+    ok(value) => value, err(problem) => { io.ewrite(problem.message)
+      return 1 },
+  }
+  var held: offload.Block = match offload.acquire(loader, stream, 0) {
+    ok(value) => value, err(problem) => { io.ewrite(problem.message)
+      return 1 },
+  }
+  var moments: array<f32> = array.new()
+  var run: u64 = 0
+  loop {
+    if run >= 2 { break }
+    let started: u64 = time.monotonic_ns()
+    moments = match vae.encode_video_moments_geometry(context, stream, held,
+        array.view(input), frames, geometry) {
+      ok(value) => value,
+      err(problem) => { io.ewrite(problem.message)
+        io.ewrite(" | ")
+        io.ewrite(str.view(agpu.message(context)))
+        io.ewrite("\n")
+        return 1 },
+    }
+    let elapsed: u64 = (time.monotonic_ns() - started) / 1000000
+    io.write(text_line("run ", run, elapsed))
+    run = run + 1
+  }
+  var properties: agpu.Properties = agpu.properties(context)
+  io.write("peak_mib ")
+  io.write(string.from_int(properties.peak_allocated_bytes / 1048576))
+  io.write("\n")
+  var encoded: array<byte> = to_bytes(moments)
+  match files.write_bytes(view.get(args, 3), array.view(encoded)) {
+    ok(_) => {}, err(_) => { return 1 },
+  }
+  if view.len(args) == 6 {
+    let baseline: bytes = match files.read_bytes(view.get(args, 5)) {
+      ok(value) => value, err(_) => { io.ewrite("cannot read baseline\n")
+        return 1 },
+    }
+    if view.len(bytes.view(baseline)) != array.len(encoded) {
+      io.ewrite("baseline size differs\n")
+      return 1
+    }
+    var max_abs: f64 = 0.0
+    var diff_sq: f64 = 0.0
+    var base_sq: f64 = 0.0
+    var differing: u64 = 0
+    var i: u64 = 0
+    loop {
+      if i >= array.len(moments) { break }
+      let a: f64 = cast.float(f32_at(bytes.view(baseline), i))
+      let b: f64 = cast.float(array.get(moments, i))
+      let d: f64 = math.abs(a - b)
+      if d != 0.0 { differing = differing + 1 }
+      if d > max_abs { max_abs = d }
+      diff_sq = diff_sq + d * d
+      base_sq = base_sq + a * a
+      i = i + 1
+    }
+    io.write("differing ")
+    io.write(string.from_int(differing))
+    io.write(" of ")
+    io.write(string.from_int(array.len(moments)))
+    io.write(" max_abs ")
+    io.write(string.from_float(max_abs))
+    io.write(" rel_l2 ")
+    io.write(string.from_float(math.sqrt(diff_sq / base_sq)))
+    io.write("\n")
+  }
+  0
+}
+
+fn text_line(label: str, index: u64, ms: u64) -> string effects {alloc} {
+  var out: string = string.copy(label)
+  string.append(out, str.view(string.from_int(index)))
+  string.append(out, " ms ")
+  string.append(out, str.view(string.from_int(ms)))
+  string.append(out, "\n")
+  out
+}

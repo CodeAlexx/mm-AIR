@@ -1,0 +1,384 @@
+// H3 Character Swap contracts. Qwen sees bounded visual observations for
+// analysis; H3 receives the original source video and character pictures.
+module app.mm_air.character_swap
+
+import ".air/deps/prompt/types.ai" as prompt
+import std.text as text
+
+pub fn standard() -> u32 effects {} { 0 }
+pub fn enabled() -> u32 effects {} { 1 }
+pub fn masked() -> u32 effects {} { 2 }
+pub fn is_swap(value:u32) -> bool effects {} {
+  value == enabled() or value == masked()
+}
+pub fn is_masked(value:u32) -> bool effects {} { value == masked() }
+pub fn replace_main() -> u32 effects {} { 0 }
+pub fn replace_selected() -> u32 effects {} { 1 }
+pub fn maximum_character_pictures() -> u64 effects {} { 7 }
+
+// Edit mode 2 is the ordinary semantic Character Replace path: source media,
+// identity pictures, and a prompt. Mode 3 is its explicit-mask counterpart.
+pub fn edit_character_replace(value:u32)->bool effects{}{value==2}
+pub fn edit_requires_identity(value:u32)->bool effects{}{
+  value==2 or value==3
+}
+pub fn edit_requires_mask(value:u32)->bool effects{}{
+  value==0 or value==1 or value==3 or value==4
+}
+
+pub type Settings = struct {
+  target_mode: u32,
+  target_notes: string,
+  notes: string,
+  preserve_environment: bool,
+  preserve_camera: bool,
+  strong_identity: bool
+}
+
+pub fn settings(target_mode: u32, target_notes: str, notes: str,
+                preserve_environment: bool, preserve_camera: bool,
+                strong_identity: bool) -> Settings effects {alloc} {
+  Settings {target_mode:target_mode,target_notes:string.copy(target_notes),
+    notes:string.copy(notes),preserve_environment:preserve_environment,
+    preserve_camera:preserve_camera,strong_identity:strong_identity}
+}
+
+pub fn target(value: ref<Settings>) -> result<string,string> effects {alloc} {
+  if value.target_mode == replace_main() {
+    if str.len(struct.borrow(value,field=target_notes)) == 0 {
+      return result.ok("the main onscreen subject identified from <Video 1>")
+    }
+    var main = string.copy("the main onscreen subject matching this user description: ")
+    string.append(main,struct.borrow(value,field=target_notes))
+    return result.ok(main)
+  }
+  if value.target_mode != replace_selected() {
+    return result.err("Choose whether to replace the main or selected subject")
+  }
+  if str.len(struct.borrow(value,field=target_notes)) == 0 {
+    return result.err("Describe the selected source subject so Qwen does not replace every person")
+  }
+  var selected = string.copy("only the source subject matching this user description: ")
+  string.append(selected,struct.borrow(value,field=target_notes))
+  result.ok(selected)
+}
+
+pub fn instruction(value: ref<Settings>) -> result<string,string> effects {alloc} {
+  let chosen: string = try target(value)
+  var out = string.copy("Build the final MiniMax H3 Ref2VA character-swap prompt. Roles are exact: <Video 1> is the source edit; <Picture 1> and later pictures define one replacement identity. Target: ")
+  string.append(out,str.view(chosen))
+  string.append(out,". Replace only that target with <Subject 1>, whose appearance comes from the pictures. Keep every other visible person separate and unchanged. ")
+  if value.preserve_environment {
+    string.append(out,"Preserve source environment, props, lighting, blocking, and background progression. ")
+  } else {
+    string.append(out,"The environment is not locked; follow the user's notes for any scene changes. ")
+  }
+  if value.preserve_camera {
+    string.append(out,"Preserve source framing, camera movement, cuts, rhythm, and pacing. ")
+  } else {
+    string.append(out,"The camera is not locked; follow the user's notes for camera changes. ")
+  }
+  if value.strong_identity {
+    string.append(out,"Request strong face, hair, proportion, outfit, and feature continuity across shots without claiming a guarantee. ")
+  }
+  string.append(out,"Analyze only bounded source frames in their supplied chronological order; never reorder observations or invent events between samples. Do not claim to hear the source, invent dialogue, or transcribe audio. Use N/A for unrequested audio. Follow the system's exact six headings and strictly increasing shot-timing syntax. In retention_analysis mark <Video 1> partially_preserved and the requested <Subject 1> identity anchors fully_preserved; these are instructions, not guarantees. Begin summary with [video editing + reference generation]. Return only the editable prompt.")
+  if str.len(struct.borrow(value,field=notes)) != 0 {
+    string.append(out,"\n\nUser notes: ")
+    string.append(out,struct.borrow(value,field=notes))
+  }
+  result.ok(out)
+}
+
+pub fn request(model: prompt.ModelChoice, source_video: str,
+               character_pictures: ref<array<string>>, value: ref<Settings>)
+    -> result<prompt.Request,string> effects {alloc} {
+  if str.len(source_video) == 0 {
+    return result.err("Choose a source video before building the character-swap prompt")
+  }
+  let count: u64 = array.len(character_pictures)
+  if count == 0 {
+    return result.err("Add at least one reference character picture before building the prompt")
+  }
+  if count > maximum_character_pictures() {
+    return result.err("Character Swap accepts at most seven character pictures")
+  }
+  var attachments: array<prompt.Attachment> = [
+    prompt.attachment(source_video,prompt.AttachmentKind.Video,1)]
+  var index: u64 = 0
+  loop {
+    if index >= count { break }
+    array.push(attachments,prompt.attachment(array.borrow(character_pictures,index),
+      prompt.AttachmentKind.Image,index+1))
+    index = index + 1
+  }
+  let user_instruction: string = try instruction(value)
+  var built = prompt.request(model,prompt.Task.CharacterSwap,
+    prompt.Transform.None,str.view(user_instruction),[],attachments)
+  // CharacterSwap has a bounded 768-token decoder allowance so its mandatory
+  // six sections are not cut off at the generic Prompt Lab 512-token limit.
+  struct.set(built,768,field=maximum_new_tokens)
+  struct.set(built,0.2,field=temperature)
+  struct.set(built,0.9,field=top_p)
+  result.ok(built)
+}
+
+// Direct swap instruction in the form the Character Swap LoRA was trained and
+// evaluated with (akatz-ai/MiniMax-H3-Character-Swap-LoRA). It names the target
+// once and never describes the source subject's look, so the source identity
+// cannot leak back in and the scene is not re-described for regeneration.
+pub fn direct_prompt(value: ref<Settings>, pictures: u64)
+    -> result<string,string> effects {alloc} {
+  if pictures == 0 {
+    return result.err("Add at least one reference character picture before building the prompt")
+  }
+  let notes: str = struct.borrow(value,field=target_notes)
+  let who: string = if value.target_mode == replace_main() {
+    if str.len(notes) == 0 { string.copy("the main person") } else { string.copy(notes) }
+  } else if value.target_mode == replace_selected() {
+    if str.len(notes) == 0 {
+      return result.err("Describe the selected source subject so only that person is replaced")
+    }
+    string.copy(notes)
+  } else {
+    return result.err("Choose whether to replace the main or selected subject")
+  }
+  var out = string.copy("Replace only ")
+  string.append(out,str.view(who))
+  string.append(out," in <Video 1> with the character in <Picture 1>")
+  if pictures > 1 {
+    string.append(out," (the same character is also shown in")
+    var index: u64 = 2
+    loop {
+      if index > pictures { break }
+      string.append(out,if index == 2 {" <Picture "} else {", <Picture "})
+      string.append(out,str.view(string.from_int(index)))
+      string.append(out,">")
+      index = index + 1
+    }
+    string.append(out,")")
+  }
+  string.append(out,". Keep the replacement character's identity, face, hair, outfit, and art style from <Picture 1>. Preserve the source video's ")
+  if value.preserve_camera { string.append(out,"camera, framing, ") }
+  if value.preserve_environment { string.append(out,"background, lighting, objects, ") }
+  string.append(out,"and all other people. Match ")
+  string.append(out,str.view(who))
+  string.append(out,"'s position, scale, pose, and movement throughout the clip. Do not show the reference sheet or its background.")
+  let extra: str = struct.borrow(value,field=notes)
+  if str.len(extra) != 0 {
+    string.append(out," ")
+    string.append(out,extra)
+  }
+  result.ok(out)
+}
+
+// Ordinary Character Swap accepts the direct LoRA instruction or a full
+// six-section Ref2VA prompt; either must keep both H3 media roles.
+pub fn validate_swap_prompt(value: str) -> result<unit,string> effects {alloc} {
+  if str.starts_with(value,"subject_definitions:") { return validate_prompt(value) }
+  if not text.contains(value,"<Video 1>") or not text.contains(value,"<Picture 1>") {
+    return result.err("Character Swap prompt must reference the source as <Video 1> and the character as <Picture 1>")
+  }
+  result.ok(())
+}
+
+pub fn masked_request(model: prompt.ModelChoice, source_video: str,
+                      character_pictures: ref<array<string>>,
+                      value: ref<Settings>) -> result<prompt.Request,string>
+    effects {alloc} {
+  var built = try request(model,source_video,character_pictures,value)
+  var instruction = string.copy(struct.borrow(built,field=instruction))
+  string.append(instruction," The authored mask defines the only replaceable subject region. Describe the target identity and motion inside that region while explicitly preserving all people, scenery, camera motion, timing, and pixels outside it. Do not describe a full-frame regeneration.")
+  let _ = ref.swap(struct.borrow(built,field=instruction),instruction)
+  result.ok(built)
+}
+
+pub fn local_image_request(model:prompt.ModelChoice,source_image:str,
+                           references:ref<array<string>>,notes:str)
+    -> result<prompt.Request,string> effects {alloc} {
+  if str.len(source_image)==0 {
+    return result.err("Choose a source image before building the localized edit prompt")
+  }
+  var attachments:array<prompt.Attachment> = [
+    prompt.attachment(source_image,prompt.AttachmentKind.Image,1)]
+  var index:u64=0
+  loop {if index>=array.len(references){break}
+    array.push(attachments,prompt.attachment(array.borrow(references,index),
+      prompt.AttachmentKind.Image,index+2))
+    index=index+1}
+  var instruction=string.copy("Build the final MiniMax H3 Ref2VA prompt for a localized still-image edit. <Picture 1> is the source image and composition anchor. The authored mask is the only replaceable region. Preserve every source pixel outside that mask. Describe the requested edit inside the mask without inventing source motion. Use one untimed [Shot 1], N/A for unrequested audio, and return only the six official sections.")
+  if str.len(notes)!=0 {string.append(instruction,"\n\nRequested local edit: ")
+    string.append(instruction,notes)}
+  var built=prompt.request(model,prompt.Task.LocalEdit,prompt.Transform.None,
+    str.view(instruction),[],attachments)
+  struct.set(built,768,field=maximum_new_tokens)
+  struct.set(built,0.2,field=temperature)
+  struct.set(built,0.9,field=top_p)
+  result.ok(built)
+}
+
+pub fn image_replace_request(model:prompt.ModelChoice,source_image:str,
+                             character_pictures:ref<array<string>>,notes:str)
+    ->result<prompt.Request,string> effects{alloc}{
+  if str.len(source_image)==0{
+    return result.err("Choose a source image before building Character Replace")
+  }
+  if array.len(character_pictures)==0{
+    return result.err("Add at least one Reference Character image")
+  }
+  if array.len(character_pictures)>maximum_character_pictures(){
+    return result.err("Character Replace accepts at most seven identity pictures")
+  }
+  var attachments:array<prompt.Attachment> = [prompt.attachment(source_image,
+    prompt.AttachmentKind.Image,1)]
+  var index:u64=0
+  loop{if index>=array.len(character_pictures){break}
+    array.push(attachments,prompt.attachment(array.borrow(character_pictures,index),
+      prompt.AttachmentKind.Image,index+2))
+    index=index+1}
+  var instruction=string.copy("Build the final MiniMax H3 Ref2VA prompt for semantic character replacement in a still image. <Picture 1> is the source image and composition authority. <Picture 2> and later pictures define <Subject 1>, the replacement character identity. Use the user's prompt to identify which source character to replace. No authored mask exists: replace that character semantically while preserving every other person, the environment, composition, camera viewpoint, lighting, props, and source-image structure. Use one untimed [Shot 1], N/A for unrequested audio, and return only the six official sections.")
+  if str.len(notes)!=0{string.append(instruction,"\n\nRequested replacement: ")
+    string.append(instruction,notes)}
+  var built=prompt.request(model,prompt.Task.LocalEdit,prompt.Transform.None,
+    str.view(instruction),[],attachments)
+  struct.set(built,768,field=maximum_new_tokens)
+  struct.set(built,0.2,field=temperature)
+  struct.set(built,0.9,field=top_p)
+  result.ok(built)
+}
+
+pub fn h3_references(source_video: str, character_pictures: ref<array<string>>)
+    -> array<string> effects {alloc} {
+  var output: array<string> = array.new()
+  if str.len(source_video) != 0 { array.push(output,string.copy(source_video)) }
+  var index: u64 = 0
+  loop {
+    if index >= array.len(character_pictures) { break }
+    array.push(output,string.copy(array.borrow(character_pictures,index)))
+    index = index + 1
+  }
+  output
+}
+
+fn timestamp_ms(value: str, start: u64) -> option<u64> effects {} {
+  // MM:SS.mmm followed by a comma. Keeping this strict makes an editable Qwen
+  // draft fail closed before it can be handed to H3 with ambiguous timing.
+  if start + 10 > str.len(value) or
+     str.slice(value,start+2,start+3) != ":" or
+     str.slice(value,start+5,start+6) != "." or
+     str.slice(value,start+9,start+10) != "," {
+    return option.none()
+  }
+  let minutes: u64 = match text.parse_u64(str.slice(value,start,start+2)) {
+    some(found) => found, none => { return option.none() },
+  }
+  let seconds: u64 = match text.parse_u64(str.slice(value,start+3,start+5)) {
+    some(found) => found, none => { return option.none() },
+  }
+  let millis: u64 = match text.parse_u64(str.slice(value,start+6,start+9)) {
+    some(found) => found, none => { return option.none() },
+  }
+  if seconds >= 60 { return option.none() }
+  option.some((minutes * 60 + seconds) * 1000 + millis)
+}
+
+fn valid_later_shots(value: str) -> bool effects {alloc} {
+  var shot: u64 = 2
+  var previous_time: u64 = 0
+  var previous_position: u64 = 0
+  var gap: bool = false
+  loop {
+    if shot > 32 { break }
+    var label: string = string.copy("[Shot ")
+    string.append(label,str.view(string.from_int(shot)))
+    string.append(label,"]")
+    match str.find(value,str.view(label)) {
+      none => { gap = true },
+      some(position) => {
+        if gap or position <= previous_position { return false }
+        var timed: string = string.copy(str.view(label))
+        string.append(timed," At ")
+        let timed_position: u64 = match str.find(value,str.view(timed)) {
+          some(found) => found, none => { return false },
+        }
+        if timed_position != position { return false }
+        let parsed: u64 = match timestamp_ms(value,position + str.len(str.view(timed))) {
+          some(found) => found, none => { return false },
+        }
+        if parsed <= previous_time { return false }
+        previous_time = parsed
+        previous_position = position
+      },
+    }
+    shot = shot + 1
+  }
+  true
+}
+
+pub fn normalize_prompt(value: str) -> string effects {alloc} {
+  // Qwen3-VL 4B consistently restates the visible zero-time label even when
+  // instructed that H3's first shot is untimed. Correct only that exact,
+  // meaning-preserving spelling; every other structural/timing fault remains
+  // visible to validate_prompt and fails closed.
+  text.replace(value,"[Shot 1] At 00:00.000, ","[Shot 1] ")
+}
+
+pub fn validate_prompt(value: str) -> result<unit,string> effects {alloc} {
+  if not str.starts_with(value,"subject_definitions:") or
+     not text.contains(value,"summary:") or
+     not text.contains(value,"retention_analysis:") or
+     not text.contains(value,"detailed_description:") or
+     not text.contains(value,"overall_soundscape:") or
+     not text.contains(value,"non_diegetic_music:") or
+     not text.contains(value,"<Video 1>") or
+     not text.contains(value,"<Picture 1>") or
+     not text.contains(value,"<Subject 1>") or
+     not text.contains(value,"[Shot 1]") or
+     text.contains(value,"[Shot 1] At") or
+     not text.contains(value,"[video editing + reference generation]") {
+    return result.err("Character Swap prompt needs all six official Ref2VA sections; rebuild or finish the editable prompt")
+  }
+  if not valid_later_shots(value) {
+    return result.err("Character Swap later cuts must be consecutive and use strictly increasing [Shot N] At MM:SS.mmm timing")
+  }
+  result.ok(())
+}
+
+pub fn validate_local_image_prompt(value:str) -> result<unit,string> effects {alloc} {
+  if not str.starts_with(value,"subject_definitions:") or
+     not text.contains(value,"summary:") or
+     not text.contains(value,"retention_analysis:") or
+     not text.contains(value,"detailed_description:") or
+     not text.contains(value,"overall_soundscape:") or
+     not text.contains(value,"non_diegetic_music:") or
+     not text.contains(value,"<Picture 1>") or
+     not text.contains(value,"[Shot 1]") or
+     text.contains(value,"[Shot 1] At") or
+     not text.contains(value,"[keyframe completion + reference generation]") {
+    return result.err("Localized image prompt needs all six official Ref2VA sections with <Picture 1> as source; rebuild or finish the editable prompt")
+  }
+  if not valid_later_shots(value) {
+    return result.err("Localized image prompt cuts must use consecutive increasing [Shot N] At MM:SS.mmm timing")
+  }
+  result.ok(())
+}
+
+pub fn validate_image_replace_prompt(value:str)->result<unit,string> effects{alloc}{
+  if not str.starts_with(value,"subject_definitions:") or
+     not text.contains(value,"summary:") or
+     not text.contains(value,"retention_analysis:") or
+     not text.contains(value,"detailed_description:") or
+     not text.contains(value,"overall_soundscape:") or
+     not text.contains(value,"non_diegetic_music:") or
+     not text.contains(value,"<Picture 1>") or
+     not text.contains(value,"<Picture 2>") or
+     not text.contains(value,"<Subject 1>") or
+     not text.contains(value,"[Shot 1]") or
+     text.contains(value,"[Shot 1] At") or
+     not text.contains(value,"[keyframe completion + reference generation]"){
+    return result.err("Image Character Replace prompt needs all six official Ref2VA sections with source Picture 1 and replacement Picture 2")
+  }
+  if not valid_later_shots(value){
+    return result.err("Image Character Replace cuts must use consecutive increasing [Shot N] At MM:SS.mmm timing")
+  }
+  result.ok(())
+}

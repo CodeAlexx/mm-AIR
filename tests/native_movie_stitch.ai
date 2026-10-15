@@ -1,0 +1,34 @@
+// Actual shared Movie export, built and executed with the Windows runtime.
+module app.mm_air.tests.native_movie_stitch
+import "../movie_project.ai" as movie
+import "../native_movie.ai" as movie_view
+import std.text as text
+import std.system as system
+
+pub fn main(args:view<str>)->i32 effects{alloc,env,fs.meta,fs.write,process,time,io.write}{
+  let quoted=match movie.concat_entry("C:/Alex's clips/take.mp4"){
+    ok(v)=>v,err(_)=>{return 1},}
+  if quoted!="file 'C:/Alex'\\''s clips/take.mp4'\n"{return 2}
+  match movie.concat_entry("bad\nfile.mp4"){ok(_)=>{return 3},err(_)=>{},}
+  if system.platform()=="windows"{
+    let win=match movie.concat_entry("D:\\Movie takes\\clip.mp4"){ok(v)=>v,err(_)=>{return 4},}
+    if win!="file 'D:/Movie takes/clip.mp4'\n"{return 5}
+  }
+  if view.len(args)!=5{io.ewrite("usage: native-movie-stitch CLIP1 CLIP2 OUTPUT SCRATCH\n")
+    return 2}
+  var project=movie.create()
+  movie.set_duration(project,0,1.0)
+  movie.record_take_at(project,0,view.get(args,1),42,true)
+  movie.add_shot(project)
+  movie.set_duration(project,1,1.0)
+  movie.record_take_at(project,1,view.get(args,2),43,true)
+  // An unfinished shot must not extend the exported cut.
+  movie.add_shot(project)
+  movie.set_duration(project,2,5.0)
+  let snapshot=match movie.encode(project){ok(value)=>value,err(problem)=>{io.ewrite(problem)
+    return 6},}
+  var work=movie_view.ExportJob{project:snapshot,output:string.copy(view.get(args,3)),scratch:string.copy(view.get(args,4))}
+  var completed=movie_view.export_movie(work)
+  io.write(struct.borrow(completed,field=message))
+  if completed.succeeded{0}else{1}
+}

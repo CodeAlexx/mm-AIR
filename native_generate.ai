@@ -1,0 +1,137 @@
+// Native AIR controls; no GTK adapter or GTK layout dependency.
+module app.mm_air.native_generate
+import std.widgets as w
+import std.text as text
+import "parameters.ai" as parameters
+import ".air/deps/qwenimage21/contract.ai" as contract
+
+// The caller reserves [base, base+32).
+pub fn qwen_fields(ui:ref<w.Ui>,parent:u64,base:u64,request:ref<parameters.QwenImageRequest>)->unit effects {alloc} {
+  let _=w.label(ui,base,parent,24,"Prompt")
+  let _=w.textarea(ui,base+1,parent,140,struct.borrow(request,field=prompt))
+  let row=w.panel(ui,base+20,parent,false,58,0,12,0)
+  let seed=w.panel(ui,base+21,row,true,0,2,4,0)
+  let width=w.panel(ui,base+22,row,true,0,1,4,0)
+  let height=w.panel(ui,base+23,row,true,0,1,4,0)
+  let steps=w.panel(ui,base+24,row,true,0,1,4,0)
+  let _=w.label(ui,base+2,seed,24,"Seed")
+  let _=w.field(ui,base+3,seed,30,string.from_int(request.seed))
+  let _=w.label(ui,base+4,width,24,"Width")
+  let _=w.field(ui,base+5,width,30,string.from_int(request.width))
+  let _=w.label(ui,base+6,height,24,"Height")
+  let _=w.field(ui,base+7,height,30,string.from_int(request.height))
+  let _=w.label(ui,base+8,steps,24,"Steps")
+  let _=w.field(ui,base+9,steps,30,string.from_int(request.steps))
+  let schedule=w.panel(ui,base+25,parent,false,30,0,8,0)
+  let _=w.label(ui,base+26,schedule,90,"Scheduler")
+  let _=w.radio(ui,base+16,schedule,250,contract.scheduler_name(0),request.scheduler==0)
+  let _=w.radio(ui,base+17,schedule,180,contract.scheduler_name(1),request.scheduler==1)
+  let solver=w.panel(ui,base+27,parent,false,30,0,8,0)
+  let _=w.label(ui,base+28,solver,90,"Sampler")
+  let _=w.radio(ui,base+18,solver,250,contract.sampler_name(0),request.sampler==0)
+  let _=w.radio(ui,base+19,solver,180,contract.sampler_name(1),request.sampler==1)
+  let _=w.label(ui,base+10,parent,24,"Source image (optional)")
+  let _=w.field(ui,base+11,parent,30,struct.borrow(request,field=source))
+  let references=w.panel(ui,base+29,parent,false,28,0,8,0)
+  let _=w.label(ui,base+12,references,355,"Additional references (one path per line)")
+  let _=w.button(ui,base+30,references,145,"Add references")
+  let _=w.textarea(ui,base+13,parent,80,reference_text(request))
+  let _=w.label(ui,base+14,parent,24,"Output PNG")
+  let _=w.field(ui,base+15,parent,30,struct.borrow(request,field=output))
+}
+
+pub fn restore_methods(ui:ref<w.Ui>,base:u64,scheduler:u32,sampler:u32)->unit effects {} {
+  w.check(ui,w.find(ui,base+16),scheduler==0)
+  w.check(ui,w.find(ui,base+17),scheduler==1)
+  w.check(ui,w.find(ui,base+18),sampler==0)
+  w.check(ui,w.find(ui,base+19),sampler==1)
+}
+
+pub fn select_method(ui:ref<w.Ui>,base:u64,key:u64)->bool effects {} {
+  if key==base+16 or key==base+17{
+    w.check(ui,w.find(ui,base+16),key==base+16)
+    w.check(ui,w.find(ui,base+17),key==base+17)
+    return true
+  }
+  if key==base+18 or key==base+19{
+    w.check(ui,w.find(ui,base+18),key==base+18)
+    w.check(ui,w.find(ui,base+19),key==base+19)
+    return true
+  }
+  false
+}
+
+pub fn reference_text(request:ref<parameters.QwenImageRequest>)->string effects {alloc} {
+  text.join(struct.borrow(request,field=references),"\n")
+}
+
+fn reference_paths(source:str)->array<string> effects {alloc} {
+  var lines=text.split(source,"\n")
+  var paths:array<string> = []
+  var index:u64=0
+  loop{if index>=array.len(lines){break}
+    let path=text.trim_newline(array.borrow(lines,index))
+    if path!=""{array.push(paths,path)}
+    index=index+1
+  }
+  paths
+}
+
+// Validate the complete selection before mutating the draft. File-dialog order
+// is model input order; duplicate paths are intentional and remain untouched.
+pub fn add_references(ui:ref<w.Ui>,base:u64,selected:ref<array<string>>)
+    ->result<unit,string> effects {alloc} {
+  if array.len(selected)==0{return result.ok(())}
+  let control=w.find(ui,base+13)
+  var paths=reference_paths(w.text_of(ui,control))
+  let source_count:u64=if w.text_of(ui,w.find(ui,base+11))==""{0}else{1}
+  if source_count+array.len(paths)+array.len(selected)>10 {
+    return result.err("Qwen-Image-2.1 edit accepts at most 10 ordered image sources")
+  }
+  var index:u64=0
+  loop{if index>=array.len(selected){break}
+    let file=array.borrow(selected,index)
+    if not parameters.qwen_condition_image(file){
+      return result.err("Qwen-Image-2.1 edit requires PNG, JPEG, or WebP sources")
+    }
+    array.push(paths,string.copy(file))
+    index=index+1
+  }
+  w.set_text(ui,control,text.join(paths,"\n"))
+  result.ok(())
+}
+
+fn value(ui:ref<w.Ui>,key:u64)->result<string,string> effects {alloc} {
+  let index=w.find(ui,key)
+  if index==0{return result.err("Native generation control is missing")}
+  result.ok(w.text_of(ui,index))
+}
+fn unsigned(ui:ref<w.Ui>,key:u64,label:str)->result<u64,string> effects {alloc} {
+  let source=try value(ui,key)
+  match text.parse_u64(source){some(number)=>result.ok(number),
+    none=>result.err(text.concat(label," must be a whole nonnegative integer")),}
+}
+
+// Build a new validated request. Refusal leaves both the prior request and editors intact.
+pub fn qwen_request(ui:ref<w.Ui>,base:u64,prior:ref<parameters.QwenImageRequest>)
+    ->result<parameters.QwenImageRequest,string> effects {alloc} {
+  let prompt=try value(ui,base+1)
+  let seed=try unsigned(ui,base+3,"Seed")
+  let width=try unsigned(ui,base+5,"Width")
+  let height=try unsigned(ui,base+7,"Height")
+  let steps=try unsigned(ui,base+9,"Steps")
+  let source=try value(ui,base+11)
+  let output=try value(ui,base+15)
+  let paths=try value(ui,base+13)
+  let dynamic=w.checked_of(ui,w.find(ui,base+16))
+  let linear=w.checked_of(ui,w.find(ui,base+17))
+  let euler=w.checked_of(ui,w.find(ui,base+18))
+  let dpm=w.checked_of(ui,w.find(ui,base+19))
+  if dynamic==linear or euler==dpm{return result.err("Select one scheduler and one sampler")}
+  var references=reference_paths(paths)
+  var request=parameters.QwenImageRequest{prompt:prompt,seed:seed,width:width,height:height,
+    steps:steps,scheduler:if linear{1}else{0},sampler:if dpm{1}else{0},
+    source:source,references:references,output:output}
+  try parameters.validate_qwen_image(request)
+  result.ok(request)
+}

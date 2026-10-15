@@ -1,0 +1,105 @@
+module app.mm_air.tests.native_h3
+import "../native_h3.ai" as form
+import "../parameters.ai" as parameters
+import "../.air/deps/h3/request.ai" as h3
+import std.widgets as w
+import std.shell as shell
+import std.image as image
+import std.files as files
+import "../../../AIR/toolkits/portable/fonts.ai" as fonts
+
+pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write,io.write,ui} {
+  var original=h3.request("A robot walks through a garden, birds singing.",0,0,3,1,2,3,-1,6,[],"movie.mp4")
+  var ui=w.new(720,820)
+  let _=fonts.configure(ui,15)
+  w.begin(ui)
+  let root=w.panel(ui,1,0,true,0,1,12,5)
+  form.fields(ui,root,700,original)
+  w.finish(ui)
+  var initial=match form.request(ui,700){ok(v)=>v,err(p)=>{io.ewrite(p)
+    return 1},}
+  if initial.seed!= -1 or initial.geometry.width!=832 or initial.profile!=3{return 2}
+  // A source is required for I2VA; a rejected request must leave the draft intact.
+  let _=form.select(ui,700,743)
+  match form.request(ui,700){ok(_)=>{return 3},err(_)=>{},}
+  w.set_text(ui,w.find(ui,711),"C:/images/日本語 first.png")
+  var first=match form.request(ui,700){ok(v)=>v,err(_)=>{return 4},}
+  if first.task!=1 or array.len(struct.borrow(first,field=references))!=1{return 5}
+  let _=form.select(ui,700,744)
+  match form.request(ui,700){ok(_)=>{return 6},err(_)=>{},}
+  w.set_text(ui,w.find(ui,711),"C:/images/日本語 first.png\r\n\r\nD:/last.png")
+  var endpoints=match form.request(ui,700){ok(v)=>v,err(_)=>{return 7},}
+  if endpoints.task!=2 or array.len(struct.borrow(endpoints,field=references))!=2{return 8}
+  let _=form.select(ui,700,745)
+  match form.request(ui,700){ok(_)=>{return 9},err(_)=>{},}
+  let _=form.select(ui,700,735)
+  w.set_text(ui,w.find(ui,713),"D:/sound.wav")
+  w.set_text(ui,w.find(ui,703),"9223372036854775807")
+  var reference=match form.request(ui,700){ok(v)=>v,err(p)=>{io.ewrite(p)
+    return 10},}
+  if reference.model!=1 or reference.seed!=9223372036854775807{return 11}
+  var loras:array<parameters.LoraEntry> = []
+  let encoded=match parameters.encode_h3(reference,loras){ok(v)=>v,err(_)=>{return 12},}
+  if not parameters.is_h3(encoded) or parameters.is_krea(encoded){return 23}
+  var restored=match parameters.decode_h3(encoded){ok(v)=>v,err(_)=>{return 13},}
+  if restored.request.task!=3 or array.len(struct.borrow(struct.borrow(restored,field=request),field=audio_references))!=1{return 14}
+  let _=form.select(ui,700,746)
+  match form.request(ui,700){ok(_)=>{return 20},err(_)=>{},}
+  w.set_text(ui,w.find(ui,713),"")
+  w.set_text(ui,w.find(ui,711),"D:/last.png")
+  var last=match form.request(ui,700){ok(v)=>v,err(_)=>{return 21},}
+  if last.task!=4{return 22}
+  let _=form.select(ui,700,745)
+  w.set_text(ui,w.find(ui,703),"9223372036854775808")
+  match form.request(ui,700){ok(_)=>{return 15},err(_)=>{},}
+  w.set_text(ui,w.find(ui,703),"42")
+  w.set_text(ui,w.find(ui,705),"255")
+  match form.request(ui,700){ok(_)=>{return 16},err(_)=>{},}
+  w.set_text(ui,w.find(ui,705),"832")
+  var methods=form.methods(ui,700)
+  form.restore(ui,700,original)
+  var reset=match form.request(ui,700){ok(v)=>v,err(_)=>{return 24},}
+  if reset.task!=0 or reset.model!=0 or reset.seed!= -1{return 25}
+  form.restore_methods(ui,700,methods)
+  w.set_text(ui,w.find(ui,711),"D:/last.png")
+  var retained=match form.request(ui,700){ok(v)=>v,err(_)=>{return 26},}
+  if retained.task!=3 or retained.model!=1{return 27}
+  let _=form.select(ui,700,778)
+  var ck=match form.request(ui,700){ok(v)=>v,err(_)=>{return 28},}
+  if ck.attention!=h3.attention_ck_int8(){return 29}
+  if original.task!=0 or original.seed!= -1{return 17}
+  form.restore(ui,700,original)
+  var picked:array<string> = ["C:/images/日本語 first.png"]
+  match form.add_references(ui,700,picked,false){ok(_)=>{},err(_)=>{return 30},}
+  var image_request=match form.request(ui,700){ok(v)=>v,err(_)=>{return 31},}
+  if image_request.task!=h3.task_i2va(){return 32}
+  match form.add_references(ui,700,picked,false){ok(_)=>{return 33},err(_)=>{},}
+  if w.text_of(ui,w.find(ui,711))!="C:/images/日本語 first.png"{return 34}
+  // A two-file picker selection chooses first/last and retains duplicates.
+  form.restore(ui,700,original)
+  array.push(picked,"C:/images/日本語 first.png")
+  match form.add_references(ui,700,picked,false){ok(_)=>{},err(_)=>{return 35},}
+  var pair=match form.request(ui,700){ok(v)=>v,err(_)=>{return 36},}
+  if pair.task!=h3.task_fl2va() or array.len(struct.borrow(pair,field=references))!=2{return 37}
+  var sounds:array<string> = ["D:/Audio/rain.wav"]
+  match form.add_references(ui,700,sounds,true){ok(_)=>{return 38},err(_)=>{},}
+  if w.text_of(ui,w.find(ui,713))!=""{return 39}
+  let _=form.select(ui,700,735)
+  let _=form.select(ui,700,745)
+  match form.add_references(ui,700,sounds,true){ok(_)=>{},err(_)=>{return 40},}
+  if w.text_of(ui,w.find(ui,713))!="D:/Audio/rain.wav"{return 41}
+  var bad:array<string> = ["D:/first.png","bad\npath.png"]
+  match form.add_references(ui,700,bad,false){ok(_)=>{return 42},err(_)=>{},}
+  var unchanged=match form.request(ui,700){ok(v)=>v,err(_)=>{return 43},}
+  if array.len(struct.borrow(unchanged,field=references))!=2{return 44}
+  if view.len(args)>1{
+    var app=match shell.offscreen("H3 native controls",720,820){ok(v)=>v,err(_)=>{return 18},}
+    shell.paint(app,ui)
+    let png=image.encode_png(struct.borrow(struct.borrow(app,field=canvas),field=surface))
+    let saved=files.write_bytes(view.get(args,1),png)
+    shell.close(app)
+    match saved{ok(_)=>{},err(_)=>{return 19},}
+  }
+  io.write("Native H3 request controls passed\n")
+  0
+}

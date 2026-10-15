@@ -1,0 +1,43 @@
+// CPU-only boundary regression: MM-Air preserves a malformed H3 LoRA admission
+// as a typed, replayable failure receipt before any GPU context is opened.
+module app.mm_air.tests.h3_lora_failure
+
+import "../generate.ai" as generate
+import std.files as files
+import std.json as json
+import std.path as path
+
+fn expect(value: bool) -> unit effects {} {
+  if not value { panic "MM-Air H3 LoRA failure receipt regression" }
+  ()
+}
+
+pub fn main(args: view<str>) -> i32
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,time} {
+  if view.len(args) != 3 {
+    io.ewrite("usage: h3-lora-failure CHECKPOINT.safetensors SCRATCH_DIR\n")
+    return 2
+  }
+  let _ = files.mkdirs(view.get(args, 2))
+  var outcome: generate.Outcome = generate.inspect_h3_lora(view.get(args, 1),
+    view.get(args, 2))
+  expect(not outcome.succeeded)
+  let receipt: string = path.join(view.get(args, 2), "mm-air-last-failure.json")
+  let body: string = match files.read_text(str.view(receipt)) {
+    ok(value) => value,
+    err(_) => { panic "MM-Air H3 LoRA failure receipt missing" },
+  }
+  var document: json.Document = match json.parse_owned(body) {
+    ok(value) => value,
+    err(_) => { panic "MM-Air H3 LoRA failure receipt invalid JSON" },
+  }
+  let schema_at: u64 = option.unwrap(json.get(document, json.root(), "schema"))
+  expect(option.unwrap(json.as_string(document, schema_at)) == "air.diagnostic")
+  let payload: u64 = option.unwrap(json.get(document, json.root(), "payload"))
+  let code_at: u64 = option.unwrap(json.get(document, payload, "code"))
+  expect(option.unwrap(json.as_string(document, code_at)) ==
+    "h3_lora/invalid_safetensors")
+  io.write(str.view(receipt))
+  io.write("\nMM-Air H3 LoRA typed failure receipt: PASS\n")
+  0
+}

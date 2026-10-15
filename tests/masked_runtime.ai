@@ -1,0 +1,111 @@
+module app.mm_air.tests.masked_runtime
+import "../masked_runtime.ai" as runtime
+import "../masked_edit.ai" as edit
+import std.files as files
+import std.path as path
+import std.process as proc
+import std.text as text
+import std.system as system
+
+fn expect(value:bool,message:str)->unit effects {io.write}{
+  if not value{io.ewrite(message)
+    panic "masked runtime test"}
+}
+
+fn checked(arguments:array<string> own)->unit effects {process}{
+  match proc.check(arguments){ok(_)=>{},err(_)=>{panic "ffmpeg fixture"}}
+}
+
+pub fn main(args:view<str>)->i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
+  let root=path.join(system.temp_directory(),text.concat("mm-air-masked-runtime-test-",
+    str.view(string.from_int(time.monotonic_ns()))))
+  match files.create_dir(str.view(root)){ok(_)=>{},err(_)=>{panic "test root"}}
+  let source=path.join(str.view(root),"source.mp4")
+  let mask=path.join(str.view(root),"mask.pgm")
+  let output=path.join(str.view(root),"output.mp4")
+  checked(["ffmpeg","-nostdin","-v","error","-y","-f","lavfi","-i",
+    "color=c=blue:s=320x256:r=24","-f","lavfi","-i",
+    "sine=frequency=440:sample_rate=32000:duration=0.1666666666666667",
+    "-frames:v","4","-t","0.1666666666666667","-pix_fmt","yuv420p",
+    "-c:a","aac",string.copy(str.view(source))])
+  checked(["ffmpeg","-nostdin","-v","error","-y","-f","lavfi","-i",
+    "color=c=black:s=320x256","-vf",
+    "drawbox=x=96:y=32:w=128:h=192:color=white:t=fill","-frames:v","1",
+    string.copy(str.view(mask))])
+  var settings=runtime.settings(str.view(mask),false,0.0,0.0,0.0,0.0,
+    1,4,2,0,32,true)
+  var prepared=match runtime.prepare(str.view(source),str.view(output),
+      str.view(root),4,settings) {
+    ok(value)=>value,
+    err(message)=>{io.ewrite(message)
+      panic "prepare"},
+  }
+  expect(prepared.track.working_width==256 and
+    prepared.track.working_height==256,"stable crop geometry\n")
+  expect(prepared.latent.geometry.latent_frames==7 and
+    prepared.latent.geometry.latent_width==16 and
+    prepared.latent.geometry.latent_height==16,"H3 mapped geometry\n")
+  expect(prepared.frames==4 and prepared.conditioning_frames==22,
+    "delivery tail pads source conditioning to H3 endpoint\n")
+  expect(result.is_ok(files.is_file(struct.borrow(prepared,field=cropped_source))),
+    "cropped source exists\n")
+  match files.copy_new(struct.borrow(prepared,field=cropped_source),
+      struct.borrow(prepared,field=h3_output)) {
+    ok(_)=>{},err(_)=>{panic "fixture H3 result copy"},
+  }
+  match runtime.finish(prepared) {
+    ok(_)=>{},err(message)=>{io.ewrite(message)
+      panic "source-preserving finish"},
+  }
+  expect(result.is_ok(files.is_file(str.view(output))),
+    "composited MP4 exists\n")
+  let delivery=path.join(str.view(root),"delivery.rgb")
+  checked(["ffmpeg","-nostdin","-v","error","-y","-i",
+    string.copy(str.view(output)),"-map","0:v:0","-frames:v","5",
+    "-fps_mode","passthrough","-pix_fmt","rgb24","-f","rawvideo",
+    string.copy(str.view(delivery))])
+  var delivered=match files.read_limited(str.view(delivery),5*320*256*3){
+    ok(value)=>value,err(_)=>{panic "read delivered frames"}}
+  expect(view.len(bytes.view(delivered))==4*320*256*3,
+    "audio-bearing masked output must retain all four delivery frames\n")
+  let _=files.remove(str.view(delivery))
+  runtime.discard(prepared)
+  let _=files.remove(str.view(output))
+
+  // Still images use the same authored mask/crop/H3/composite path and publish PNG.
+  let image_source=path.join(str.view(root),"source.png")
+  let image_output=path.join(str.view(root),"output.png")
+  checked(["ffmpeg","-nostdin","-v","error","-y","-f","lavfi","-i",
+    "color=c=green:s=320x256","-frames:v","1",string.copy(str.view(image_source))])
+  var points:array<edit.BrushPoint> = []
+  // Runtime intentionally accepts the generic mask type through paint_settings.
+  array.push(points,edit.brush_point(0.5,0.5,0.2,false,true))
+  var image_settings=runtime.paint_settings(points,0,2,1,0,32,true)
+  var image_prepared=match runtime.prepare(str.view(image_source),str.view(image_output),
+      str.view(root),22,image_settings) {
+    ok(value)=>value,err(message)=>{io.ewrite(message)
+      panic "image prepare"},
+  }
+  expect(not image_prepared.source_video and image_prepared.frames==22 and
+    image_prepared.conditioning_frames==22,
+    "still image uses bounded H3 frame wrapper\n")
+  match files.copy_new(struct.borrow(image_prepared,field=cropped_source),
+      struct.borrow(image_prepared,field=h3_output)) {
+    ok(_)=>{},err(_)=>{panic "still fixture H3 result copy"},
+  }
+  match runtime.finish(image_prepared) {
+    ok(_)=>{},err(message)=>{io.ewrite(message)
+      panic "source-preserving image finish"},
+  }
+  expect(result.is_ok(files.is_file(str.view(image_output))),
+    "composited PNG exists\n")
+  runtime.discard(image_prepared)
+  let _=files.remove(str.view(image_output))
+  let _=files.remove(str.view(image_source))
+  let _=files.remove(str.view(source))
+  let _=files.remove(str.view(mask))
+  let _=files.remove(str.view(root))
+  io.write("MM-Air bounded masked runtime prepare PASS\n")
+  0
+}

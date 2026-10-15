@@ -1,0 +1,173 @@
+// Checkpoint diagnostic using production crop, intake, conditioning and session.
+module app.mm_air.tests.masked_reference_capture
+import "../generate.ai" as generation
+import "../masked_runtime.ai" as masked
+import "../.air/deps/h3/conditioning.ai" as conditioning
+import "../.air/deps/h3/deployment.ai" as deployment
+import "../.air/deps/h3/media.ai" as media
+import "../.air/deps/h3/session.ai" as session
+import "../.air/deps/h3/vae.ai" as vae
+import "../.air/deps/qwen/tokenizer.ai" as tokenizer
+import std.channel as channel
+import std.files as files
+import std.gpu as agpu
+import std.path as path
+import std.tensor as tensor
+import std.text as text
+
+fn write_values(directory:str,name:str,values:view<f32>) -> unit
+    effects {alloc,fs.write} {
+  var output:array<byte> = []
+  var i:u64=0
+  loop {if i>=view.len(values){break}
+    let bits:u32=cast.bits(view.get(values,i))
+    var shift:u32=0
+    loop {if shift>=32{break}
+      let lane:u8=cast.wrap(and(shr(bits,shift),255))
+      array.push(output,cast.bits(lane))
+      shift=shift+8}
+    i=i+1}
+  match files.write_bytes(path.join(directory,name),array.view(output)) {
+    ok(_)=>{},err(_)=>{panic "Cannot write H3 boundary capture"},
+  }
+  ()
+}
+
+fn capture(context:ref<GpuContext>,stream:ref<GpuStream>,job:ref<generation.Job>,
+    directory:str,mode:str) -> result<unit,gpu.error>
+    effects {alloc,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time} {
+  var roots=deployment.Roots{
+    checkpoint_root:string.copy(struct.borrow(job,field=reference_checkpoint_root)),
+    donor_root:string.copy(struct.borrow(job,field=donor_root)),
+    manifest_root:string.copy(struct.borrow(job,field=manifest_root))}
+  var sources=deployment.sources(roots,job.model,job.task,job.evaluations,false,
+    job.timing,job.schedule_kind)
+  var progress:option<channel.Sender> = option.none()
+  if mode=="decoded-session-live" {
+    var connected=match channel.connect(struct.borrow(job,field=progress),
+        time.monotonic_ns()+30000000000){ok(value)=>value,
+      err(_)=>{panic "Cannot connect diagnostic generation progress"},}
+    progress=option.some(connected)
+  }
+  var inputs=match generation.prepare_ref2va_inputs(context,stream,job,sources,
+      struct.borrow(roots,field=checkpoint_root),struct.borrow(roots,field=manifest_root),
+      directory,progress){ok(value)=>value,err(message)=>{
+    io.ewrite(message)
+    panic "H3 reference intake failed"},}
+  if inputs.has_audio {panic "Masked crop unexpectedly contains audio"}
+  var state=match tokenizer.load(deployment.tokenizer_directory(roots)){
+    ok(value)=>value,err(_)=>{panic "Cannot load H3 tokenizer"},}
+  if mode=="conditioning" {
+    var i:u64=0
+    loop {if i>=array.len(struct.borrow(inputs,field=rows)){break}
+      let reference=array.borrow(struct.borrow(inputs,field=rows),i)
+      write_values(directory,text.concat("reference-",text.concat(string.from_int(i),".raw")),
+        array.view(struct.borrow(reference,field=video)))
+      i=i+1}
+    i=0
+    loop {if i>=array.len(struct.borrow(inputs,field=patches)){break}
+      let patch=array.borrow(struct.borrow(inputs,field=patches),i)
+      write_values(directory,text.concat("vision-input-",text.concat(string.from_int(i),".raw")),
+        array.view(struct.borrow(patch,field=rows)))
+      i=i+1}
+    var initial=session.ref2va_initial_state(struct.borrow(inputs,field=rows),job.geometry,job.seed)
+    write_values(directory,"initial-video.raw",array.view(struct.borrow(initial,field=video)))
+    write_values(directory,"initial-audio.raw",array.view(struct.borrow(initial,field=audio)))
+    var conditioned=try conditioning.ref2va_convrot_output(context,stream,
+      struct.borrow(sources,field=conditioning),state,struct.borrow(job,field=prompt),
+      struct.borrow(inputs,field=presentations),struct.borrow(inputs,field=patches))
+    var values=try tensor.to_f32(stream,struct.borrow(conditioned,field=hidden))
+    write_values(directory,"conditioned.raw",array.view(values))
+  } else if mode=="session" or mode=="decoded-session" or mode=="decoded-session-live" {
+    var latents=try session.run_gpu_ref2va_masked_geometry(context,stream,sources,state,
+      struct.borrow(job,field=prompt),struct.borrow(inputs,field=rows),
+      struct.borrow(inputs,field=presentations),struct.borrow(inputs,field=patches),
+      array.view(struct.borrow(job,field=masked_token_weights)),job.geometry,job.seed,
+      job.conditioner_projection,job.transformer_projection,job.attention,
+      job.evaluations,job.schedule_kind,progress)
+    if mode=="decoded-session" or mode=="decoded-session-live" {
+      var decoded=try vae.decode_convrot_geometry(context,stream,
+        struct.borrow(sources,field=video_decoder_aux_checkpoint),
+        struct.borrow(sources,field=video_decoder_aux_manifest),
+        struct.borrow(sources,field=video_decoder_convrot_checkpoint),
+        struct.borrow(sources,field=video_decoder_convrot_manifest),job.geometry,
+        array.view(struct.borrow(latents,field=video)))
+      write_values(directory,"decoded.raw",array.view(decoded))
+      var rgb=match media.rgb24_geometry(array.view(decoded),job.geometry,
+          job.geometry.frames,0,job.geometry.frames){ok(value)=>value,
+        err(_)=>{panic "Cannot quantize in-session H3 pixels"},}
+      match files.write_bytes(path.join(directory,"decoded.rgb"),array.view(rgb)){
+        ok(_)=>{},err(_)=>{panic "Cannot write in-session H3 pixels"},}
+    }
+    write_values(directory,"final-video.raw",array.view(struct.borrow(latents,field=video)))
+    write_values(directory,"final-audio.raw",array.view(struct.borrow(latents,field=audio)))
+  } else {panic "Unknown H3 capture mode"}
+  result.ok(())
+}
+
+type Work = struct {job:generation.Job,directory:string,mode:string}
+fn worker(request:Work own) -> i32
+    effects {alloc,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time} {
+  var owned=request
+  var context=match agpu.open(0){ok(value)=>value,err(_)=>{return 1},}
+  var stream=match agpu.compute_stream(context){ok(value)=>value,err(_)=>{return 1},}
+  let status:i32=match capture(context,stream,struct.borrow(owned,field=job),
+      struct.borrow(owned,field=directory),struct.borrow(owned,field=mode)){
+    ok(_)=>0,err(problem)=>{io.ewrite(problem.message)
+      io.ewrite("\n")
+      1},}
+  let _=agpu.close_stream(stream)
+  let _=agpu.close(context)
+  status
+}
+pub fn main(args:view<str>) -> i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
+  let threaded:bool=view.len(args)==7 and view.get(args,6)=="--thread"
+  if view.len(args)!=6 and not threaded {io.ewrite("usage: masked-reference-capture SOURCE MASK PROMPT DIRECTORY conditioning|session|decoded-session|decoded-session-live [--thread]\n")
+    return 2}
+  let directory=view.get(args,4)
+  var config=match generation.configuration(){ok(value)=>value,err(message)=>{
+    io.ewrite(message)
+    return 1},}
+  var settings=masked.settings(view.get(args,2),false,0.0,0.0,0.0,0.0,1,4,2,0,32,true)
+  var prepared=match masked.prepare(view.get(args,1),path.join(directory,"unused.mp4"),
+      directory,4,settings){ok(value)=>value,err(message)=>{
+    io.ewrite(message)
+    return 1},}
+  let geometry=masked.working_geometry(prepared)
+  var receiver=match channel.open(128,1024){ok(value)=>value,err(_)=>{return 1},}
+  var references:array<string> = [string.copy(struct.borrow(prepared,field=cropped_source))]
+  var audio:array<string> = []
+  var job=generation.job(config,view.get(args,3),session.Model.Reference,session.Task.Ref2VA,
+    geometry,references,audio,path.join(directory,"unused.mp4"),0,"",42,7,
+    session.Projection.ConvRotI8,session.Projection.ConvRotI8,session.Attention.CkInt8,
+    channel.ticket(receiver),session.Schedule.Exponential)
+  struct.set(job,true,field=masked)
+  var weights:array<f32> = []
+  let latent=struct.borrow(prepared,field=latent)
+  var i:u64=0
+  loop {if i>=array.len(struct.borrow(latent,field=token_weights)){break}
+    array.push(weights,array.get(struct.borrow(latent,field=token_weights),i))
+    i=i+1}
+  write_values(directory,"mask-weights.raw",array.view(weights))
+  let _=ref.swap(struct.borrow(job,field=masked_token_weights),weights)
+  var request=Work{job:job,directory:string.copy(directory),mode:string.copy(view.get(args,5))}
+  var status:i32=1
+  if threaded {
+    task.scope {
+      var jobs:array<task<i32>> = [task.spawn(request,fn=worker)]
+      loop {
+        match channel.recv_now(receiver,time.monotonic_ns()){
+          ok(value)=>match value{some(item)=>{var update=item
+            match channel.text_of(update){some(message)=>{io.write(message)
+              io.write("\n")},none=>{}}},none=>{}},err(_)=>{}}
+        match task.wait_any(jobs,0){some(_)=>{
+          status=task.join(option.unwrap(array.pop(jobs)))
+          break},none=>{time.sleep_ms(50)}}
+      }
+    }
+  } else {status=worker(request)}
+  let _=channel.close(receiver)
+  io.write("H3 masked reference boundary capture complete\n")
+  status
+}

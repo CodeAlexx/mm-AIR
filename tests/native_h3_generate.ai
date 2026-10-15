@@ -1,0 +1,83 @@
+// Real generation through the same H3 worker as the native UI.
+// Usage: native-h3-generate PARAMETERS.json; model roots use the app environment.
+module app.mm_air.tests.native_h3_generate
+import "../generate.ai" as generation
+import "../parameters.ai" as parameters
+import std.channel as channel
+import std.files as files
+import std.text as text
+import "../movie_project.ai" as movie
+import "../native_movie.ai" as movie_view
+
+pub fn main(args:view<str>)->i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
+  let movie_mode=view.len(args)==4
+  if view.len(args)!=2 and not movie_mode{io.ewrite("Usage: native-h3-generate PARAMETERS.json | --movie PROJECT.json OUTPUT.mp4\n")
+    return 2}
+  if movie_mode and view.get(args,1)!="--movie"{return 2}
+  var project=movie.create()
+  let source=match files.read_text(view.get(args,if movie_mode{2}else{1})){ok(v)=>v,err(p)=>{
+    io.ewrite(p.message)
+    return 2},}
+  var state=if movie_mode{
+    project=match movie.decode(source){ok(value)=>value,err(problem)=>{io.ewrite(problem)
+      return 2},}
+    var request=match movie_view.request(project,project.selected_shot,view.get(args,3)){
+      ok(value)=>value,err(problem)=>{io.ewrite(problem)
+        return 2},}
+    parameters.H3Parameters{request:request,loras:[]}
+  }else{match parameters.decode_h3(source){ok(v)=>v,err(p)=>{
+    io.ewrite(p)
+    return 2},}
+  }
+  var config=match generation.configuration(){ok(v)=>v,err(p)=>{
+    io.ewrite(p)
+    return 2},}
+  var receiver=match channel.open(128,1024){ok(v)=>v,err(_)=>{return 3},}
+  var job=match generation.h3_job(config,struct.borrow(state,field=request),
+      struct.borrow(state,field=loras),channel.ticket(receiver)){ok(v)=>v,err(p)=>{
+    io.ewrite(p)
+    let _=channel.close(receiver)
+    return 2},}
+  match env.get("MM_AIR_H3_REFERENCE_MATCH"){some(_)=>{generation.enable_reference_video_match(job)},none=>{},}
+  var code:i32=1
+  if movie_mode{
+    var shot=movie.snapshot_shot(project,project.selected_shot)
+    let frames=movie.output_frames(shot)
+    if struct.borrow(shot,field=continue_from)!=""{
+      match generation.enable_motion_context(job,struct.borrow(shot,field=continue_from),shot.motion_context_frames,frames){
+        ok(_)=>{},err(problem)=>{io.ewrite(problem)
+          let _=channel.close(receiver)
+          return 2},}
+    }
+  }
+  task.scope {
+    var jobs:array<task<generation.Outcome>> = [task.spawn(job,fn=generation.run)]
+    loop{
+      match channel.recv_now(receiver,time.monotonic_ns()){
+        ok(value)=>match value{some(message)=>{var update=message
+          match channel.text_of(update){some(note)=>{io.write(note)
+            io.write("\n")},none=>{},}},none=>{},},err(_)=>{},
+      }
+      match task.wait_any(jobs,0){some(_)=>{
+        var finished=task.join(option.unwrap(array.pop(jobs)))
+        io.write(finished.message)
+        io.write("\n")
+        if finished.succeeded{code=0}
+        if movie_mode{
+          movie.record_take_at(project,project.selected_shot,struct.borrow(finished,field=output),cast.sat(state.request.seed),finished.succeeded)
+          match movie.save(project,text.concat(struct.borrow(finished,field=output),".movie.json")){
+            ok(_)=>{},err(problem)=>{io.ewrite(problem)
+              code=4},}
+          let encoded=match parameters.encode_h3(struct.borrow(state,field=request),struct.borrow(state,field=loras)){
+            ok(value)=>value,err(problem)=>{io.ewrite(problem)
+              return 4},}
+          match files.write_text(text.concat(struct.borrow(finished,field=output),".json"),encoded){ok(_)=>{},err(_)=>{code=4},}
+        }
+        break
+      },none=>{time.sleep_ms(10)},}
+    }
+  }
+  let _=channel.close(receiver)
+  code
+}

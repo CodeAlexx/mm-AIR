@@ -1,0 +1,85 @@
+module app.mm_air.tests.outpaint_runtime
+import "../outpaint.ai" as outpaint
+import "../outpaint_runtime.ai" as runtime
+import std.files as files
+import std.path as path
+import std.process as proc
+import std.text as text
+import std.system as system
+
+fn expect(value:bool,message:str)->unit effects{io.write}{if not value{io.ewrite(message)
+panic "outpaint runtime test"}}
+fn checked(arguments:array<string> own)->unit effects{process}{
+  match proc.check(arguments){ok(_)=>{},err(_)=>{panic "ffmpeg fixture"}}}
+
+pub fn main(args:view<str>)->i32
+    effects{alloc,env,fs.meta,fs.read,fs.write,io.write,process,time}{
+  let root=path.join(system.temp_directory(),text.concat("mm-air-outpaint-runtime-test-",
+    str.view(string.from_int(time.monotonic_ns()))))
+  match files.create_dir(str.view(root)){ok(_)=>{},err(_)=>{panic "test root"}}
+  let source=path.join(str.view(root),"source.mp4")
+  let output=path.join(str.view(root),"output.mp4")
+  checked(["ffmpeg","-nostdin","-v","error","-y","-f","lavfi","-i",
+    "color=c=blue:s=320x256:r=24","-f","lavfi","-i",
+    "sine=frequency=440:sample_rate=48000:duration=2","-frames:v","22",
+    "-c:v","libx264rgb","-crf","0","-pix_fmt","rgb24","-c:a","aac",
+    string.copy(str.view(source))])
+  var source_info=match runtime.inspect(str.view(source),str.view(root)){
+    ok(value)=>value,err(message)=>{io.ewrite(message)
+      panic "outpaint inspect"}}
+  expect(source_info.frames==22,"audio tail must not add video delivery frames\n")
+  var settings=runtime.settings(576,256,outpaint.right(),outpaint.anchor_center(),
+    outpaint.exact(),0,124,22,false)
+  var prepared=match runtime.prepare(str.view(source),str.view(output),str.view(root),
+      22,settings){ok(value)=>value,err(message)=>{io.ewrite(message)
+        panic "outpaint prepare"}}
+  expect(prepared.geometry.placement_x==0 and
+    prepared.geometry.expand_right==256,"right outpaint prepared\n")
+  expect(prepared.base.track.working_width==576 and
+    prepared.base.track.working_height==256,"full target H3 canvas\n")
+  let h3_source=runtime.h3_source(prepared)
+  let h3_output=runtime.h3_output(prepared)
+  match files.copy_new(str.view(h3_source),str.view(h3_output)){
+    ok(_)=>{},err(_)=>{panic "fixture H3 result"}}
+  match runtime.finish(prepared){ok(_)=>{},err(message)=>{io.ewrite(message)
+    panic "outpaint finish"}}
+  let bytes_limit:u64=22*576*256*3
+  var before=match files.read_limited(struct.borrow(struct.borrow(prepared,field=base),
+      field=source_raw),bytes_limit){ok(value)=>value,err(_)=>{panic "source RGB"}}
+  var after=match files.read_limited(struct.borrow(struct.borrow(prepared,field=base),
+      field=composite_raw),bytes_limit){ok(value)=>value,err(_)=>{panic "composite RGB"}}
+  let decoded_output=path.join(str.view(root),"decoded-output.rgb")
+  checked(["ffmpeg","-nostdin","-v","error","-y","-i",string.copy(str.view(output)),
+    "-map","0:v:0","-vf","fps=24","-frames:v","22","-pix_fmt","rgb24",
+    "-f","rawvideo",string.copy(str.view(decoded_output))])
+  var delivery=match files.read_limited(str.view(decoded_output),bytes_limit){
+    ok(value)=>value,err(_)=>{panic "delivery RGB"}}
+  expect(view.len(bytes.view(delivery))==bytes_limit,"delivery keeps all frames\n")
+  var frame:u64=0
+  loop{if frame>=22{break}
+    var y:u64=0
+    loop{if y>=256{break}
+      var x:u64=0
+      loop{if x>=320{break}
+        var channel:u64=0
+        loop{if channel>=3{break}
+          let index=((frame*256+y)*576+x)*3+channel
+          expect(view.get(bytes.view(before),index)==view.get(bytes.view(after),index),
+            "preserved source RGB byte changed\n")
+          expect(view.get(bytes.view(before),index)==view.get(bytes.view(delivery),index),
+            "saved source RGB byte changed\n")
+          channel=channel+1}
+        x=x+1}
+      y=y+1}
+    frame=frame+1}
+  checked(["ffprobe","-v","error","-select_streams","a:0","-show_entries",
+    "stream=codec_type","-of","default=noprint_wrappers=1:nokey=1",
+    string.copy(str.view(output))])
+  runtime.discard(prepared)
+  let _=files.remove(str.view(decoded_output))
+  let _=files.remove(str.view(output))
+  let _=files.remove(str.view(source))
+  let _=files.remove(str.view(root))
+  io.write("MM-Air native video outpaint prepare, exact composite and audio PASS\n")
+  0
+}

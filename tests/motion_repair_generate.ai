@@ -1,0 +1,71 @@
+// Focused native H3 Motion Repair acceptance harness. A reusable MotionPlan
+// changes the reference clock only inside the selected repair span; the saved
+// result is restored to the source clock and exact-spliced outside that span.
+module app.mm_air.tests.motion_repair_generate
+
+import "../generate.ai" as generation
+import "../repair_runtime.ai" as repair_runtime
+import "../.air/deps/h3/media.ai" as media
+import "../.air/deps/h3/session.ai" as session
+import "../.air/deps/h3_repair/motion.ai" as motion
+import "../.air/deps/h3_repair/plan.ai" as repair_plan
+import std.channel as channel
+import std.files as files
+
+fn fail(message:str)->i32 effects{io.write}{
+  io.ewrite(message)
+  io.ewrite("\n")
+  1
+}
+
+pub fn main(args:view<str>)->i32
+    effects{alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+  if view.len(args)!=4{
+    io.ewrite("usage: motion-repair-generate SOURCE_VIDEO IDENTITY_IMAGE OUTPUT_MP4\n")
+    return 2
+  }
+  let source=view.get(args,1)
+  let identity=view.get(args,2)
+  let output=view.get(args,3)
+  var configuration=match generation.configuration(){ok(value)=>value,
+    err(message)=>{return fail(str.view(message))}}
+  var facts=match repair_runtime.inspect(source,"/tmp"){ok(value)=>value,
+    err(message)=>{return fail(str.view(message))}}
+  var geometry=match media.geometry(facts.frames,facts.width,facts.height){
+    ok(value)=>value,err(problem)=>{var held=problem
+      return fail(str.view(media.error_message(held)))}}
+  var receiver=match channel.open(128,1024){ok(value)=>value,
+    err(problem)=>{var held=problem
+      return fail(str.view(channel.message(held)))}}
+  var references:array<string> = [string.copy(source),string.copy(identity)]
+  var job=generation.job(configuration,
+    "Replace the source dancer with the claymation dancer shown in the image reference. Preserve the source action, body trajectory, camera, scene, lighting, timing, and soundtrack.",
+    session.Model.Reference,session.Task.Ref2VA,geometry,references,[],output,
+    0,"",202609131337,7,session.Projection.ExactBF16,
+    session.Projection.RowScaledI8,session.Attention.DenseInt8,
+    channel.ticket(receiver),session.Schedule.Exponential)
+  let first:u64=if facts.frames>36{12}else{0}
+  let ending:u64=if facts.frames>36{36}else{facts.frames}
+  var settings=repair_runtime.settings(first,ending,5,5,1.0,
+    repair_plan.MemoryMode.Full,124,22)
+  var plan=motion.create(facts.frames)
+  match motion.add_span(plan,first,ending,2.0){ok(_)=>{},
+    err(message)=>{return fail(str.view(message))}}
+  let encoded=motion.encode(plan)
+  match repair_runtime.set_motion_plan(settings,str.view(encoded)){ok(_)=>{},
+    err(message)=>{return fail(str.view(message))}}
+  generation.enable_repair(job,settings)
+  var completed=generation.run(job)
+  let _=channel.close(receiver)
+  io.write("motion-repair runtime_ms=")
+  io.write(str.view(string.from_int(completed.runtime_ms)))
+  io.write(" peak_vram_bytes=")
+  io.write(str.view(string.from_int(completed.peak_vram_bytes)))
+  io.write("\n")
+  if not completed.succeeded{return fail(struct.borrow(completed,field=message))}
+  let saved=match files.is_file(output){ok(value)=>value,err(problem)=>{
+    return fail(problem.message)}}
+  if not saved{return fail("Motion Repair output was not saved")}
+  io.write("MM-Air native Motion Repair GPU PASS\n")
+  0
+}

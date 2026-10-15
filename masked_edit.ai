@@ -1,0 +1,906 @@
+// Reusable source-preserving image/video edit geometry for MM-Air. This module
+// owns masks, deterministic crop tracks, H3-aware latent/token projection and
+// the final pixel-authoritative composite. It has no UI or model dependency.
+module app.mm_air.masked_edit
+
+import std.math as math
+import std.text as text
+
+pub fn fixed_combined() -> u32 effects {} { 0 }
+pub fn tracked() -> u32 effects {} { 1 }
+pub fn zoomed() -> u32 effects {} { 2 }
+
+pub type Mask = struct {
+  frames: u64,
+  width: u64,
+  height: u64,
+  weights: array<f32>
+}
+
+pub type Crop = struct { x:u64, y:u64, width:u64, height:u64 }
+
+pub type BrushPoint = struct {
+  x:f64,
+  y:f64,
+  radius:f64,
+  erase:bool,
+  begin:bool
+}
+
+pub fn brush_point(x:f64,y:f64,radius:f64,erase:bool,begin:bool)
+    -> BrushPoint effects {} {
+  BrushPoint {x:x,y:y,radius:radius,erase:erase,begin:begin}
+}
+
+pub type Track = struct {
+  strategy: u32,
+  canvas_width: u64,
+  canvas_height: u64,
+  working_width: u64,
+  working_height: u64,
+  crops: array<Crop>
+}
+
+pub type H3MaskGeometry = struct {
+  frames:u64,
+  width:u64,
+  height:u64,
+  latent_frames:u64,
+  latent_width:u64,
+  latent_height:u64,
+  spatial_compression:u64,
+  token_group:u64,
+  prefix_frames:u64,
+  prefix_latents:u64,
+  cycle_frames:u64,
+  cycle_latents:u64
+}
+
+pub type LatentMask = struct {
+  geometry:H3MaskGeometry,
+  latent_weights:array<f32>,
+  token_weights:array<f32>
+}
+
+fn clamp01(value:f32) -> f32 effects {} {
+  if value < 0.0 { 0.0 } else if value > 1.0 { 1.0 } else { value }
+}
+
+pub fn create(frames:u64,width:u64,height:u64,weights:array<f32> own)
+    -> result<Mask,string> effects {alloc} {
+  var owned = weights
+  if frames  ==  0 or width  ==  0 or height  ==  0 or
+     array.len(owned)  !=  frames * width * height {
+    return result.err("Mask geometry does not match its weights")
+  }
+  var i:u64 = 0
+  loop {
+    if i  >=  array.len(owned) { break }
+    let value:f32 = array.get(owned,i)
+    if not math.is_finite(cast.float(value)) {
+      return result.err("Mask weights must be finite")
+    }
+    array.set(owned,i,clamp01(value))
+    i = i + 1
+  }
+  result.ok(Mask {frames:frames,width:width,height:height,weights:owned})
+}
+
+pub fn copy_mask(source:ref<Mask>) -> Mask effects {alloc} {
+  var weights:array<f32> = array.new()
+  var index:u64 = 0
+  loop {
+    if index >= array.len(struct.borrow(source,field=weights)) { break }
+    array.push(weights,array.get(struct.borrow(source,field=weights),index))
+    index = index + 1
+  }
+  Mask {frames:source.frames,width:source.width,height:source.height,
+    weights:weights}
+}
+
+pub fn rectangle(frames:u64,width:u64,height:u64,x:u64,y:u64,
+                 rect_width:u64,rect_height:u64) -> result<Mask,string>
+    effects {alloc} {
+  if frames  ==  0 or width  ==  0 or height  ==  0 or rect_width  ==  0 or
+     rect_height  ==  0 or x  >=  width or y  >=  height or
+     rect_width > width - x or rect_height > height - y {
+    return result.err("Manual mask rectangle must be inside the source canvas")
+  }
+  var values:array<f32> = array.new()
+  var frame:u64 = 0
+  loop {
+    if frame  >=  frames { break }
+    var row:u64 = 0
+    loop {
+      if row  >=  height { break }
+      var column:u64 = 0
+      loop {
+        if column  >=  width { break }
+        array.push(values,if column  >=  x and column < x + rect_width and
+          row  >=  y and row < y + rect_height {1.0} else {0.0})
+        column = column + 1
+      }
+      row = row + 1
+    }
+    frame = frame + 1
+  }
+  create(frames,width,height,values)
+}
+
+pub fn painted(frames:u64,width:u64,height:u64,
+               points:ref<array<BrushPoint>>) -> result<Mask,string>
+    effects {alloc} {
+  if frames==0 or width==0 or height==0 or array.len(points)==0 {
+    return result.err("Paint at least one mask stroke inside the source canvas")
+  }
+  var values:array<f32> = array.new()
+  var fill:u64=0
+  loop {if fill>=frames*width*height{break}
+    array.push(values,0.0)
+    fill=fill+1}
+  var point_index:u64=0
+  loop {
+    if point_index>=array.len(points){break}
+    let point=array.get(points,point_index)
+    if not math.is_finite(point.x) or not math.is_finite(point.y) or
+       not math.is_finite(point.radius) or point.x<0.0 or point.x>1.0 or
+       point.y<0.0 or point.y>1.0 or point.radius<=0.0 or point.radius>0.5 {
+      return result.err("Painted mask points must use finite normalized canvas coordinates and radius")
+    }
+    let center_x:f64=point.x*cast.float(width)
+    let center_y:f64=point.y*cast.float(height)
+    let radius_px:f64=point.radius*cast.float(if width<height{width}else{height})
+    let low_x:u64=cast.sat(if center_x-radius_px>0.0{center_x-radius_px}else{0.0})
+    let low_y:u64=cast.sat(if center_y-radius_px>0.0{center_y-radius_px}else{0.0})
+    let high_x:u64=cast.sat(if center_x+radius_px<cast.float(width-1){
+      center_x+radius_px}else{cast.float(width-1)})
+    let high_y:u64=cast.sat(if center_y+radius_px<cast.float(height-1){
+      center_y+radius_px}else{cast.float(height-1)})
+    var frame:u64=0
+    loop {
+      if frame>=frames{break}
+      var y:u64=low_y
+      loop {
+        if y>high_y{break}
+        var x:u64=low_x
+        loop {
+          if x>high_x{break}
+          let dx:f64=(cast.float(x)+0.5)-center_x
+          let dy:f64=(cast.float(y)+0.5)-center_y
+          if dx*dx+dy*dy<=radius_px*radius_px {
+            array.set(values,(frame*height+y)*width+x,if point.erase{0.0}else{1.0})
+          }
+          x=x+1
+        }
+        y=y+1
+      }
+      frame=frame+1
+    }
+    point_index=point_index+1
+  }
+  create(frames,width,height,values)
+}
+
+fn pixel(mask:ref<Mask>,frame:u64,y:u64,x:u64) -> u64 effects {} {
+  (frame * mask.height + y) * mask.width + x
+}
+
+fn component_cleanup(source:ref<Mask>,minimum_region:u64,maximum_hole:u64)
+    -> Mask effects {alloc} {
+  var out = copy_mask(source)
+  if minimum_region  ==  0 and maximum_hole  ==  0 { return out }
+  let plane:u64 = source.width * source.height
+  var frame:u64 = 0
+  loop {
+    if frame  >=  source.frames { break }
+    var visited:array<bool> = array.new()
+    var fill:u64 = 0
+    loop { if fill  >=  plane { break }
+ array.push(visited,false)
+ fill = fill + 1 }
+    var local:u64 = 0
+    loop {
+      if local  >=  plane { break }
+      if array.get(visited,local) { local = local + 1
+ continue }
+      let absolute:u64 = frame * plane + local
+      let foreground:bool = array.get(struct.borrow(source,field=weights),absolute) > 0.01
+      var queue:array<u64> = [local]
+      var members:array<u64> = array.new()
+      array.set(visited,local,true)
+      var head:u64 = 0
+      var border:bool = false
+      loop {
+        if head  >=  array.len(queue) { break }
+        let here:u64 = array.get(queue,head)
+        head = head + 1
+        array.push(members,here)
+        let y:u64 = here / source.width
+        let x:u64 = rem(here,source.width)
+        if x  ==  0 or y  ==  0 or x + 1  ==  source.width or y + 1  ==  source.height {
+          border = true
+        }
+        var neighbor:u64 = 0
+        loop {
+          if neighbor  >=  4 { break }
+          var valid:bool = true
+          var nx:u64 = x
+          var ny:u64 = y
+          if neighbor  ==  0 { if x  ==  0 {valid=false} else {nx=x-1} }
+          if neighbor  ==  1 { if x+1  >=  source.width {valid=false} else {nx=x+1} }
+          if neighbor  ==  2 { if y  ==  0 {valid=false} else {ny=y-1} }
+          if neighbor  ==  3 { if y+1  >=  source.height {valid=false} else {ny=y+1} }
+          if valid {
+            let next:u64 = ny * source.width + nx
+            if not array.get(visited,next) {
+              let next_foreground:bool = array.get(struct.borrow(source,field=weights),
+                frame * plane + next) > 0.01
+              if next_foreground  ==  foreground {
+                array.set(visited,next,true)
+                array.push(queue,next)
+              }
+            }
+          }
+          neighbor = neighbor + 1
+        }
+      }
+      let erase:bool = foreground and minimum_region  !=  0 and
+        array.len(members) < minimum_region
+      let fill_hole:bool = not foreground and not border and maximum_hole  !=  0 and
+        array.len(members)  <=  maximum_hole
+      if erase or fill_hole {
+        var member:u64 = 0
+        loop {
+          if member  >=  array.len(members) { break }
+          array.set(struct.borrow(out,field=weights),frame * plane +
+            array.get(members,member),if fill_hole {1.0} else {0.0})
+          member = member + 1
+        }
+      }
+      local = local + 1
+    }
+    frame = frame + 1
+  }
+  out
+}
+
+fn spatial_blur(source:ref<Mask>,radius:u64) -> Mask effects {alloc} {
+  if radius  ==  0 { return copy_mask(source) }
+  var out = copy_mask(source)
+  var frame:u64 = 0
+  loop {
+    if frame  >=  source.frames { break }
+    var y:u64 = 0
+    loop {
+      if y  >=  source.height { break }
+      var x:u64 = 0
+      loop {
+        if x  >=  source.width { break }
+        let low_y:u64 = if y > radius {y-radius} else {0}
+        let high_y:u64 = if y+radius < source.height {y+radius} else {source.height-1}
+        let low_x:u64 = if x > radius {x-radius} else {0}
+        let high_x:u64 = if x+radius < source.width {x+radius} else {source.width-1}
+        var sum:f32 = 0.0
+        var count:u64 = 0
+        var sy:u64 = low_y
+        loop {
+          if sy > high_y { break }
+          var sx:u64 = low_x
+          loop {
+            if sx > high_x { break }
+            let source_at:u64 = pixel(source,frame,sy,sx)
+            sum = sum + array.get(struct.borrow(source,field=weights),source_at)
+            count = count + 1
+            sx = sx + 1
+          }
+          sy = sy + 1
+        }
+        array.set(struct.borrow(out,field=weights),pixel(source,frame,y,x),
+          sum / cast.float(count))
+        x = x + 1
+      }
+      y = y + 1
+    }
+    frame = frame + 1
+  }
+  out
+}
+
+fn temporal_smooth(source:ref<Mask>,strength:f32) -> Mask effects {alloc} {
+  if source.frames < 2 or strength  <=  0.0 { return copy_mask(source) }
+  let blend:f32 = clamp01(strength)
+  var out = copy_mask(source)
+  var frame:u64 = 0
+  loop {
+    if frame  >=  source.frames { break }
+    var local:u64 = 0
+    let plane:u64 = source.width * source.height
+    loop {
+      if local  >=  plane { break }
+      let previous:u64 = if frame  ==  0 {0} else {frame-1}
+      let next:u64 = if frame+1 < source.frames {frame+1} else {frame}
+      let original:f32 = array.get(struct.borrow(source,field=weights),frame*plane+local)
+      let average:f32 = (array.get(struct.borrow(source,field=weights),previous*plane+local) +
+        original * 2.0 + array.get(struct.borrow(source,field=weights),next*plane+local)) / 4.0
+      array.set(struct.borrow(out,field=weights),frame*plane+local,
+        original * (1.0-blend) + average * blend)
+      local = local + 1
+    }
+    frame = frame + 1
+  }
+  out
+}
+
+fn morph(source:ref<Mask>,amount:i64) -> Mask effects {alloc} {
+  if amount  ==  0 { return copy_mask(source) }
+  var current = copy_mask(source)
+  var steps:u64 = cast.wrap(if amount < 0 {0-amount} else {amount})
+  var step:u64 = 0
+  loop {
+    if step  >=  steps { break }
+    var next = copy_mask(current)
+    var frame:u64 = 0
+    loop {
+      if frame  >=  current.frames { break }
+      var y:u64 = 0
+      loop {
+        if y  >=  current.height { break }
+        var x:u64 = 0
+        loop {
+          if x  >=  current.width { break }
+          var chosen:f32 = if amount > 0 {0.0} else {1.0}
+          var dy:i64 = -1
+          loop {
+            if dy > 1 { break }
+            var dx:i64 = -1
+            loop {
+              if dx > 1 { break }
+              let yy:i64 = cast.wrap(y) + dy
+              let xx:i64 = cast.wrap(x) + dx
+              if yy  >=  0 and xx  >=  0 and yy < cast.wrap(current.height) and
+                 xx < cast.wrap(current.width) {
+                let source_at:u64 = pixel(current,frame,cast.wrap(yy),cast.wrap(xx))
+                let value:f32 = array.get(struct.borrow(current,field=weights),source_at)
+                if amount > 0 and value > chosen { chosen = value }
+                if amount < 0 and value < chosen { chosen = value }
+              }
+              dx = dx + 1
+            }
+            dy = dy + 1
+          }
+          array.set(struct.borrow(next,field=weights),pixel(current,frame,y,x),chosen)
+          x = x + 1
+        }
+        y = y + 1
+      }
+      frame = frame + 1
+    }
+    current = next
+    step = step + 1
+  }
+  current
+}
+
+pub fn cleanup(source:ref<Mask>,strength:u64,feather_radius:u64,
+               expand_shrink:i64) -> Mask effects {alloc} {
+  let minimum:u64 = strength * strength
+  var regions = component_cleanup(source,minimum,minimum)
+  var temporal = temporal_smooth(regions,
+    if strength  ==  0 {0.0} else {cast.float(strength) / cast.float(strength+2)})
+  var shaped = morph(temporal,expand_shrink)
+  var feathered = spatial_blur(shaped,feather_radius)
+  // Feather only outside the per-frame removal core. A symmetric blur by
+  // itself lowers alpha on both sides of the old subject boundary, which
+  // blends source pixels back into the replacement as a visible silhouette.
+  var core = morph(regions,expand_shrink)
+  var index:u64 = 0
+  loop {
+    if index >= array.len(struct.borrow(feathered,field=weights)) { break }
+    let core_weight:f32=array.get(struct.borrow(core,field=weights),index)
+    if core_weight > array.get(struct.borrow(feathered,field=weights),index) {
+      array.set(struct.borrow(feathered,field=weights),index,core_weight)
+    }
+    index=index+1
+  }
+  feathered
+}
+
+fn align_up(value:u64,alignment:u64) -> u64 effects {} {
+  if alignment  <=  1 { value } else { ((value + alignment - 1) / alignment) * alignment }
+}
+
+fn clamp_crop(x:u64,y:u64,width:u64,height:u64,canvas_width:u64,
+              canvas_height:u64) -> Crop effects {} {
+  let w:u64 = if width > canvas_width {canvas_width} else {width}
+  let h:u64 = if height > canvas_height {canvas_height} else {height}
+  Crop {x:if x+w > canvas_width {canvas_width-w} else {x},
+    y:if y+h > canvas_height {canvas_height-h} else {y},width:w,height:h}
+}
+
+fn bounds(source:ref<Mask>,frame:u64) -> option<Crop> effects {} {
+  var found:bool = false
+  var left:u64 = source.width
+  var top:u64 = source.height
+  var right:u64 = 0
+  var bottom:u64 = 0
+  var y:u64 = 0
+  loop {
+    if y  >=  source.height { break }
+    var x:u64 = 0
+    loop {
+      if x  >=  source.width { break }
+      let source_at:u64 = pixel(source,frame,y,x)
+      if array.get(struct.borrow(source,field=weights),source_at) > 0.01 {
+        found = true
+        if x < left {left=x}
+ if x > right {right=x}
+        if y < top {top=y}
+ if y > bottom {bottom=y}
+      }
+      x = x + 1
+    }
+    y = y + 1
+  }
+  if not found {option.none()} else {option.some(Crop {x:left,y:top,
+    width:right-left+1,height:bottom-top+1})}
+}
+
+fn padded(box:Crop,padding:u64,min_size:u64,alignment:u64,
+          canvas_width:u64,canvas_height:u64) -> Crop effects {} {
+  var width:u64 = align_up(box.width + padding * 2,alignment)
+  var height:u64 = align_up(box.height + padding * 2,alignment)
+  if width < min_size {width=align_up(min_size,alignment)}
+  if height < min_size {height=align_up(min_size,alignment)}
+  if width > canvas_width {width=canvas_width}
+  if height > canvas_height {height=canvas_height}
+  let center_x:u64 = box.x + box.width / 2
+  let center_y:u64 = box.y + box.height / 2
+  let x:u64 = if center_x > width/2 {center_x-width/2} else {0}
+  let y:u64 = if center_y > height/2 {center_y-height/2} else {0}
+  clamp_crop(x,y,width,height,canvas_width,canvas_height)
+}
+
+pub fn crop_track(source:ref<Mask>,strategy:u32,padding:u64,min_size:u64,
+                  alignment:u64) -> result<Track,string> effects {alloc} {
+  if strategy > zoomed() or alignment  ==  0 {
+    return result.err("Unknown crop strategy or zero alignment")
+  }
+  var boxes:array<Crop> = array.new()
+  var frame:u64 = 0
+  var union_found:bool = false
+  var union_box = Crop {x:source.width,y:source.height,width:0,height:0}
+  loop {
+    if frame  >=  source.frames { break }
+    let box:Crop = match bounds(source,frame) {
+      some(value) => value,
+      none => if frame  ==  0 {Crop {x:0,y:0,width:source.width,height:source.height}}
+        else {array.get(boxes,frame-1)},
+    }
+    array.push(boxes,box)
+    let right:u64 = box.x + box.width
+    let bottom:u64 = box.y + box.height
+    if not union_found {
+      union_box=box
+ union_found=true
+    } else {
+      let union_right:u64 = union_box.x + union_box.width
+      let union_bottom:u64 = union_box.y + union_box.height
+      let left:u64 = if box.x < union_box.x {box.x} else {union_box.x}
+      let top:u64 = if box.y < union_box.y {box.y} else {union_box.y}
+      union_box=Crop {x:left,y:top,
+        width:(if right > union_right {right} else {union_right})-left,
+        height:(if bottom > union_bottom {bottom} else {union_bottom})-top}
+    }
+    frame = frame + 1
+  }
+  var crops:array<Crop> = array.new()
+  var working_width:u64 = 0
+  var working_height:u64 = 0
+  if strategy  ==  fixed_combined() {
+    let one = padded(union_box,padding,min_size,alignment,source.width,source.height)
+    frame=0
+ loop {if frame >= source.frames{break}
+array.push(crops,one)
+frame=frame+1}
+    working_width=align_up(one.width,alignment)
+working_height=align_up(one.height,alignment)
+  } else if strategy  ==  tracked() {
+    var maximum_width:u64 = 0
+ var maximum_height:u64 = 0
+    frame=0
+    loop {
+      if frame >= array.len(boxes){break}
+      let candidate= padded(array.get(boxes,frame),padding,min_size,alignment,
+        source.width,source.height)
+      if candidate.width>maximum_width{maximum_width=candidate.width}
+      if candidate.height>maximum_height{maximum_height=candidate.height}
+      frame=frame+1
+    }
+    var current = padded(array.get(boxes,0),padding,min_size,alignment,
+      source.width,source.height)
+    current=clamp_crop(current.x,current.y,maximum_width,maximum_height,
+      source.width,source.height)
+    frame=0
+    loop {
+      if frame >= array.len(boxes){break}
+      let box=array.get(boxes,frame)
+      var x=current.x
+var y=current.y
+      let desired_margin_x:u64 = padding / 2
+      let desired_margin_y:u64 = padding / 2
+      let margin_x:u64 = if desired_margin_x < current.width/4 {
+        desired_margin_x
+      } else {current.width/4}
+      let margin_y:u64 = if desired_margin_y < current.height/4 {
+        desired_margin_y
+      } else {current.height/4}
+      if box.x < x+margin_x {x=if box.x>margin_x{box.x-margin_x}else{0}}
+      if box.x+box.width > x+current.width-margin_x {
+        x=box.x+box.width+margin_x-current.width
+      }
+      if box.y < y+margin_y {y=if box.y>margin_y{box.y-margin_y}else{0}}
+      if box.y+box.height > y+current.height-margin_y {
+        y=box.y+box.height+margin_y-current.height
+      }
+      current=clamp_crop(x,y,current.width,current.height,source.width,source.height)
+      array.push(crops,current)
+      frame=frame+1
+    }
+    working_width=align_up(maximum_width,alignment)
+working_height=align_up(maximum_height,alignment)
+  } else {
+    var current = padded(array.get(boxes,0),padding,min_size,alignment,
+      source.width,source.height)
+    frame=0
+    loop {
+      if frame >= array.len(boxes){break}
+      let wanted=padded(array.get(boxes,frame),padding,min_size,alignment,
+        source.width,source.height)
+      var width=current.width
+var height=current.height
+      let step_w:u64 = if alignment>1{alignment}else{1}
+      let step_h:u64 = step_w
+      if wanted.width>width{width=if wanted.width-width>step_w{width+step_w}else{wanted.width}}
+      if wanted.width<width{width=if width-wanted.width>step_w{width-step_w}else{wanted.width}}
+      if wanted.height>height{height=if wanted.height-height>step_h{height+step_h}else{wanted.height}}
+      if wanted.height<height{height=if height-wanted.height>step_h{height-step_h}else{wanted.height}}
+      let center_x:u64=(current.x+current.width/2+wanted.x+wanted.width/2)/2
+      let center_y:u64=(current.y+current.height/2+wanted.y+wanted.height/2)/2
+      current=clamp_crop(if center_x>width/2{center_x-width/2}else{0},
+        if center_y>height/2{center_y-height/2}else{0},width,height,
+        source.width,source.height)
+      array.push(crops,current)
+      if width>working_width{working_width=align_up(width,alignment)}
+      if height>working_height{working_height=align_up(height,alignment)}
+      frame=frame+1
+    }
+  }
+  result.ok(Track {strategy:strategy,canvas_width:source.width,
+    canvas_height:source.height,working_width:working_width,
+    working_height:working_height,crops:crops})
+}
+
+pub fn h3_geometry(frames:u64,width:u64,height:u64)
+    -> result<H3MaskGeometry,string> effects {alloc} {
+  if frames < 4 or width  ==  0 or height  ==  0 or rem(width,32)  !=  0 or
+     rem(height,32)  !=  0 {
+    return result.err("H3 mask geometry needs at least four frames and 32-pixel alignment")
+  }
+  let groups:u64 = if frames <= 5{1}else{(frames-5+16)/17}
+  result.ok(H3MaskGeometry {frames:frames,width:width,height:height,
+    latent_frames:groups*5+2,latent_width:width/16,latent_height:height/16,
+    spatial_compression:16,token_group:2,prefix_frames:5,prefix_latents:2,
+    cycle_frames:17,cycle_latents:5})
+}
+
+fn temporal_span(geometry:H3MaskGeometry,latent:u64) -> Crop effects {} {
+  var start:u64 = 0
+var finish:u64 = 0
+  if latent < geometry.prefix_latents {
+    start=latent*geometry.prefix_frames/geometry.prefix_latents
+    finish=(latent+1)*geometry.prefix_frames/geometry.prefix_latents
+  } else {
+    let shifted:u64=latent-geometry.prefix_latents
+    let group:u64=shifted/geometry.cycle_latents
+    let local:u64=rem(shifted,geometry.cycle_latents)
+    let base:u64=geometry.prefix_frames+group*geometry.cycle_frames
+    start=base+local*geometry.cycle_frames/geometry.cycle_latents
+    finish=base+(local+1)*geometry.cycle_frames/geometry.cycle_latents
+  }
+  if start >= geometry.frames{start=geometry.frames-1}
+  if finish <= start{finish=start+1}
+  if finish>geometry.frames{finish=geometry.frames}
+  Crop {x:start,y:finish,width:0,height:0}
+}
+
+pub fn map_to_h3(source:ref<Mask>,geometry:H3MaskGeometry)
+    -> result<LatentMask,string> effects {alloc} {
+  if source.frames  !=  geometry.frames or source.width  !=  geometry.width or
+     source.height  !=  geometry.height {
+    return result.err("Pixel mask and H3 delivery geometry must match")
+  }
+  var latent:array<f32> = array.new()
+  var lt:u64=0
+  loop {
+    if lt >= geometry.latent_frames{break}
+    let span=temporal_span(geometry,lt)
+    var ly:u64=0
+    loop {
+      if ly >= geometry.latent_height{break}
+      var lx:u64=0
+      loop {
+        if lx >= geometry.latent_width{break}
+        var sum:f32=0.0
+var count:u64=0
+var frame:u64=span.x
+        loop {
+          if frame >= span.y{break}
+          var y:u64=ly*geometry.spatial_compression
+          loop {
+            if y >= (ly+1)*geometry.spatial_compression{break}
+            var x:u64=lx*geometry.spatial_compression
+            loop {
+              if x >= (lx+1)*geometry.spatial_compression{break}
+              let source_at:u64 = pixel(source,frame,y,x)
+              sum=sum+array.get(struct.borrow(source,field=weights),source_at)
+              count=count+1
+x=x+1
+            }
+            y=y+1
+          }
+          frame=frame+1
+        }
+        array.push(latent,sum/cast.float(count))
+lx=lx+1
+      }
+      ly=ly+1
+    }
+    lt=lt+1
+  }
+  let token_h:u64=geometry.latent_height/geometry.token_group
+  let token_w:u64=geometry.latent_width/geometry.token_group
+  var tokens:array<f32> = array.new()
+lt=0
+  loop {
+    if lt >= geometry.latent_frames{break}
+    var ty:u64=0
+    loop {
+      if ty >= token_h{break}
+      var tx:u64=0
+      loop {
+        if tx >= token_w{break}
+        var selected:bool=false
+var dy:u64=0
+        loop {
+          if dy >= geometry.token_group{break}
+var dx:u64=0
+          loop {
+            if dx >= geometry.token_group{break}
+            let index:u64=(lt*geometry.latent_height+ty*geometry.token_group+dy)*
+              geometry.latent_width+tx*geometry.token_group+dx
+            if array.get(latent,index) >= 0.5 { selected=true }
+dx=dx+1
+          }
+          dy=dy+1
+        }
+        array.push(tokens,if selected {1.0}else{0.0})
+        tx=tx+1
+      }
+      ty=ty+1
+    }
+    lt=lt+1
+  }
+  result.ok(LatentMask {geometry:geometry,latent_weights:latent,token_weights:tokens})
+}
+
+fn byte_u64(value:byte)->u64 effects {} {let lane:u8=cast.bits(value)
+cast.wrap(lane)}
+fn byte_value(value:u64)->byte effects {} {let lane:u8=cast.wrap(value)
+cast.bits(lane)}
+
+pub fn from_gray(frames:u64,width:u64,height:u64,source:view<byte>)
+    -> result<Mask,string> effects {alloc} {
+  if view.len(source) != frames*width*height {
+    return result.err("Gray mask bytes do not match their declared geometry")
+  }
+  var weights:array<f32> = array.new()
+  var index:u64 = 0
+  loop {
+    if index >= view.len(source){break}
+    array.push(weights,cast.float(byte_u64(view.get(source,index)))/255.0)
+    index=index+1
+  }
+  create(frames,width,height,weights)
+}
+
+pub fn gray_bytes(source:ref<Mask>) -> array<byte> effects {alloc} {
+  var output:array<byte> = array.new()
+  var index:u64 = 0
+  loop {
+    if index >= array.len(struct.borrow(source,field=weights)){break}
+    let value:u64=cast.sat(math.round(cast.float(
+      array.get(struct.borrow(source,field=weights),index)*255.0)))
+    array.push(output,byte_value(value))
+    index=index+1
+  }
+  output
+}
+
+// Extract the authored full-canvas mask into the constant H3 working canvas.
+// Each frame uses its recorded crop; nearest sampling keeps authored zeroes
+// exact while cleanup/feather weights remain soft f32 values.
+pub fn extract_mask(source:ref<Mask>,track:ref<Track>)
+    -> result<Mask,string> effects {alloc} {
+  if source.frames != array.len(struct.borrow(track,field=crops)) or
+     source.width != track.canvas_width or source.height != track.canvas_height or
+     track.working_width == 0 or track.working_height == 0 {
+    return result.err("Mask extraction track does not match its source")
+  }
+  var weights:array<f32> = array.new()
+  var frame:u64=0
+  loop {
+    if frame>=source.frames{break}
+    let crop=array.get(struct.borrow(track,field=crops),frame)
+    var y:u64=0
+    loop {
+      if y>=track.working_height{break}
+      let source_y:u64=crop.y+(y*crop.height/track.working_height)
+      var x:u64=0
+      loop {
+        if x>=track.working_width{break}
+        let source_x:u64=crop.x+(x*crop.width/track.working_width)
+        let source_at:u64=pixel(source,frame,source_y,source_x)
+        array.push(weights,array.get(struct.borrow(source,field=weights),source_at))
+        x=x+1
+      }
+      y=y+1
+    }
+    frame=frame+1
+  }
+  create(source.frames,track.working_width,track.working_height,weights)
+}
+
+pub fn extract_rgb(source:view<byte>,frames:u64,width:u64,height:u64,
+                   track:ref<Track>) -> result<array<byte>,string>
+    effects {alloc} {
+  if view.len(source) != frames*width*height*3 or
+     frames != array.len(struct.borrow(track,field=crops)) or
+     width != track.canvas_width or height != track.canvas_height or
+     track.working_width == 0 or track.working_height == 0 {
+    return result.err("RGB extraction track does not match its source")
+  }
+  var output:array<byte> = array.new()
+  var frame:u64=0
+  loop {
+    if frame>=frames{break}
+    let crop=array.get(struct.borrow(track,field=crops),frame)
+    var y:u64=0
+    loop {
+      if y>=track.working_height{break}
+      let source_y:u64=crop.y+(y*crop.height/track.working_height)
+      var x:u64=0
+      loop {
+        if x>=track.working_width{break}
+        let source_x:u64=crop.x+(x*crop.width/track.working_width)
+        var channel:u64=0
+        loop {
+          if channel>=3{break}
+          array.push(output,view.get(source,
+            ((frame*height+source_y)*width+source_x)*3+channel))
+          channel=channel+1
+        }
+        x=x+1
+      }
+      y=y+1
+    }
+    frame=frame+1
+  }
+  result.ok(output)
+}
+
+pub fn composite_rgb(source:view<byte>,edited:view<byte>,mask:ref<Mask>,
+                     track:ref<Track>) -> result<array<byte>,string>
+    effects {alloc} {
+  let source_size:u64=mask.frames*mask.width*mask.height*3
+  let edited_size:u64=mask.frames*track.working_width*track.working_height*3
+  if view.len(source) != source_size or view.len(edited) != edited_size or
+     array.len(struct.borrow(track,field=crops)) != mask.frames or
+     track.canvas_width != mask.width or track.canvas_height != mask.height {
+    return result.err("Composite inputs do not match mask/crop geometry")
+  }
+  var output:array<byte> = array.new()
+  var copied:u64 = 0
+  loop {
+    if copied >= view.len(source) { break }
+    array.push(output,view.get(source,copied))
+    copied = copied + 1
+  }
+  var frame:u64=0
+  loop {
+    if frame >= mask.frames{break}
+    let crop=array.get(struct.borrow(track,field=crops),frame)
+    var y:u64=crop.y
+    loop {
+      if y >= crop.y+crop.height{break}
+      var x:u64=crop.x
+      loop {
+        if x >= crop.x+crop.width{break}
+        let mask_at:u64 = pixel(mask,frame,y,x)
+        let weight:f32=array.get(struct.borrow(mask,field=weights),mask_at)
+        if weight>0.0 {
+          let edit_x:u64=(x-crop.x)*track.working_width/crop.width
+          let edit_y:u64=(y-crop.y)*track.working_height/crop.height
+          var channel:u64=0
+          loop {
+            if channel >= 3{break}
+            let source_at:u64=((frame*mask.height+y)*mask.width+x)*3+channel
+            let edit_at:u64=((frame*track.working_height+edit_y)*track.working_width+edit_x)*3+channel
+            let original:f32=cast.float(byte_u64(view.get(source,source_at)))
+            let replacement:f32=cast.float(byte_u64(view.get(edited,edit_at)))
+            let mixed:u64=cast.sat(math.round(cast.float(original*(1.0-weight)+replacement*weight)))
+            array.set(output,source_at,byte_value(mixed))
+channel=channel+1
+          }
+        }
+        x=x+1
+      }
+      y=y+1
+    }
+    frame=frame+1
+  }
+  result.ok(output)
+}
+
+// Composite a generated subject back over an already reconstructed full-size
+// background. The replacement mask lives in H3 crop coordinates, while the
+// destination remains in original source coordinates.
+pub fn composite_crop_mask(source:view<byte>,edited:view<byte>,mask:ref<Mask>,
+                           track:ref<Track>) -> result<array<byte>,string>
+    effects {alloc} {
+  let source_size:u64=mask.frames*track.canvas_width*track.canvas_height*3
+  let edited_size:u64=mask.frames*track.working_width*track.working_height*3
+  if mask.width != track.working_width or mask.height != track.working_height or
+     view.len(source) != source_size or view.len(edited) != edited_size or
+     array.len(struct.borrow(track,field=crops)) != mask.frames {
+    return result.err("Replacement composite inputs do not match crop geometry")
+  }
+  var output:array<byte> = array.new()
+  var copied:u64=0
+  loop {if copied>=view.len(source){break}
+    array.push(output,view.get(source,copied))
+    copied=copied+1}
+  var frame:u64=0
+  loop {if frame>=mask.frames{break}
+    let crop=array.get(struct.borrow(track,field=crops),frame)
+    var y:u64=crop.y
+    loop {if y>=crop.y+crop.height{break}
+      var x:u64=crop.x
+      loop {if x>=crop.x+crop.width{break}
+        let edit_x:u64=(x-crop.x)*track.working_width/crop.width
+        let edit_y:u64=(y-crop.y)*track.working_height/crop.height
+        let weight:f32=array.get(struct.borrow(mask,field=weights),
+          (frame*mask.height+edit_y)*mask.width+edit_x)
+        if weight>0.0 {
+          var channel:u64=0
+          loop {if channel>=3{break}
+            let source_at:u64=((frame*track.canvas_height+y)*track.canvas_width+x)*3+channel
+            let edit_at:u64=((frame*track.working_height+edit_y)*track.working_width+edit_x)*3+channel
+            let original:f32=cast.float(byte_u64(view.get(source,source_at)))
+            let replacement:f32=cast.float(byte_u64(view.get(edited,edit_at)))
+            let mixed:u64=cast.sat(math.round(cast.float(
+              original*(1.0-weight)+replacement*weight)))
+            array.set(output,source_at,byte_value(mixed))
+            channel=channel+1}
+        }
+        x=x+1}
+      y=y+1}
+    frame=frame+1}
+  result.ok(output)
+}
+
+pub fn describe(track:ref<Track>) -> string effects {alloc} {
+  text.concat(str.view(string.from_int(track.working_width)),text.concat(" × ",
+    text.concat(str.view(string.from_int(track.working_height)),text.concat(
+      " H3 working crop · ",str.view(string.from_int(array.len(
+        struct.borrow(track,field=crops))))))))
+}

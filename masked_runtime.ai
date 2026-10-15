@@ -1,0 +1,432 @@
+// Native MM-Air media orchestration for subject-local H3 edits. FFmpeg is used
+// only as the local codec/container boundary; mask cleanup, crop planning,
+// H3 geometry mapping and final compositing remain AIR-owned.
+module app.mm_air.masked_runtime
+
+import std.files as files
+import std.media as media
+import std.media_input as input
+import std.path as path
+import std.process as proc
+import std.text as text
+import ".air/deps/h3/media.ai" as h3_media
+import ".air/deps/h3/timeline.ai" as h3_timeline
+import "masked_edit.ai" as edit
+
+pub type Settings = struct {
+  mask_path:string,
+  manual:bool,
+  painted:bool,
+  brush_points:array<edit.BrushPoint>,
+  manual_x:f64,
+  manual_y:f64,
+  manual_width:f64,
+  manual_height:f64,
+  cleanup:u64,
+  feather:u64,
+  expand:i64,
+  crop_strategy:u32,
+  padding:u64,
+  preserve_outside:bool
+}
+
+pub fn settings(mask_path:str,manual:bool,x:f64,y:f64,width:f64,height:f64,
+                cleanup:u64,feather:u64,expand:i64,crop_strategy:u32,
+                padding:u64,preserve_outside:bool) -> Settings effects {alloc} {
+  Settings {mask_path:string.copy(mask_path),manual:manual,painted:false,
+    brush_points:[],manual_x:x,manual_y:y,
+    manual_width:width,manual_height:height,cleanup:cleanup,feather:feather,
+    expand:expand,crop_strategy:crop_strategy,padding:padding,
+    preserve_outside:preserve_outside}
+}
+
+pub fn paint_settings(points:array<edit.BrushPoint> own,
+                cleanup:u64,feather:u64,expand:i64,crop_strategy:u32,
+                padding:u64,preserve_outside:bool) -> Settings effects {alloc} {
+  Settings {mask_path:string.new(),manual:false,painted:true,brush_points:points,
+    manual_x:0.0,manual_y:0.0,manual_width:0.0,manual_height:0.0,
+    cleanup:cleanup,feather:feather,expand:expand,crop_strategy:crop_strategy,
+    padding:padding,preserve_outside:preserve_outside}
+}
+
+pub fn copy_brush_points(source:ref<Settings>) -> array<edit.BrushPoint>
+    effects {alloc} {
+  var output:array<edit.BrushPoint> = array.new()
+  var index:u64=0
+  loop {if index>=array.len(struct.borrow(source,field=brush_points)){break}
+    array.push(output,array.get(struct.borrow(source,field=brush_points),index))
+    index=index+1}
+  output
+}
+
+pub type Prepared = struct {
+  scratch:string,
+  source_path:string,
+  final_output:string,
+  h3_output:string,
+  background_output:string,
+  cropped_source:string,
+  source_raw:string,
+  mask_raw:string,
+  target_mask_raw:string,
+  target_mask_preview:string,
+  edited_raw:string,
+  background_raw:string,
+  composite_raw:string,
+  source_width:u64,
+  source_height:u64,
+  source_video:bool,
+  frames:u64,
+  conditioning_frames:u64,
+  mask:edit.Mask,
+  removal_mask:edit.Mask,
+  track:edit.Track,
+  latent:edit.LatentMask
+}
+
+fn check(arguments:array<string> own,message:str) -> result<unit,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process} {
+  match proc.check(arguments) {
+    ok(_) => result.ok(()),
+    err(problem) => { var held=problem
+      let detail:string=match held {
+        Launch(error)=>string.copy(error.message),
+        Exit(status)=>text.concat("exit status ",str.view(string.from_int(
+          proc.exit_code(status)))),
+      }
+      result.err(text.concat(message,text.concat(": ",str.view(detail)))) },
+  }
+}
+
+pub fn preview_frame(source:str,output:str,position_seconds:f64)
+    -> result<unit,string> effects {alloc,fs.meta,fs.read,fs.write,process} {
+  if position_seconds<0.0 {return result.err("Preview position must be nonnegative")}
+  check(["ffmpeg","-nostdin","-v","error","-y","-ss",
+    string.from_float(position_seconds),"-i",string.copy(source),"-map","0:v:0",
+    "-frames:v","1","-c:v","png",string.copy(output)],
+    "FFmpeg could not decode the selected Edit frame")
+}
+
+fn bounded_raw(filename:str,maximum:u64,message:str) -> result<bytes,string>
+    effects {alloc,fs.read} {
+  match files.read_limited(filename,maximum) {
+    ok(value) => result.ok(value),
+    err(_) => result.err(string.copy(message)),
+  }
+}
+
+fn decode_source(source:str,output:str,width:u64,height:u64,frames:u64,video:bool)
+    -> result<bytes,string> effects {alloc,fs.meta,fs.read,fs.write,process} {
+  let expected:u64=width*height*frames*3
+  var arguments:array<string> = ["ffmpeg","-nostdin","-v","error","-y"]
+  if not video {array.push(arguments,"-loop")
+    array.push(arguments,"1")}
+  array.push(arguments,"-i")
+  array.push(arguments,string.copy(source))
+  array.push(arguments,"-map")
+  array.push(arguments,"0:v:0")
+  array.push(arguments,"-vf")
+  array.push(arguments,"fps=24")
+  array.push(arguments,"-frames:v")
+  array.push(arguments,string.from_int(frames))
+  array.push(arguments,"-pix_fmt")
+  array.push(arguments,"rgb24")
+  array.push(arguments,"-f")
+  array.push(arguments,"rawvideo")
+  array.push(arguments,string.copy(output))
+  let _=try check(arguments,"FFmpeg could not decode the masked source at 24 FPS")
+  var decoded=try bounded_raw(output,expected,"Masked source exceeds its declared RGB geometry")
+  if view.len(bytes.view(decoded)) != expected {
+    return result.err("Masked source does not contain the requested 24 FPS delivery frames; shorten the edit duration")
+  }
+  result.ok(decoded)
+}
+
+fn decoded_mask(source:str,output:str,width:u64,height:u64,frames:u64)
+    -> result<edit.Mask,string> effects {alloc,fs.meta,fs.read,fs.write,process} {
+  let expected:u64=width*height*frames
+  let kind=input.classify_path(source)
+  var arguments:array<string> = ["ffmpeg","-nostdin","-v","error","-y"]
+  if kind == input.Kind.Image {array.push(arguments,"-loop")
+    array.push(arguments,"1")}
+  array.push(arguments,"-i")
+  array.push(arguments,string.copy(source))
+  array.push(arguments,"-map")
+  array.push(arguments,"0:v:0")
+  array.push(arguments,"-vf")
+  array.push(arguments,text.concat("fps=24,scale=",text.concat(
+    str.view(string.from_int(width)),text.concat(":",text.concat(
+    str.view(string.from_int(height)),":flags=neighbor,format=gray")))))
+  array.push(arguments,"-frames:v")
+  array.push(arguments,string.from_int(frames))
+  array.push(arguments,"-pix_fmt")
+  array.push(arguments,"gray")
+  array.push(arguments,"-f")
+  array.push(arguments,"rawvideo")
+  array.push(arguments,string.copy(output))
+  let _=try check(arguments,"FFmpeg could not decode the authored mask")
+  var decoded=try bounded_raw(output,expected,"Authored mask exceeds its declared geometry")
+  if view.len(bytes.view(decoded)) != expected {
+    return result.err("Authored mask did not cover every source frame; provide a still mask or a complete mask video")
+  }
+  edit.from_gray(frames,width,height,bytes.view(decoded))
+}
+
+fn manual_mask(settings:ref<Settings>,frames:u64,width:u64,height:u64)
+    -> result<edit.Mask,string> effects {alloc} {
+  if settings.manual_x < 0.0 or settings.manual_y < 0.0 or
+     settings.manual_width <= 0.0 or settings.manual_height <= 0.0 or
+     settings.manual_x+settings.manual_width > 1.0 or
+     settings.manual_y+settings.manual_height > 1.0 {
+    return result.err("Draw a valid subject region inside the source preview")
+  }
+  let x:u64=cast.sat(settings.manual_x*cast.float(width))
+  let y:u64=cast.sat(settings.manual_y*cast.float(height))
+  var w:u64=cast.sat(settings.manual_width*cast.float(width))
+  var h:u64=cast.sat(settings.manual_height*cast.float(height))
+  if w==0{w=1}
+  if h==0{h=1}
+  if x+w>width{w=width-x}
+  if y+h>height{h=height-y}
+  edit.rectangle(frames,width,height,x,y,w,h)
+}
+
+fn encode_crop(raw:str,output:str,width:u64,height:u64,frames:u64)
+    -> result<unit,string> effects {alloc,fs.meta,fs.read,fs.write,process} {
+  check(["ffmpeg","-nostdin","-v","error","-y","-f","rawvideo",
+    "-pixel_format","rgb24","-video_size",text.concat(
+      str.view(string.from_int(width)),text.concat("x",str.view(string.from_int(height)))),
+    "-framerate","24","-i",string.copy(raw),"-vf",
+    "tpad=stop_mode=clone:stop_duration=60","-frames:v",string.from_int(frames),
+    "-an","-c:v","libx264rgb","-preset","fast","-crf","0","-pix_fmt",
+    "rgb24",string.copy(output)],"FFmpeg could not encode the H3 working crop")
+}
+
+pub fn prepare(source:str,final_output:str,scratch_root:str,frames:u64,
+               settings:ref<Settings>) -> result<Prepared,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+  if not settings.preserve_outside {
+    return result.err("Masked Character Swap requires Preserve Outside Mask; use ordinary Character Swap for full-frame generation")
+  }
+  if str.len(struct.borrow(settings,field=mask_path))==0 and not settings.manual and
+     not settings.painted {
+    return result.err("Masked Character Swap requires an imported or manually authored mask; no full-frame fallback was used")
+  }
+  let source_kind=input.classify_path(source)
+  if source_kind!=input.Kind.Image and source_kind!=input.Kind.Video {
+    return result.err("Localized edit source must be an image or video")
+  }
+  let source_video:bool=source_kind==input.Kind.Video
+  let root=path.join(scratch_root,text.concat("mm-air-masked-",str.view(
+    string.from_int(time.monotonic_ns()))))
+  match files.create_dir(str.view(root)) {ok(_)=>{},err(problem)=>{
+    return result.err(text.concat("Cannot create masked edit scratch directory: ",problem.message))}}
+  let source_raw=path.join(str.view(root),"source.rgb")
+  let mask_raw=path.join(str.view(root),"mask.gray")
+  let cropped_raw=path.join(str.view(root),"crop.rgb")
+  // Video and still edits use H3's complete internal temporal endpoint for
+  // source conditioning. Delivery can stop between endpoints, so encode_crop
+  // clones only the final crop frame through the next 17n+5 boundary.
+  let cropped_source=path.join(str.view(root),"crop-source.mp4")
+  let h3_output=path.join(str.view(root),"h3-edit.mp4")
+  let background_output=path.join(str.view(root),"h3-background.mp4")
+  let target_mask_raw=path.join(str.view(root),"target-mask.gray")
+  let target_mask_preview=path.join(str.view(root),"target-mask.mp4")
+  let edited_raw=path.join(str.view(root),"edited.rgb")
+  let background_raw=path.join(str.view(root),"background.rgb")
+  let composite_raw=path.join(str.view(root),"composite.rgb")
+  let probe_root=path.join(str.view(root),"probe-work")
+  var info=match media.probe("/nonexistent/air-image-provider",source,str.view(probe_root)) {
+    ok(value)=>value,err(message)=>{return result.err(message)},
+  }
+  let _=files.remove(str.view(probe_root))
+  let source_width:u64=cast.sat(info.width)
+  let source_height:u64=cast.sat(info.height)
+  var source_pixels=try decode_source(source,str.view(source_raw),source_width,
+    source_height,frames,source_video)
+  var authored=if settings.painted {
+    try edit.painted(frames,source_width,source_height,
+      struct.borrow(settings,field=brush_points))
+  } else if settings.manual {
+    try manual_mask(settings,frames,source_width,source_height)
+  } else {
+    try decoded_mask(struct.borrow(settings,field=mask_path),str.view(mask_raw),
+      source_width,source_height,frames)
+  }
+  var cleaned=edit.cleanup(authored,settings.cleanup,settings.feather,settings.expand)
+  // Removal must cover the complete old silhouette before the reconstructed
+  // background is inserted. The replacement receives its own tighter SAM 3
+  // matte after generation, so this expansion cannot enlarge the new subject.
+  var removal=edit.cleanup(authored,settings.cleanup,4,12)
+  var track=try edit.crop_track(removal,settings.crop_strategy,settings.padding,256,32)
+  var crop_pixels=try edit.extract_rgb(bytes.view(source_pixels),frames,source_width,
+    source_height,track)
+  match files.write_bytes(str.view(cropped_raw),array.view(crop_pixels)) {
+    ok(_)=>{},err(problem)=>{return result.err(string.copy(problem.message))},
+  }
+  var crop_mask=try edit.extract_mask(cleaned,track)
+  let geometry=try edit.h3_geometry(frames,track.working_width,track.working_height)
+  let conditioning_frames:u64=h3_timeline.model_frames_for_video_latents(
+    geometry.latent_frames)
+  let _=try encode_crop(str.view(cropped_raw),str.view(cropped_source),
+    track.working_width,track.working_height,conditioning_frames)
+  var latent=try edit.map_to_h3(crop_mask,geometry)
+  result.ok(Prepared {scratch:root,source_path:string.copy(source),final_output:string.copy(final_output),
+    h3_output:h3_output,cropped_source:cropped_source,source_raw:source_raw,
+    background_output:background_output,mask_raw:mask_raw,
+    target_mask_raw:target_mask_raw,target_mask_preview:target_mask_preview,
+    edited_raw:edited_raw,background_raw:background_raw,
+    composite_raw:composite_raw,source_width:source_width,
+    source_height:source_height,source_video:source_video,frames:frames,
+    conditioning_frames:conditioning_frames,mask:cleaned,removal_mask:removal,
+    track:track,latent:latent})
+}
+
+pub fn working_geometry(value:ref<Prepared>) -> h3_media.Geometry effects {alloc} {
+  match h3_media.geometry(value.frames,value.track.working_width,
+      value.track.working_height) {
+    ok(found)=>found,err(_)=>{panic "prepared masked edit has invalid H3 geometry"},
+  }
+}
+
+pub fn description(value:ref<Prepared>) -> string effects {alloc} {
+  var out=edit.describe(struct.borrow(value,field=track))
+  string.append(out," · latent ")
+  string.append(out,str.view(string.from_int(value.latent.geometry.latent_frames)))
+  string.append(out,"×")
+  string.append(out,str.view(string.from_int(value.latent.geometry.latent_height)))
+  string.append(out,"×")
+  string.append(out,str.view(string.from_int(value.latent.geometry.latent_width)))
+  string.append(out," · conditioning ")
+  string.append(out,str.view(string.from_int(value.conditioning_frames)))
+  string.append(out," / delivery ")
+  string.append(out,str.view(string.from_int(value.frames)))
+  string.append(out," frames")
+  string.append(out," · token-group 2×2")
+  out
+}
+
+pub fn finish(value:ref<Prepared>) -> result<unit,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process} {
+  let expected_edit:u64=value.frames*value.track.working_width*
+    value.track.working_height*3
+  let _=try check(["ffmpeg","-nostdin","-v","error","-y","-i",
+    string.copy(struct.borrow(value,field=h3_output)),"-map","0:v:0","-vf",
+    text.concat("fps=24,scale=",text.concat(str.view(string.from_int(
+      value.track.working_width)),text.concat(":",text.concat(str.view(
+      string.from_int(value.track.working_height)),":flags=lanczos")))),
+    "-frames:v",string.from_int(value.frames),"-pix_fmt","rgb24","-f",
+    "rawvideo",string.copy(struct.borrow(value,field=edited_raw))],
+    "FFmpeg could not decode the localized H3 result")
+  var source=try bounded_raw(struct.borrow(value,field=source_raw),
+    value.frames*value.source_width*value.source_height*3,
+    "Cannot reopen the bounded source pixels for compositing")
+  var edited=try bounded_raw(struct.borrow(value,field=edited_raw),expected_edit,
+    "Localized H3 result exceeds its declared crop geometry")
+  if view.len(bytes.view(edited)) != expected_edit {
+    return result.err("Localized H3 result did not contain every delivery frame")
+  }
+  var composed=try edit.composite_rgb(bytes.view(source),bytes.view(edited),
+    struct.borrow(value,field=mask),struct.borrow(value,field=track))
+  match files.write_bytes(struct.borrow(value,field=composite_raw),array.view(composed)) {
+    ok(_)=>{},err(problem)=>{return result.err(string.copy(problem.message))},
+  }
+  if value.source_video {
+    // End copied audio at the requested timeline. Shortest-stream termination
+    // can stop short, buffered H.264 delivery before every frame is flushed.
+    return check(["ffmpeg","-nostdin","-v","error","-y","-f","rawvideo",
+      "-pixel_format","rgb24","-video_size",text.concat(str.view(string.from_int(
+        value.source_width)),text.concat("x",str.view(string.from_int(value.source_height)))),
+      "-framerate","24","-i",string.copy(struct.borrow(value,field=composite_raw)),
+      "-i",string.copy(struct.borrow(value,field=source_path)),"-frames:v",
+      string.from_int(value.frames),"-map","0:v:0","-map","1:a?","-c:v",
+      "libx264","-preset","fast","-crf","12","-pix_fmt","yuv420p","-c:a",
+      "copy","-t",string.from_float(cast.float(value.frames)/24.0),
+      string.copy(struct.borrow(value,field=final_output))],
+      "FFmpeg could not encode the source-preserving masked output")
+  }
+  check(["ffmpeg","-nostdin","-v","error","-y","-f","rawvideo",
+    "-pixel_format","rgb24","-video_size",text.concat(str.view(string.from_int(
+      value.source_width)),text.concat("x",str.view(string.from_int(value.source_height)))),
+    "-framerate","24","-i",string.copy(struct.borrow(value,field=composite_raw)),
+    "-frames:v","1","-c:v","png",string.copy(struct.borrow(value,field=final_output))],
+    "FFmpeg could not encode the source-preserving masked PNG")
+}
+
+pub fn finish_two_matte(value:ref<Prepared>) -> result<unit,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process} {
+  let expected_edit:u64=value.frames*value.track.working_width*
+    value.track.working_height*3
+  let decode_filter=text.concat("fps=24,scale=",text.concat(str.view(
+    string.from_int(value.track.working_width)),text.concat(":",text.concat(
+    str.view(string.from_int(value.track.working_height)),":flags=lanczos"))))
+  let _=try check(["ffmpeg","-nostdin","-v","error","-y","-i",
+    string.copy(struct.borrow(value,field=h3_output)),"-map","0:v:0","-vf",
+    string.copy(str.view(decode_filter)),"-frames:v",string.from_int(value.frames),
+    "-pix_fmt","rgb24","-f","rawvideo",
+    string.copy(struct.borrow(value,field=edited_raw))],
+    "FFmpeg could not decode the generated replacement")
+  let _=try check(["ffmpeg","-nostdin","-v","error","-y","-i",
+    string.copy(struct.borrow(value,field=background_output)),"-map","0:v:0","-vf",
+    string.copy(str.view(decode_filter)),"-frames:v",string.from_int(value.frames),
+    "-pix_fmt","rgb24","-f","rawvideo",
+    string.copy(struct.borrow(value,field=background_raw))],
+    "FFmpeg could not decode the reconstructed background")
+  var source=try bounded_raw(struct.borrow(value,field=source_raw),
+    value.frames*value.source_width*value.source_height*3,
+    "Cannot reopen the bounded source pixels for two-matte compositing")
+  var edited=try bounded_raw(struct.borrow(value,field=edited_raw),expected_edit,
+    "Generated replacement exceeds its declared crop geometry")
+  var background=try bounded_raw(struct.borrow(value,field=background_raw),expected_edit,
+    "Reconstructed background exceeds its declared crop geometry")
+  if view.len(bytes.view(edited)) != expected_edit or
+     view.len(bytes.view(background)) != expected_edit {
+    return result.err("Two-matte H3 results did not contain every delivery frame")
+  }
+  var target=try decoded_mask(struct.borrow(value,field=target_mask_preview),
+    struct.borrow(value,field=target_mask_raw),value.track.working_width,
+    value.track.working_height,value.frames)
+  var target_clean=edit.cleanup(target,2,1,1)
+  var cleared=try edit.composite_rgb(bytes.view(source),bytes.view(background),
+    struct.borrow(value,field=removal_mask),struct.borrow(value,field=track))
+  var composed=try edit.composite_crop_mask(array.view(cleared),bytes.view(edited),
+    target_clean,struct.borrow(value,field=track))
+  match files.write_bytes(struct.borrow(value,field=composite_raw),array.view(composed)) {
+    ok(_)=>{},err(problem)=>{return result.err(string.copy(problem.message))},
+  }
+  if value.source_video {
+    return check(["ffmpeg","-nostdin","-v","error","-y","-f","rawvideo",
+      "-pixel_format","rgb24","-video_size",text.concat(str.view(string.from_int(
+        value.source_width)),text.concat("x",str.view(string.from_int(value.source_height)))),
+      "-framerate","24","-i",string.copy(struct.borrow(value,field=composite_raw)),
+      "-i",string.copy(struct.borrow(value,field=source_path)),"-frames:v",
+      string.from_int(value.frames),"-map","0:v:0","-map","1:a?","-c:v",
+      "libx264","-preset","fast","-crf","12","-pix_fmt","yuv420p","-c:a",
+      "copy","-t",string.from_float(cast.float(value.frames)/24.0),
+      string.copy(struct.borrow(value,field=final_output))],
+      "FFmpeg could not encode the two-matte masked output")
+  }
+  check(["ffmpeg","-nostdin","-v","error","-y","-f","rawvideo",
+    "-pixel_format","rgb24","-video_size",text.concat(str.view(string.from_int(
+      value.source_width)),text.concat("x",str.view(string.from_int(value.source_height)))),
+    "-framerate","24","-i",string.copy(struct.borrow(value,field=composite_raw)),
+    "-frames:v","1","-c:v","png",string.copy(struct.borrow(value,field=final_output))],
+    "FFmpeg could not encode the two-matte masked PNG")
+}
+
+// Remove only files and the unique directory created by prepare. The final
+// destination is intentionally outside this owned scratch set.
+pub fn discard(value:ref<Prepared>) -> unit effects {fs.write} {
+  let _=files.remove(struct.borrow(value,field=source_raw))
+  let _=files.remove(struct.borrow(value,field=mask_raw))
+  let _=files.remove(struct.borrow(value,field=target_mask_raw))
+  let _=files.remove(struct.borrow(value,field=target_mask_preview))
+  let _=files.remove(struct.borrow(value,field=edited_raw))
+  let _=files.remove(struct.borrow(value,field=background_raw))
+  let _=files.remove(struct.borrow(value,field=composite_raw))
+  let _=files.remove(struct.borrow(value,field=cropped_source))
+  let _=files.remove(struct.borrow(value,field=h3_output))
+  let _=files.remove(struct.borrow(value,field=background_output))
+  let _=files.remove(struct.borrow(value,field=scratch))
+  ()
+}

@@ -1,0 +1,23 @@
+module app.mm_air.tests.character_sheet_video
+
+import "../character_sheet.ai" as sheet
+import std.text as text
+
+pub fn main(args: view<str>) -> i32
+    effects {alloc,fs.meta,fs.read,fs.write,io.write,process,time} {
+  if view.len(args) != 4 {
+    io.ewrite("usage: character-sheet-video VIDEO OUTPUT 4|6\n")
+    return 2
+  }
+  let mode: u32 = if view.get(args,3) == "4" { sheet.four_panel() }
+    else if view.get(args,3) == "6" { sheet.six_panel() }
+    else { io.ewrite("panel count must be 4 or 6\n")
+      return 2 }
+  match sheet.from_video(view.get(args,1),"/tmp",view.get(args,2),mode) {
+    ok(_) => { io.write(text.concat("character-sheet=",text.concat(
+      view.get(args,2),"\n")))
+      0 },
+    err(problem) => { io.ewrite(text.concat(problem,"\n"))
+      1 },
+  }
+}

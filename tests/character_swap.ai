@@ -1,0 +1,93 @@
+module app.mm_air.tests.character_swap
+import "../character_swap.ai" as swap
+import "../.air/deps/prompt/types.ai" as prompt
+import std.text as text
+
+fn expect(value: bool, name: str) -> unit effects {io.write} {
+  if not value { io.ewrite(name)
+    panic "MM-Air H3 Character Swap contract failed" }
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc,io.write} {
+  expect(swap.edit_character_replace(2) and not swap.edit_requires_mask(2) and
+    swap.edit_requires_identity(2),"ordinary Character Replace needs identity but no mask\n")
+  expect(swap.edit_requires_mask(3) and swap.edit_requires_identity(3),
+    "Masked Character Replace keeps both requirements\n")
+  var pictures: array<string> = ["/tmp/front.png","/tmp/profile.png"]
+  var selected = swap.settings(swap.replace_selected(),
+    "the tall person in the red jacket","keep the source soundtrack",true,true,true)
+  var request = match swap.request(prompt.ModelChoice.Qwen3VL4B,
+      "/tmp/source.mp4",pictures,selected) {
+    ok(value) => value, err(_) => { panic "request" },
+  }
+  expect(request.model == prompt.ModelChoice.Qwen3VL4B,"model\n")
+  expect(request.task == prompt.Task.CharacterSwap,"task\n")
+  expect(request.maximum_new_tokens == 768,"character swap output bound\n")
+  expect(array.len(struct.borrow(request,field=attachments)) == 3,"attachment count\n")
+  let source = array.borrow(struct.borrow(request,field=attachments),0)
+  let first = array.borrow(struct.borrow(request,field=attachments),1)
+  let second = array.borrow(struct.borrow(request,field=attachments),2)
+  expect(source.kind == prompt.AttachmentKind.Video and source.ordinal == 1,"source role\n")
+  expect(first.kind == prompt.AttachmentKind.Image and first.ordinal == 1,"picture 1 role\n")
+  expect(second.kind == prompt.AttachmentKind.Image and second.ordinal == 2,"picture 2 role\n")
+  expect(text.contains(struct.borrow(request,field=instruction),
+    "only the source subject matching this user description"),"target instruction\n")
+  expect(text.contains(struct.borrow(request,field=instruction),
+    "Do not claim to hear the source"),"audio boundary\n")
+  expect(text.contains(struct.borrow(request,field=instruction),
+    "Follow the system's exact six headings"),"six sections\n")
+  var h3 = swap.h3_references("/tmp/source.mp4",pictures)
+  expect(array.len(h3) == 3 and array.borrow(h3,0) == "/tmp/source.mp4","H3 Video 1\n")
+  expect(array.borrow(h3,1) == "/tmp/front.png" and
+    array.borrow(h3,2) == "/tmp/profile.png","H3 Picture order\n")
+  var no_target = swap.settings(swap.replace_selected(),"","",true,true,true)
+  expect(not result.is_ok(swap.request(prompt.ModelChoice.Qwen3VL4B,
+    "/tmp/source.mp4",pictures,no_target)),"selected target required\n")
+  var none: array<string> = []
+  expect(not result.is_ok(swap.request(prompt.ModelChoice.Qwen3VL4B,
+    "/tmp/source.mp4",none,selected)),"picture required\n")
+  expect(not result.is_ok(swap.request(prompt.ModelChoice.Qwen3VL4B,
+    "",pictures,selected)),"source required\n")
+  expect(result.is_ok(swap.validate_prompt(
+    "subject_definitions: <Video 1> <Subject 1> from <Picture 1>\nsummary: [video editing + reference generation]\nretention_analysis:\ndetailed_description: [Shot 1] opening. [Shot 2] At 00:01.500, cut.\noverall_soundscape:\nnon_diegetic_music:")),"valid prompt\n")
+  expect(not result.is_ok(swap.validate_prompt(
+    "subject_definitions: <Video 1> <Subject 1> from <Picture 1>\nsummary: [video editing + reference generation]\nretention_analysis:\ndetailed_description: [Shot 1] At 0.000s: opening.\noverall_soundscape:\nnon_diegetic_music:")),"opening timestamp rejected\n")
+  let normalized = swap.normalize_prompt(
+    "subject_definitions: <Video 1> <Subject 1> from <Picture 1>\nsummary: [video editing + reference generation]\nretention_analysis:\ndetailed_description: [Shot 1] At 00:00.000, opening. [Shot 2] At 00:01.500, cut.\noverall_soundscape:\nnon_diegetic_music:")
+  expect(text.contains(str.view(normalized),"[Shot 1] opening.") and
+    result.is_ok(swap.validate_prompt(str.view(normalized))),"zero-time normalization\n")
+  expect(not result.is_ok(swap.validate_prompt(
+    "subject_definitions: <Video 1> <Subject 1> from <Picture 1>\nsummary: [video editing + reference generation]\nretention_analysis:\ndetailed_description: [Shot 1] opening. [Shot 2] At 00:03.000, cut. [Shot 3] At 00:02.000, earlier cut.\noverall_soundscape:\nnon_diegetic_music:")),"decreasing timestamp rejected\n")
+  expect(not result.is_ok(swap.validate_prompt(
+    "subject_definitions: <Video 1> <Subject 1> from <Picture 1>\nsummary: [video editing + reference generation]\nretention_analysis:\ndetailed_description: [Shot 1] opening. [Shot 3] At 00:02.000, skipped shot.\noverall_soundscape:\nnon_diegetic_music:")),"shot gap rejected\n")
+  expect(not result.is_ok(swap.validate_prompt("plain prompt")),"invalid prompt\n")
+  var local=match swap.local_image_request(prompt.ModelChoice.Qwen3VL4B,
+      "/tmp/source.png",pictures,"replace the masked jacket with silver armor") {
+    ok(value)=>value,err(_)=>{panic "local image request"},
+  }
+  expect(local.task==prompt.Task.LocalEdit and
+    array.len(struct.borrow(local,field=attachments))==3,
+    "localized image prompt routing\n")
+  let local_source=array.borrow(struct.borrow(local,field=attachments),0)
+  expect(local_source.kind==prompt.AttachmentKind.Image and local_source.ordinal==1,
+    "localized image source is Picture 1\n")
+  var image_replace=match swap.image_replace_request(prompt.ModelChoice.Qwen3VL4B,
+      "/tmp/source.png",pictures,"replace the blue robot with the fairy robot"){
+    ok(value)=>value,err(_)=>{panic "image Character Replace request"},
+  }
+  expect(image_replace.task==prompt.Task.LocalEdit and
+    array.len(struct.borrow(image_replace,field=attachments))==3,
+    "image Character Replace source plus identity references\n")
+  let replacement=array.borrow(struct.borrow(image_replace,field=attachments),1)
+  expect(replacement.kind==prompt.AttachmentKind.Image and replacement.ordinal==2 and
+    text.contains(struct.borrow(image_replace,field=instruction),"No authored mask exists"),
+    "image Character Replace is semantic and mask-free\n")
+  expect(result.is_ok(swap.validate_image_replace_prompt(
+    "subject_definitions: <Picture 1> source <Picture 2> defines <Subject 1>\nsummary: [keyframe completion + reference generation]\nretention_analysis:\ndetailed_description: [Shot 1] replace the character.\noverall_soundscape: N/A\nnon_diegetic_music: N/A")),
+    "valid image Character Replace prompt\n")
+  expect(result.is_ok(swap.validate_local_image_prompt(
+    "subject_definitions: <Picture 1> source\nsummary: [keyframe completion + reference generation]\nretention_analysis:\ndetailed_description: [Shot 1] source still.\noverall_soundscape: N/A\nnon_diegetic_music: N/A")),
+    "valid localized image prompt\n")
+  io.write("MM-Air H3 Character Swap request and role wiring PASS\n")
+  0
+}

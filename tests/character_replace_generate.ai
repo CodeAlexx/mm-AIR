@@ -1,0 +1,57 @@
+// Bounded real-model receipt for mask-free Character Replace.
+module app.mm_air.tests.character_replace_generate
+import "../generate.ai" as generation
+import "../.air/deps/h3/media.ai" as media
+import "../.air/deps/h3/session.ai" as session
+import std.channel as channel
+import std.text as text
+
+fn failure(message:str)->i32 effects{io.write}{
+  io.ewrite(message)
+  io.ewrite("\n")
+  1
+}
+
+pub fn main(args:view<str>)->i32
+    effects{alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time}{
+  if view.len(args)!=4{
+    io.ewrite("usage: character-replace-generate SOURCE CHARACTER_IMAGE OUTPUT\n")
+    return 2
+  }
+  var configuration=match generation.configuration(){ok(value)=>value,
+    err(message)=>{return failure(str.view(message))}}
+  let geometry=match media.geometry(48,256,448){ok(value)=>value,
+    err(problem)=>{var held=problem
+      return failure(str.view(media.error_message(held)))}}
+  var receiver=match channel.open(128,1024){ok(value)=>value,
+    err(problem)=>{var held=problem
+      return failure(str.view(channel.message(held)))}}
+  let prompt="subject_definitions:\n<Video 1> is the two-second source edit and temporal authority. <Subject 1> is the pink fairy robot whose identity comes from <Picture 1>, with a porcelain doll face, blonde bob, large pink bow, pink tutu dress, white mechanical limbs, black joints, and pink heels.\n\nsummary:\n[video editing + reference generation] The target is an edited version of <Video 1>. Replace the main onscreen character with <Subject 1> while retaining source action, framing, camera, timing, environment, and soundtrack.\n\nretention_analysis:\n<Video 1>: partially_preserved - preserve its motion, composition, camera, timing, environment, and audio while changing only the main character identity.\n<Subject 1>: fully_preserved - retain the face, hair, bow, dress, mechanical body proportions, joints, and footwear from <Picture 1>.\n\ndetailed_description:\n[Shot 1] The main onscreen character in <Video 1> is semantically replaced by <Subject 1>. The pink fairy robot follows the source character's exact action, pose progression, screen position, scale, and timing. Preserve the original framing, camera movement, lighting, background, props, and two-second progression. Maintain one coherent identity throughout with no additional characters.\n\noverall_soundscape:\nReuse the synchronized source soundtrack from <Video 1>.\n\nnon_diegetic_music:\nPreserve any source music without adding new music."
+  var references:array<string> = [string.copy(view.get(args,1)),
+    string.copy(view.get(args,2))]
+  var job=generation.job(configuration,prompt,session.Model.Reference,
+    session.Task.Ref2VA,geometry,references,[],view.get(args,3),0,"",2026091202,7,
+    session.Projection.ExactBF16,session.Projection.RowScaledI8,
+    session.Attention.DenseInt8,channel.ticket(receiver),session.Schedule.Exponential)
+  var completed=generation.Outcome{succeeded:false,output:string.new(),
+    message:string.copy("Character Replace worker did not complete"),runtime_ms:0,
+    peak_vram_bytes:0}
+  task.scope{
+    var jobs:array<task<generation.Outcome>> = [task.spawn(job,fn=generation.run)]
+    loop{
+      match channel.recv_now(receiver,time.monotonic_ns()){
+        ok(value)=>match value{some(item)=>{var update=item
+          match channel.text_of(update){some(message)=>{io.write(str.view(message))
+            io.write("\n")},none=>{}}},none=>{}},err(_)=>{}}
+      match task.wait_any(jobs,0){some(_)=>{completed=task.join(option.unwrap(
+        array.pop(jobs)))
+        break},none=>{time.sleep_ms(50)}}
+    }
+  }
+  let _=channel.close(receiver)
+  io.write(text.concat("result=",text.concat(if completed.succeeded{"success"}
+    else{"failure"},"\n")))
+  io.write(text.concat("output=",text.concat(struct.borrow(completed,field=output),"\n")))
+  io.write(text.concat("message=",text.concat(struct.borrow(completed,field=message),"\n")))
+  if completed.succeeded{0}else{1}
+}

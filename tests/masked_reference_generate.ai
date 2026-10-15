@@ -1,0 +1,59 @@
+// Real checkpoint gate for MM-Air's imported-mask edit worker with CK INT8.
+// Use a still image or video and matching grayscale mask; retain source media.
+module app.mm_air.tests.masked_reference_generate
+import "../generate.ai" as generation
+import "../masked_runtime.ai" as masked
+import "../.air/deps/h3/media.ai" as media
+import "../.air/deps/h3/session.ai" as session
+import std.channel as channel
+import std.text as text
+import std.media_input as input
+
+pub fn main(args:view<str>)->i32
+    effects{alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time}{
+  if view.len(args)!=4 and view.len(args)!=5{
+    io.ewrite("usage: masked-reference-generate SOURCE MASK OUTPUT [DELIVERY_FRAMES]\n")
+    return 2}
+  let frames:u64=if view.len(args)==5{
+    match text.parse_u64(view.get(args,4)){some(value)=>value,
+      none=>{io.ewrite("Invalid delivery frame count\n")
+        return 2}}
+  }else{22}
+  var configuration=match generation.configuration(){ok(value)=>value,
+    err(message)=>{io.ewrite(message)
+      return 1}}
+  let geometry=match media.geometry(frames,256,256){ok(value)=>value,
+    err(_)=>{return 1}}
+  var receiver=match channel.open(128,1024){ok(value)=>value,err(_)=>{return 1}}
+  let prompt:str=if input.classify_path(view.get(args,1))==input.Kind.Video{
+    "subject_definitions:\n<Video 1>: the source video, motion, composition and soundtrack authority.\n\nsummary:\n[masked video editing + reference generation] Repaint the selected surface cobalt blue.\n\nretention_analysis:\n<Video 1>: partially_preserved; retain the existing subject, shape, texture, lighting, environment, camera, motion and soundtrack. Preserve every pixel outside the authored mask.\n\ndetailed_description:\n[Shot 1] Inside the mask only, change the existing surface color to rich cobalt blue. Keep its original geometry, highlights, shadows and material texture in every frame. Preserve the composition, motion and all surrounding objects. No new subject or camera movement.\n\noverall_soundscape:\nRetain the source soundtrack unchanged.\n\nnon_diegetic_music:\nN/A"
+  }else{
+    "subject_definitions:\n<Picture 1>: the source image and composition anchor.\n\nsummary:\n[keyframe completion + reference generation] Repaint the selected surface cobalt blue.\n\nretention_analysis:\n<Picture 1>: partially_preserved; keep the existing subject, shape, texture, lighting, environment and camera. Preserve every pixel outside the authored mask.\n\ndetailed_description:\n[Shot 1] Inside the mask only, change the existing surface color to rich cobalt blue. Keep its original geometry, highlights, shadows and material texture. Preserve the composition and all surrounding objects. No new subject or camera movement.\n\noverall_soundscape:\nN/A\n\nnon_diegetic_music:\nN/A"
+  }
+  var references:array<string> = [string.copy(view.get(args,1))]
+  var audio:array<string> = []
+  var job=generation.job(configuration,prompt,session.Model.Reference,
+    session.Task.Ref2VA,geometry,references,audio,view.get(args,3),0,"",42,7,
+    session.Projection.ConvRotI8,session.Projection.ConvRotI8,
+    session.Attention.CkInt8,channel.ticket(receiver),session.Schedule.Exponential)
+  generation.enable_masked(job,masked.settings(view.get(args,2),false,0.0,0.0,
+    0.0,0.0,1,4,2,0,32,true))
+  var completed=generation.Outcome{succeeded:false,output:string.new(),
+    message:string.new(),runtime_ms:0,peak_vram_bytes:0}
+  task.scope{
+    var jobs:array<task<generation.Outcome>> = [task.spawn(job,fn=generation.run)]
+    loop{
+      match channel.recv_now(receiver,time.monotonic_ns()){
+        ok(value)=>match value{some(item)=>{var update=item
+          match channel.text_of(update){some(message)=>{io.write(message)
+            io.write("\n")},none=>{}}},none=>{}},err(_)=>{}}
+      match task.wait_any(jobs,0){some(_)=>{
+        completed=task.join(option.unwrap(array.pop(jobs)))
+        break},none=>{time.sleep_ms(50)}}
+    }
+  }
+  let _=channel.close(receiver)
+  io.write(struct.borrow(completed,field=message))
+  io.write("\n")
+  if completed.succeeded{0}else{1}
+}

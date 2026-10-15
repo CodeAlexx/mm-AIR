@@ -1,0 +1,76 @@
+module app.mm_air.tests.character_sheet
+
+import "../character_sheet.ai" as sheet
+import std.draw as draw
+import std.text as text
+
+fn expect(value: bool) -> unit effects {io.write} {
+  if not value { panic "MM-Air character-sheet contract failed" }
+}
+
+fn solid(r: u8, g: u8, b: u8) -> draw.Surface effects {alloc} {
+  var surface = option.unwrap(draw.surface(3,2))
+  var canvas = draw.canvas(surface)
+  draw.clear(canvas,draw.rgb(r,g,b))
+  draw.finish(canvas)
+}
+
+fn pixel_is(surface: ref<draw.Surface>, x: u32, y: u32,
+            r: u8, g: u8, b: u8) -> bool effects {} {
+  match draw.surface_pixel(surface,x,y) {
+    some(value) => value.r == r and value.g == g and value.b == b and value.a == 255,
+    none => false,
+  }
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc,io.write} {
+  expect(sheet.width(sheet.four_panel()) == 480)
+  expect(sheet.height(sheet.four_panel()) == 864)
+  expect(sheet.seconds(sheet.four_panel()) == 3.0)
+  expect(sheet.width(sheet.six_panel()) == 768)
+  expect(sheet.height(sheet.six_panel()) == 1376)
+  expect(sheet.seconds(sheet.six_panel()) == 5.0)
+  var four_indices = sheet.frame_indices(sheet.four_panel())
+  expect(view.len(array.view(four_indices)) == 4 and array.get(four_indices,0) == 2 and
+    array.get(four_indices,1) == 24 and array.get(four_indices,2) == 45 and
+    array.get(four_indices,3) == 68)
+  var six_indices = sheet.frame_indices(sheet.six_panel())
+  expect(view.len(array.view(six_indices)) == 6 and array.get(six_indices,0) == 2 and
+    array.get(six_indices,1) == 21 and array.get(six_indices,2) == 42 and
+    array.get(six_indices,3) == 63 and array.get(six_indices,4) == 84 and
+    array.get(six_indices,5) == 113)
+  let rendered = match sheet.prompt("<Picture 1> identity",sheet.six_panel(),
+      sheet.keep_picture_style()) {
+    ok(value) => value, err(_) => { panic "six-panel prompt failed" },
+  }
+  expect(text.contains(str.view(rendered),"<Picture 1> identity"))
+  expect(text.contains(str.view(rendered),"[0-3 seconds]"))
+  expect(text.contains(str.view(rendered),"[AUDIO] Silence"))
+  let anime = match sheet.prompt("",sheet.four_panel(),sheet.anime_to_real()) {
+    ok(value) => value, err(_) => { panic "four-panel prompt failed" },
+  }
+  expect(text.contains(str.view(anime),"photorealistic"))
+  expect(text.contains(str.view(anime),"[2-3 seconds]"))
+
+  var frames: array<draw.Surface> = [solid(255,0,0),solid(0,255,0),
+    solid(0,0,255),solid(255,255,0)]
+  var four = match sheet.stitch(frames,sheet.four_panel()) {
+    ok(value) => value, err(_) => { panic "four-panel stitch failed" },
+  }
+  expect(four.width == 12 and four.height == 10)
+  expect(pixel_is(four,0,0,255,0,0))
+  expect(pixel_is(four,9,0,0,255,0))
+  expect(pixel_is(four,0,8,0,0,255))
+  expect(pixel_is(four,9,8,255,255,0))
+  expect(pixel_is(four,4,0,0,0,0) and pixel_is(four,0,4,0,0,0))
+
+  array.push(frames,solid(0,255,255))
+  array.push(frames,solid(255,0,255))
+  var six = match sheet.stitch(frames,sheet.six_panel()) {
+    ok(value) => value, err(_) => { panic "six-panel stitch failed" },
+  }
+  expect(six.width == 21 and six.height == 10)
+  expect(pixel_is(six,18,8,255,0,255))
+  io.write("MM-Air H3 character-sheet prompt, geometry, frame selection and stitching PASS\n")
+  0
+}
