@@ -1,8 +1,10 @@
 @echo off
-rem Copy to local-paths.cmd and edit. Used by build-windows-app.cmd / build-windows-cli.cmd.
-rem AIR_GPU_BUILD : CMake build tree of the AIR checkout configured with the NVIDIA provider
-rem AIR_GPU_SOURCE: the AIR source directory that build tree was configured from
+rem Copy to local-paths.cmd and edit. Used by the build-windows-*.cmd and configure-gpu-tree.cmd scripts.
+rem AIR_GPU_SOURCE: AIR checkout; AIR_GPU_BUILD: its NVIDIA-enabled CMake build tree.
 set "MM_AIR_PYTHON_DIR=C:\Python313"
-set "AIR_GPU_BUILD=C:\AIR\build-win-nvidia-ninja"
 set "AIR_GPU_SOURCE=C:\AIR"
-set "CUDA_ROOT=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3"
+set "AIR_GPU_BUILD=C:\AIR\build-win-gpu"
+set "CUDA_ROOT=C:\AIR\build-deps\cuda-13.3"
+set "AIR_CUDNN_ROOT=C:\AIR\build-deps\cudnn-9.26.0.51\cudnn-windows-x86_64-9.26.0.51_cuda13-archive"
+set "AIR_CUTLASS_ROOT=C:\AIR\build-deps\cutlass-f7b19de"
+set "AIR_CK_ROOT=C:\AIR\build-deps\comfy-kitchen"
