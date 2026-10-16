@@ -646,6 +646,36 @@ The same job now takes 48 s to encode, 3m04s to sample, and 4m50s end to end
   instead of 3m04s, 2m42s end to end. Identity, scene and path held, with detail
   comparable to the 19-step render; the turbo pass dropped the carried helmet.
 
+### Long Character Swap and Side by Side Movie (2026-10-15)
+
+- **Clips longer than one H3 window.** One H3 pass makes 124 frames (about
+  5.2 s). When the Character Swap source is longer, `run_rolling_reference`
+  (`generate.ai`):
+  - cuts it into consecutive 24 FPS windows of up to 124 frames with ffmpeg;
+  - runs each window as an ordinary Ref2VA swap with the same character
+    pictures, prompt and seed;
+  - joins the outputs with the ffmpeg concat demuxer.
+
+  The progress line shows `H3 rolling window i/n`. A 15 s clip at Custom
+  480x832 with Turbo took 11.5 min (three windows, about 50 s of sampling each).
+  The joins at 5.2 s and 10.3 s showed no identity or outfit jump.
+- **Use 480x832 or 832x480 for long swaps.** At 768x1344 a single window
+  packs about 2.6x the tokens and leaves too little room for resident blocks on
+  a 16 GB card.
+- **Bounded residency.** H3 now keeps as many transformer blocks on the GPU as
+  fit after its sampling memory and streams only the rest (see
+  `docs/models/H3.md` in AIR, "Sampling residency budget").
+- **Side by Side Movie.** A button under the Generate button. It appears when
+  the selected result is a video whose parameter sidecar names a source video
+  that still exists (Video 1). It writes `<result>-side-by-side.mp4` with:
+  - the source on the left, resampled to 24 FPS and scaled to the result's
+    height;
+  - the result on the right;
+  - the result's soundtrack.
+
+  It runs in the background, then adds the movie to Current Generations and
+  History.
+
 ### H3 Video Outpaint
 
 Edit's **Video Outpaint** mode is a dedicated geometry-driven Ref2VA path. It

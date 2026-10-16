@@ -140,6 +140,45 @@ fn copy_result(source: string own) -> result<string, string>
   desktop.copy_to_downloads(owned)
 }
 
+// The source video a generated video was made from: Video 1 in its parameter
+// sidecar, when that is a video file that still exists.
+fn side_by_side_source(output: str) -> option<string> effects {alloc,fs.meta,fs.read} {
+  let sidecar = text.concat(output, ".json")
+  let encoded = match files.read_text(str.view(sidecar)) { ok(value) => value, err(_) => { return option.none() } }
+  var document = match json.parse(str.view(encoded)) { ok(value) => value, err(_) => { return option.none() } }
+  let node: u64 = match json.get(document, json.root(), "references") { some(value) => value, none => { return option.none() } }
+  let first: u64 = match json.at(document, node, 0) { some(value) => value, none => { return option.none() } }
+  let source: string = match json.as_string(document, first) { some(value) => value, none => { return option.none() } }
+  match media.inspect(str.view(source), 68719476736) {
+    ok(info) => if info.kind == media.Kind.Video { option.some(source) } else { option.none() },
+    err(_) => option.none(),
+  }
+}
+
+// Source on the left, result on the right, one MP4 that plays both in sync. The
+// source is resampled to 24 FPS (the H3 output clock) and scaled to the result's
+// height; the result's soundtrack is kept.
+fn make_side_by_side(output: string own) -> result<string, string>
+    effects {alloc,env,fs.meta,fs.read,fs.write,process} {
+  let owned: string = output
+  let source: string = match side_by_side_source(str.view(owned)) {
+    some(value) => value,
+    none => { return result.err("Side by Side needs a video result whose source video still exists") },
+  }
+  let stem: string = text.concat(str.view(path.stem(str.view(owned))), "-side-by-side")
+  let destination: string = try library.unused_output(str.view(path.dirname(str.view(owned))),
+    str.view(stem), ".mp4")
+  match proc.check(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", string.copy(str.view(source)),
+      "-i", string.copy(str.view(owned)), "-filter_complex",
+      "[0:v]fps=24,setsar=1[s];[s][1:v]scale2ref=w='trunc(oh*mdar/2)*2':h=ih[l][r];[r]setsar=1[r2];[l][r2]hstack=inputs=2[v]",
+      "-map", "[v]", "-map", "1:a?", "-shortest", "-c:v", "libx264", "-crf", "16",
+      "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+      "-movflags", "+faststart", string.copy(str.view(destination))]) {
+    ok(_) => result.ok(destination),
+    err(_) => result.err("FFmpeg could not build the side-by-side movie"),
+  }
+}
+
 fn item_paths(source: ref<array<library.Item>>) -> array<string> effects {alloc} {
   var out: array<string> = []
   var i: u64 = 0
@@ -677,7 +716,7 @@ fn clear_reference(session: ref<desk.Session>, last: bool) -> unit effects {allo
   let _ = desk.set_bool(session, if last { "clear_last_reference" } else { "clear_reference" }, "sensitive", false)
 }
 
-fn show_result(session: ref<desk.Session>, filename: str) -> unit effects {alloc,fs.meta,net,time,io.write} {
+fn show_result(session: ref<desk.Session>, filename: str) -> unit effects {alloc,fs.meta,fs.read,net,time,io.write} {
   let is_image: bool = match media.inspect(filename, 68719476736) {
     ok(info) => info.kind == media.Kind.Image,
     err(_) => false,
@@ -697,10 +736,12 @@ fn show_result(session: ref<desk.Session>, filename: str) -> unit effects {alloc
   let _ = desk.set_bool(session, "gen_use_image_reference", "sensitive", is_image)
   let _ = desk.set_bool(session, "gen_use_swap_character", "sensitive", is_image)
   let _ = desk.set_bool(session,"gen_delete_result","sensitive",true)
+  let paired: bool = not is_image and option.is_some(side_by_side_source(filename))
+  let _ = desk.set_bool(session, "gen_side_by_side", "visible", paired)
 }
 
 fn show_source(session: ref<desk.Session>, filename: str) -> unit
-    effects {alloc,fs.meta,net,time,io.write} {
+    effects {alloc,fs.meta,fs.read,net,time,io.write} {
   match media.inspect(filename, 8589934592) {
     err(error) => { var held: media.Error = error
       let _ = desk.set_text(session, "status", media_error(held)) },
@@ -717,6 +758,7 @@ fn show_source(session: ref<desk.Session>, filename: str) -> unit
       let _ = desk.set_bool(session, "gen_copy_downloads", "sensitive", false)
       let _ = desk.set_bool(session, "gen_use_image_reference", "sensitive", false)
       let _ = desk.set_bool(session, "gen_use_swap_character", "sensitive", false)
+      let _ = desk.set_bool(session, "gen_side_by_side", "visible", false)
     },
   }
 }
@@ -1432,6 +1474,7 @@ pub fn main(args: view<str>) -> i32
     var hosts: array<task<proc.Exit>> = [task.spawn(desk.plan(session), fn=proc.start)]
     var generations: array<task<generation.Outcome>> = array.new()
     var copies: array<task<result<string, string>>> = array.new()
+    var side_jobs: array<task<result<string, string>>> = array.new()
     var prompt_jobs: array<task<prompt_lab.Outcome>> = array.new()
     var auto_mask_jobs:array<task<auto_mask.Outcome>> = array.new()
     var progress_receivers: array<channel.Receiver> = array.new()
@@ -1725,6 +1768,39 @@ pub fn main(args: view<str>) -> i32
                   ok(destination) => {
                     let _ = desk.set_text(session, "status", text.concat("Copied to: ", destination))
                     io.write(text.concat("mm-air copied=", text.concat(destination, "\n")))
+                  },
+                  err(message) => { let _ = desk.set_text(session, "status", message)
+                    io.ewrite(text.concat(message, "\n")) },
+                }
+              },
+              none => {},
+            }
+          }
+          if array.len(side_jobs) != 0 {
+            match task.wait_any(side_jobs, 0) {
+              some(_) => {
+                let _ = desk.set_bool(session, "gen_side_by_side", "sensitive", true)
+                match task.join(option.unwrap(array.pop(side_jobs))) {
+                  ok(made) => {
+                    match library.prep_output(str.view(made), "") {
+                      ok(item) => {
+                        var held: library.Item = item
+                        array.push(current, library.item_with_postprocess(
+                          struct.borrow(held, field=path), struct.borrow(held, field=thumbnail),
+                          struct.borrow(held, field=parameters), struct.borrow(held, field=postprocess)))
+                        array.push(history, held)
+                        show_gallery_items(session,"gen_current",current)
+                        show_gallery_items(session,"gen_history",history)
+                        let _ = desk.set_bool(session, "gen_current_empty", "visible", false)
+                        let _ = desk.set_bool(session, "gen_history_empty", "visible", false)
+                        match library.save_history(history) { ok(_) => {}, err(message) => { io.ewrite(text.concat(message, "\n")) } }
+                      },
+                      err(message) => { io.ewrite(text.concat(message, "\n")) },
+                    }
+                    selected_result = string.copy(str.view(made))
+                    show_result(session, str.view(made))
+                    let _ = desk.set_text(session, "status", text.concat("Side-by-side movie saved: ", str.view(made)))
+                    io.write(text.concat("mm-air side-by-side=", text.concat(str.view(made), "\n")))
                   },
                   err(message) => { let _ = desk.set_text(session, "status", message)
                     io.ewrite(text.concat(message, "\n")) },
@@ -4910,8 +4986,20 @@ pub fn main(args: view<str>) -> i32
               let _=desk.set_bool(session,"gen_reuse_parameters","sensitive",false)
               let _=desk.set_bool(session,"gen_use_image_reference","sensitive",false)
               let _=desk.set_bool(session,"gen_use_swap_character","sensitive",false)
+              let _=desk.set_bool(session,"gen_side_by_side","visible",false)
               let _=desk.set_bool(session,"gen_delete_result","sensitive",false)
               let _=desk.set_text(session,"status","Selected result moved to Trash")
+              continue
+            }
+            if id == "gen_side_by_side" {
+              if str.len(selected_result) == 0 { continue }
+              if array.len(side_jobs) != 0 {
+                let _ = desk.set_text(session, "status", "The side-by-side movie is still being made")
+                continue
+              }
+              let _ = desk.set_text(session, "status", "Making the side-by-side movie (source left, result right)")
+              let _ = desk.set_bool(session, "gen_side_by_side", "sensitive", false)
+              array.push(side_jobs, task.spawn(string.copy(selected_result), fn=make_side_by_side))
               continue
             }
             if id == "gen_copy_downloads" {
