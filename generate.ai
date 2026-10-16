@@ -1007,60 +1007,34 @@ type VideoFrames = struct {
   height: u64
 }
 
-fn resize_video_frames(source: view<byte>, frames: u64, width: u64,
+// Ref2VA video frames go through the same Pillow Lanczos as image references
+// (`image_input.resize`), run on the GPU: the host loop took about 40 s for a
+// 5 s 1080x1920 clip, and the integer GPU port produces identical bytes.
+fn resize_video_frames(context: ref<GpuContext>, stream: ref<GpuStream>,
+                       source: view<byte>, frames: u64, width: u64,
                        height: u64, canvas: CreatorCanvas)
-    -> result<bytes,string> effects {alloc} {
+    -> result<bytes,string> effects {alloc,gpu} {
   if frames == 0 or view.len(source) != frames * width * height * 3 {
     return result.err("H3 Ref2VA video resize received incomplete RGB24 frames")
   }
   if width == canvas.width and height == canvas.height {
     return result.ok(bytes.copy(source))
   }
-  var output: array<byte> = array.new()
-  let frame_pixels: u64 = width * height
-  var frame: u64 = 0
-  loop {
-    if frame >= frames { break }
-    var rgba: draw.Surface = match draw.surface(cast.sat(width), cast.sat(height)) {
-      some(value) => value,
-      none => { return result.err("Cannot allocate a Ref2VA video frame") },
-    }
-    var pixel: u64 = 0
-    loop {
-      if pixel >= frame_pixels { break }
-      let source_offset: u64 = frame * frame_pixels * 3 + pixel * 3
-      let target_offset: u64 = pixel * 4
-      array.set(struct.borrow(rgba, field=pixels), target_offset,
-        view.get(source, source_offset))
-      array.set(struct.borrow(rgba, field=pixels), target_offset + 1,
-        view.get(source, source_offset + 1))
-      array.set(struct.borrow(rgba, field=pixels), target_offset + 2,
-        view.get(source, source_offset + 2))
-      let opaque: u8 = 255
-      array.set(struct.borrow(rgba, field=pixels), target_offset + 3,
-        cast.bits(opaque))
-      pixel = pixel + 1
-    }
-    var resized: draw.Surface = try image_input.resize(rgba, canvas.width,
-      canvas.height)
-    var rgb: array<byte> = rgb_pixels(resized)
-    var index: u64 = 0
-    loop {
-      if index >= array.len(rgb) { break }
-      array.push(output, array.get(rgb, index))
-      index = index + 1
-    }
-    frame = frame + 1
+  match image_input.resize_rgb24_frames(context, stream, source, frames, width,
+      height, canvas.width, canvas.height) {
+    ok(value) => result.ok(value),
+    err(_) => result.err(text.concat("H3 Ref2VA GPU frame resize failed: ",
+      str.view(agpu.message(context)))),
   }
-  result.ok(bytes.copy(array.view(output)))
 }
 
-fn decode_video_reference(source: str, scratch: str, ordinal: u64,
+fn decode_video_reference(context: ref<GpuContext>, stream: ref<GpuStream>,
+                          source: str, scratch: str, ordinal: u64,
                           target_frames: u64, exact_canvas: bool,
                           exact_width: u64, exact_height: u64,
                           match_target: bool)
     -> result<VideoFrames,string>
-    effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+    effects {alloc,fs.meta,fs.read,fs.write,gpu,process,time} {
   var first: draw.Surface = match media_io.frame(source, scratch, 0, 0) {
     ok(value) => value,
     err(problem) => { return result.err(problem) },
@@ -1101,7 +1075,7 @@ fn decode_video_reference(source: str, scratch: str, ordinal: u64,
     return result.err("H3 Ref2VA video produced incomplete RGB24 frames")
   }
   let frame_count: u64 = size / frame_bytes
-  var resized: bytes = try resize_video_frames(bytes.view(pixels), frame_count,
+  var resized: bytes = try resize_video_frames(context, stream, bytes.view(pixels), frame_count,
     width, height, canvas)
   result.ok(VideoFrames {pixels: resized, frames: frame_count,
     width: canvas.width, height: canvas.height})
@@ -1379,7 +1353,7 @@ pub fn prepare_ref2va_inputs(
             "decoding video")
           let decode_frames: u64 = reference_video_decode_frames(
             job.geometry.frames, job.geometry.latent_frames, job.masked)
-          var frames: VideoFrames = match decode_video_reference(source_path,
+          var frames: VideoFrames = match decode_video_reference(context, stream, source_path,
               scratch, visual, decode_frames, job.masked,
               job.geometry.width, job.geometry.height,
               job.reference_video_match) {
