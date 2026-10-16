@@ -191,6 +191,19 @@ the model's own 9B prompt rewriter first:
   about 1-2 min. They also choose the aspect ratio (text-to-image) or which source's
   aspect to keep (edits), and the status line reports the size used.
 
+**Qwen-Image weights stay on the GPU.** Each Qwen snapshot (2.1 and Turbo) needs
+the resident INT8 transformer that AIR's
+`models/qwenimage21/tools/quantize_int8.py SNAPSHOT MANIFEST_DIR` writes to
+`SNAPSHOT/transformer-int8/`. It is about 7.5 GB, with one scale per 128 inputs,
+and matches the BF16 weights against the creator. MM-Air refuses to run Qwen
+without it rather than stream weights every step. On an RTX 5080 a 2048² edit
+with a reference runs about 5.5 s per step on Turbo and about 6 s on the 40-step
+base model.
+
+**Prompt rewriter speed.** The 9B rewriters decode at about 15 ms per token, so
+Qwen's text-to-image and edit enhancers usually take 25-35 s, about 4 s of which
+is loading the model.
+
 The rewriter loads, runs and is freed before the image model loads. The
 rewritten prompt is saved next to the PNG as `<name>.png.prompt.txt`. Untick the
 box to send the prompt exactly as typed at the size you set. All of this runs
