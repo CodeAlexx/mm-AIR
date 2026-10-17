@@ -1,7 +1,7 @@
 module app.mm_air.tests.native_krea_cancel
 import "../generate.ai" as generation
 import "../parameters.ai" as parameters
-import "../.air/deps/krea2/session.ai" as krea
+import std.inference.krea2.session as krea
 import std.channel as channel
 import std.tasks as tasks
 import std.system as system

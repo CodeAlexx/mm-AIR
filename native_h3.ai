@@ -2,7 +2,7 @@
 module app.mm_air.native_h3
 import std.widgets as w
 import std.text as text
-import ".air/deps/h3/request.ai" as h3
+import std.inference.h3.request as h3
 
 fn choices(ui:ref<w.Ui>,parent:u64,key:u64,label:str,labels:array<string> own,selected:u32)->unit effects {alloc} {
   var names=labels

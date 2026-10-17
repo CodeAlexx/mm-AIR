@@ -9,8 +9,8 @@ import std.math as math
 import std.path as path
 import std.process as proc
 import std.text as text
-import ".air/deps/h3/timeline.ai" as timeline
-import ".air/deps/h3/media.ai" as h3_media
+import std.inference.h3.timeline as timeline
+import std.inference.h3.media as h3_media
 import "masked_edit.ai" as edit
 import "masked_runtime.ai" as masked
 import "outpaint.ai" as outpaint

@@ -1,8 +1,8 @@
 // Bounded real-model receipt for mask-free Character Replace.
 module app.mm_air.tests.character_replace_generate
 import "../generate.ai" as generation
-import "../.air/deps/h3/media.ai" as media
-import "../.air/deps/h3/session.ai" as session
+import std.inference.h3.media as media
+import std.inference.h3.session as session
 import std.channel as channel
 import std.text as text
 

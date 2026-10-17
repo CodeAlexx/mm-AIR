@@ -17,13 +17,13 @@ import std.system as system
 import "runtime_config.ai" as runtime_config
 import "settings.ai" as settings
 import "layout_memory.ai" as layout_memory
-import ".air/deps/h3/request.ai" as h3
-import ".air/deps/h3/lora.ai" as h3_lora
-import ".air/deps/h3/session.ai" as h3_session
-import ".air/deps/h3/media.ai" as h3_media
-import ".air/deps/h3/timing.ai" as h3_timing
+import std.inference.h3.request as h3
+import std.inference.h3.lora as h3_lora
+import std.inference.h3.session as h3_session
+import std.inference.h3.media as h3_media
+import std.inference.h3.timing as h3_timing
 import ".air/deps/qwenimage21/contract.ai" as qwen_image_contract
-import ".air/deps/krea2/config.ai" as krea_config
+import std.inference.krea2.config as krea_config
 import "generate.ai" as generation
 import "character_sheet.ai" as character_sheet
 import "character_swap.ai" as character_swap
@@ -506,8 +506,9 @@ fn filter_parameters(session:ref<desk.Session>,query:str,model:u32,swap_mode:u32
   let _ = desk.set_bool(session,"gen_swap_group","visible",not image_model and
     (wanted == "" or text.contains(
       "h3 mode character swap source video replacement target identity qwen prompt",wanted)))
-  let _ = desk.set_bool(session,"gen_lora_group","visible",krea and
-    (wanted == "" or text.contains("krea lora overlay strength",wanted)))
+  // LoRAs apply to Krea 2 and to H3 runs; Character Swap adds its Settings LoRA files.
+  let _ = desk.set_bool(session,"gen_lora_group","visible",(krea or not image_model) and
+    (wanted == "" or text.contains("krea h3 lora overlay strength",wanted)))
   let _=desk.set_bool(session,"gen_enhance_group","visible",(flux or qwen_image) and
     (wanted=="" or text.contains("prompt enhance enhancer upsample upsampler rewrite",wanted)))
   let _=desk.set_bool(session,"gen_krea_sampling","visible",krea and
@@ -3453,7 +3454,7 @@ pub fn main(args: view<str>) -> i32
                 let _ = desk.set_number(session,"gen_model","selected",cast.float(model_index))
                 let _ = desk.set_number(session,"gen_task","selected",cast.float(task_index))
                 let fast: bool = not character_swap.is_masked(generation_mode) and
-                  option.is_some(generation.character_swap_turbo_root())
+                  option.is_some(generation.character_swap_turbo_lora())
                 if fast {
                   profile_index = h3.profile_turbo_4()
                 } else if profile_index == h3.profile_turbo_4() {
@@ -4363,10 +4364,10 @@ pub fn main(args: view<str>) -> i32
                     let _ = desk.set_text(session,"gen_prompt_buffer",str.view(prompt))
                     let _ = desk.set_bool(session,"gen_swap_open_prompt","sensitive",true)
                     let _ = desk.set_text(session,"gen_swap_status",
-                      if option.is_some(generation.character_swap_root()) {
-                        "Swap prompt ready and editable · Character Swap LoRA root active"
+                      if option.is_some(generation.character_swap_lora()) {
+                        "Swap prompt ready and editable · Character Swap LoRA active"
                       } else {
-                        "Swap prompt ready and editable · set MM_AIR_H3_CHARACTER_SWAP_ROOT for the swap LoRA"
+                        "Swap prompt ready and editable · choose the Character Swap LoRA file in Settings"
                       })
                     let _ = desk.set_text(session,"status",
                       "Character Swap prompt built; edit the target wording before Generate if needed")
@@ -5953,23 +5954,34 @@ pub fn main(args: view<str>) -> i32
                   let model = if request.model == h3.model_base() { h3_session.Model.Base }
                     else { h3_session.Model.Reference }
                   let conditioner_projection: h3_session.Projection = session_projection(request.conditioner_projection)
-                  // The Character Swap LoRA exists only inside the merged
-                  // root's ConvRot cache, so swap jobs on that root must
-                  // sample ConvRot blocks or the adapter would be skipped.
-                  // The 4-step turbo schedule only works with the distillation
-                  // LoRA, which exists only inside the turbo swap root.
+                  // Character Swap runs the plain Ref2VA root with its LoRA files
+                  // applied at run time, after any LoRAs in the Generate list. The
+                  // 4-step schedule also needs the turbo (distillation) LoRA.
                   let turbo: bool = request.profile == h3.profile_turbo_4()
                   if turbo and (not swap or masked or
-                      not option.is_some(generation.character_swap_turbo_root())) {
+                      not option.is_some(generation.character_swap_turbo_lora())) {
                     generation_status(session,
-                      "Turbo · 4 evaluations needs Character Swap and MM_AIR_H3_CHARACTER_SWAP_TURBO_ROOT; choose a 19-evaluation schedule otherwise")
+                      "Turbo · 4 evaluations needs Character Swap and a turbo LoRA file in Settings; choose a 19-evaluation schedule otherwise")
                     continue
                   }
-                  let swap_root: option<string> = if turbo {
-                    generation.character_swap_turbo_root()
-                  } else if swap and not masked {
-                    generation.character_swap_root() } else { option.none() }
-                  if option.is_some(swap_root) and
+                  var job_lora_list: array<parameters.LoraEntry> = parameters.clone_loras(generate_loras)
+                  if swap and not masked {
+                    match generation.character_swap_lora() {
+                      some(file) => { array.push(job_lora_list,
+                        parameters.LoraEntry {path:file,strength:1.0,enabled:true}) },
+                      none => {},
+                    }
+                    if turbo {
+                      match generation.character_swap_turbo_lora() {
+                        some(file) => { array.push(job_lora_list,
+                          parameters.LoraEntry {path:file,strength:1.0,enabled:true}) },
+                        none => {},
+                      }
+                    }
+                  }
+                  // Swap adapters run on the fused ConvRot path, whose cache rows
+                  // match the adapters' stored layout.
+                  if swap and not masked and array.len(job_lora_list) > 0 and
                       request.transformer_projection != h3.projection_convrot_int8() {
                     struct.set(request,h3.projection_convrot_int8(),
                       field=transformer_projection)
@@ -5982,13 +5994,6 @@ pub fn main(args: view<str>) -> i32
                       generation_status(session,str.view(problem))
                       continue
                     },
-                  }
-                  match swap_root {
-                    some(root) => {
-                      let _ = ref.swap(struct.borrow(configuration,
-                        field=reference_checkpoint_root),string.copy(str.view(root)))
-                    },
-                    none => {},
                   }
                   var receiver: channel.Receiver = match channel.open(128, 1024) {
                     ok(value) => value,
@@ -6015,7 +6020,7 @@ pub fn main(args: view<str>) -> i32
                     model, task, request.geometry,
                     job_references, job_audio,
                     str.view(struct.borrow(request, field=output)),
-                    parameters.clone_loras(generate_loras),
+                    job_lora_list,
                     if id == "generate_action" or id == "queue_take" or id == "edit_run" or
                         id=="edit_outpaint_preview_window" {
                       character_sheet_mode} else {character_sheet.off()},

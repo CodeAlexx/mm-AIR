@@ -18,26 +18,26 @@ import std.text as text
 import std.system as system
 import "runtime_config.ai" as runtime_config
 import ".air/deps/qwen/tokenizer.ai" as tokenizer
-import ".air/deps/h3/audio_encode.ai" as audio_encode
-import ".air/deps/h3/checkpoint.ai" as checkpoint
-import ".air/deps/h3/conditioning.ai" as conditioning
-import ".air/deps/h3/deployment.ai" as h3_deployment
-import ".air/deps/h3/image_input.ai" as image_input
-import ".air/deps/h3/lora.ai" as h3_lora
-import ".air/deps/h3/media.ai" as h3_media
-import ".air/deps/h3/packing.ai" as packing
-import ".air/deps/h3/presentation.ai" as presentation
-import ".air/deps/h3/session.ai" as session
-import ".air/deps/h3/request.ai" as h3_request
-import ".air/deps/h3/timeline.ai" as timeline
-import ".air/deps/h3/timing.ai" as h3_timing
+import std.inference.h3.audio_encode as audio_encode
+import std.inference.h3.checkpoint as checkpoint
+import std.inference.h3.conditioning as conditioning
+import std.inference.h3.deployment as h3_deployment
+import std.inference.h3.image_input as image_input
+import std.inference.h3.lora as h3_lora
+import std.inference.h3.media as h3_media
+import std.inference.h3.packing as packing
+import std.inference.h3.presentation as presentation
+import std.inference.h3.session as session
+import std.inference.h3.request as h3_request
+import std.inference.h3.timeline as timeline
+import std.inference.h3.timing as h3_timing
 import ".air/deps/h3_repair/plan.ai" as repair_plan
-import ".air/deps/h3/vae.ai" as vae
+import std.inference.h3.vae as vae
 import ".air/deps/sam3/mask.ai" as auto_mask
-import ".air/deps/krea2/session.ai" as krea_session
-import ".air/deps/krea2/config.ai" as krea_config
-import ".air/deps/krea2/attention.ai" as krea_attention
-import ".air/deps/krea2/lora.ai" as krea_lora
+import std.inference.krea2.session as krea_session
+import std.inference.krea2.config as krea_config
+import std.inference.krea2.attention as krea_attention
+import std.inference.krea2.lora as krea_lora
 import ".air/deps/qwenimage21/session.ai" as qwen_image_session
 import ".air/deps/qwenimage21/generate.ai" as qwen_image_generate
 import ".air/deps/qwenimage21/contract.ai" as qwen_image_contract
@@ -459,27 +459,24 @@ pub fn configuration() -> result<Configuration,string> effects {alloc,env,fs.rea
     scratch_root: scratch_root})
 }
 
-// Optional Ref2VA root whose ConvRot cache has the Character Swap LoRA baked in
-// by tools/h3_swap_lora_merge.py. Unset, empty or incomplete means plain Ref2VA.
-pub fn character_swap_root() -> option<string> effects {alloc,env,fs.read,fs.meta} {
-  merged_root("MM_AIR_H3_CHARACTER_SWAP_ROOT")
+// Character Swap's LoRA, applied at run time on the plain Ref2VA root; a newer
+// swap LoRA is just a different file. Unset, empty or missing means plain Ref2VA.
+pub fn character_swap_lora() -> option<string> effects {alloc,env,fs.read,fs.meta} {
+  lora_file("MM_AIR_H3_CHARACTER_SWAP_LORA")
 }
 
-// Same, with the 4-step Ref2VA turbo LoRA also merged; sampled with the
-// four-evaluation turbo profile.
-pub fn character_swap_turbo_root() -> option<string> effects {alloc,env,fs.read,fs.meta} {
-  merged_root("MM_AIR_H3_CHARACTER_SWAP_TURBO_ROOT")
+// The 4-step Ref2VA turbo (distillation) LoRA used by the four-evaluation profile.
+pub fn character_swap_turbo_lora() -> option<string> effects {alloc,env,fs.read,fs.meta} {
+  lora_file("MM_AIR_H3_CHARACTER_SWAP_TURBO_LORA")
 }
 
-fn merged_root(key: str) -> option<string> effects {alloc,env,fs.read,fs.meta} {
+fn lora_file(key: str) -> option<string> effects {alloc,env,fs.read,fs.meta} {
   let value: string = match runtime_config.value(key) {
-    ok(found) => match found { some(root) => root, none => { return option.none() } },
+    ok(found) => match found { some(file) => file, none => { return option.none() } },
     err(_) => { return option.none() },
   }
   if str.len(str.view(value)) == 0 { return option.none() }
-  let cache: string = path.join(str.view(value),
-    "serenity_runtime_cache_v1/native_convrot_h256_ref2va_blocks_50.safetensors")
-  match files.exists(str.view(cache)) {
+  match files.exists(str.view(value)) {
     ok(found) => if found { option.some(value) } else { option.none() },
     err(_) => option.none(),
   }
@@ -1633,15 +1630,6 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
     adapter_index = adapter_index + 1
   }
   let has_adapter: bool = array.len(adapter_requests) != 0
-  if has_adapter and job.model != session.Model.Base {
-    return outcome(false,str.view(output_path),
-      "H3 LoRA currently supports MiniMax-H3 Base tasks, not Ref2VA")
-  }
-  if has_adapter and (job.transformer_projection == session.Projection.ConvRotI8 or
-      job.transformer_projection == session.Projection.ConvRotI8Streaming) {
-    return outcome(false,str.view(output_path),
-      "H3 LoRA requires Exact BF16 or Row-scaled INT8 transformer projection")
-  }
   let windowed:bool=job.window_frames<job.geometry.frames
   let motion_context_enabled=str.len(struct.borrow(job,field=motion_context_path))!=0
   if has_adapter and (windowed or motion_context_enabled) {
@@ -1802,7 +1790,7 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
     }
     report(sender, "Denoising MiniMax-H3 in AIR")
     if job.masked_denoise {
-      session.run_ref2va_masked_to_mp4_geometry(context, stream, sources, state,
+      session.run_ref2va_masked_to_mp4_geometry_loras(context, stream, sources, state,
         str.view(struct.borrow(job, field=prompt)),
         struct.borrow(inputs, field=rows),
         struct.borrow(inputs, field=presentations),
@@ -1810,16 +1798,17 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
         array.view(struct.borrow(job, field=masked_token_weights)),
         job.geometry, job.seed, job.conditioner_projection,
         job.transformer_projection, job.attention, job.evaluations,
-        str.view(scratch), str.view(output_path), job.schedule_kind, sender)
+        str.view(scratch), str.view(output_path), job.schedule_kind,
+        adapter_requests, sender)
     } else {
-      session.run_ref2va_to_mp4_geometry(context, stream, sources, state,
+      session.run_ref2va_to_mp4_geometry_loras(context, stream, sources, state,
         str.view(struct.borrow(job, field=prompt)),
         struct.borrow(inputs, field=rows),
         struct.borrow(inputs, field=presentations),
         struct.borrow(inputs, field=patches), job.geometry, job.seed,
         job.conditioner_projection, job.transformer_projection, job.attention,
         job.evaluations, str.view(scratch), str.view(output_path),
-        job.schedule_kind, sender)
+        job.schedule_kind, adapter_requests, sender)
     }
   }
   // Provider diagnostics and counters belong to the live context. Snapshot

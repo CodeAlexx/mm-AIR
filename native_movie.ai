@@ -5,7 +5,7 @@ import std.text as text
 import std.math as math
 import std.path as path
 import "movie_project.ai" as movie
-import ".air/deps/h3/request.ai" as h3
+import std.inference.h3.request as h3
 
 // Match Movie Maker's routing: continuation, cast/reference, then keyframes.
 pub fn request(project:ref<movie.Project>,index:u64,output:str)->result<h3.Request,string> effects{alloc}{

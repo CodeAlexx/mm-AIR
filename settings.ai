@@ -18,7 +18,7 @@ pub fn keys()->array<string> effects{alloc}{
    "MM_AIR_PROMPT_MANIFEST_ROOT",
    "MM_AIR_SEEDVR2_DIT","MM_AIR_SEEDVR2_7B_DIT","MM_AIR_SEEDVR2_VAE",
    "MM_AIR_SEEDVR2_MANIFEST_ROOT","MM_AIR_SEEDVR2_7B_MANIFEST_ROOT",
-   "MM_AIR_H3_CHARACTER_SWAP_ROOT","MM_AIR_H3_CHARACTER_SWAP_TURBO_ROOT"]
+   "MM_AIR_H3_CHARACTER_SWAP_LORA","MM_AIR_H3_CHARACTER_SWAP_TURBO_LORA"]
 }
 pub fn index(id:str,browse:bool)->option<u64> effects{alloc}{
   var i:u64=0
@@ -31,7 +31,7 @@ pub fn index(id:str,browse:bool)->option<u64> effects{alloc}{
 }
 pub fn is_file(index:u64)->bool effects{}{
   index==7 or index==8 or index==10 or index==11 or
-    index==17 or index==18 or index==19
+    index==17 or index==18 or index==19 or index==22 or index==23
 }
 fn configured(key:str,fallback:str)->result<string,string>
     effects{alloc,env,fs.read,fs.meta}{

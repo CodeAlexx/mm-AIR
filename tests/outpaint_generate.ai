@@ -3,8 +3,8 @@ module app.mm_air.tests.outpaint_generate
 import "../generate.ai" as generation
 import "../outpaint.ai" as outpaint
 import "../outpaint_runtime.ai" as outpaint_runtime
-import "../.air/deps/h3/media.ai" as media
-import "../.air/deps/h3/session.ai" as session
+import std.inference.h3.media as media
+import std.inference.h3.session as session
 import std.channel as channel
 import std.text as text
 

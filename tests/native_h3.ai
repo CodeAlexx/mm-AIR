@@ -1,7 +1,7 @@
 module app.mm_air.tests.native_h3
 import "../native_h3.ai" as form
 import "../parameters.ai" as parameters
-import "../.air/deps/h3/request.ai" as h3
+import std.inference.h3.request as h3
 import std.widgets as w
 import std.shell as shell
 import std.image as image

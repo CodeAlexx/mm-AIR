@@ -603,8 +603,8 @@ workflow instead of a Qwen scene description:
   original identity back in and re-described the whole scene. Generate accepts
   this direct form or a full six-section prompt; Masked Character Swap keeps
   its Qwen build.
-- **LoRA root.** MM-Air samples Ref2VA with fused ConvRot INT8 kernels that
-  have no LoRA insertion points, so `tools/h3_swap_lora_merge.py merge` bakes
+- **LoRA root (superseded 2026-10-17, see below).** MM-Air sampled Ref2VA with
+  fused ConvRot INT8 kernels that had no LoRA insertion points, so `tools/h3_swap_lora_merge.py merge` bakes
   the LoRA into the official BF16 weights and re-quantizes them with the
   difh3convrot H256 recipe into a separate root (junctions and hard links for
   everything else; token-refiner pairs go into a small merged shard).
@@ -660,6 +660,30 @@ The same job now takes 48 s to encode, 3m04s to sample, and 4m50s end to end
 - Gate (same clip, seed 555123, matched reference canvas): sampling took 36 s
   instead of 3m04s, 2m42s end to end. Identity, scene and path held, with detail
   comparable to the 19-step render; the turbo pass dropped the carried helmet.
+
+### Character Swap LoRAs as runtime files (2026-10-17)
+
+The swap and turbo LoRAs are no longer merged into checkpoint roots. AIR's H3
+ConvRot path now applies PEFT adapters at runtime (`std.inference.h3`
+`forward_convrot_lora`), so a new or updated swap LoRA is just a file:
+
+- **Settings:** `MM_AIR_H3_CHARACTER_SWAP_LORA` (the swap LoRA) and
+  `MM_AIR_H3_CHARACTER_SWAP_TURBO_LORA` (the 4-step turbo LoRA). Unmasked
+  swaps add the swap LoRA, plus the turbo LoRA when Turbo is on, to the job's
+  LoRA list and force ConvRot projection; Turbo requires the turbo file.
+- **Your own LoRAs** from the Generate LoRA section stack on top. The section is
+  shown for Krea 2 and every H3 run, and the one-enabled-LoRA limit is gone.
+- `MM_AIR_H3_CHARACTER_SWAP_ROOT` / `_TURBO_ROOT` and
+  `tools/h3_swap_lora_merge.py` are no longer read by Character Swap.
+
+Gate (RTX 5080 16 GB, 2 s 832x480 Ref2VA, both LoRAs, turbo 4 evaluations):
+3/3 runs completed with bit-identical output in about 128 s each (the merged
+root took 77 s). The reference identity transferred. This needed the AIR
+provider fix for unordered row-gather index uploads (AIR 7afbcc43).
+
+MM-Air now imports H3 and Krea 2 from the standard library
+(`std.inference.h3.*`, `std.inference.krea2.*`) after AIR moved model sources
+out of `models/`; the `h3` and `krea2` path dependencies were dropped.
 
 ### Long Character Swap and Side by Side Movie (2026-10-15)
 

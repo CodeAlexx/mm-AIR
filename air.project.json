@@ -228,12 +228,7 @@
     "prompt": {"path":"../../AIR/toolkits/prompt","version":">=0.1.0"},
     "sam3": {"path":"../../AIR/toolkits/sam3","version":">=0.1.0"},
     "seedvr2": {"path":"../../AIR/toolkits/seedvr2","version":">=0.1.0"},
-    "krea2": {"path":"../../AIR/models/krea2","version":">=0.1.0"},
     "qwenimage21": {"path":"../../AIR/models/qwenimage21","version":">=0.1.0"},
-    "h3": {
-      "path": "../../AIR/models/h3",
-      "version": ">=0.1.0"
-    },
     "h3_repair": {"path":"../../AIR/toolkits/h3-repair","version":">=0.1.0"},
     "flux3": {"path":"../../AIR/models/flux3","version":">=0.1.0"}
   }

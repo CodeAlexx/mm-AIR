@@ -10,8 +10,8 @@ import std.math as math
 import std.path as path
 import std.process as proc
 import std.text as text
-import ".air/deps/h3/media.ai" as h3_media
-import ".air/deps/h3/timing.ai" as h3_timing
+import std.inference.h3.media as h3_media
+import std.inference.h3.timing as h3_timing
 import ".air/deps/h3_repair/plan.ai" as repair
 import ".air/deps/h3_repair/motion.ai" as motion
 import ".air/deps/h3_repair/analyze.ai" as motion_analysis

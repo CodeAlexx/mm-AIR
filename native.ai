@@ -18,7 +18,7 @@ import "native_krea.ai" as krea_form
 import "native_h3.ai" as h3_form
 import "native_seed.ai" as seed
 import "native_view.ai" as presenter
-import ".air/deps/h3/request.ai" as h3
+import std.inference.h3.request as h3
 import "parameters.ai" as parameters
 import "library.ai" as library
 import "movie_project.ai" as movie

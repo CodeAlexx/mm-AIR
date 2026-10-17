@@ -9,8 +9,8 @@ import std.media_input as input
 import std.path as path
 import std.process as proc
 import std.text as text
-import ".air/deps/h3/media.ai" as h3_media
-import ".air/deps/h3/timeline.ai" as h3_timeline
+import std.inference.h3.media as h3_media
+import std.inference.h3.timeline as h3_timeline
 import "masked_edit.ai" as edit
 
 pub type Settings = struct {

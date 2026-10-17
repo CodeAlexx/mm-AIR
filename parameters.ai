@@ -4,9 +4,9 @@ import std.codec as codec
 import std.json as json
 import std.text as text
 import std.math as math
-import "./.air/deps/h3/request.ai" as h3
+import std.inference.h3.request as h3
 import "./.air/deps/qwenimage21/contract.ai" as qwen_contract
-import "./.air/deps/krea2/config.ai" as krea_config
+import std.inference.krea2.config as krea_config
 
 pub fn krea_model_index() -> u32 effects {} { 2 }
 pub fn qwen_image_model_index() -> u32 effects {} { 3 }
@@ -245,14 +245,11 @@ pub fn clone_loras(entries: ref<array<LoraEntry>>) -> array<LoraEntry> effects {
 
 pub fn validate_loras(entries: ref<array<LoraEntry>>) -> result<unit,string> effects {alloc} {
   var index: u64 = 0
-  var enabled_count: u64 = 0
+  // Several enabled LoRAs are allowed: H3 applies each at its own strength, and
+  // Krea 2 reports its own one-adapter limit.
   loop {
     if index >= array.len(entries) { break }
     let entry = array.borrow(entries,index)
-    if entry.enabled { enabled_count = enabled_count + 1 }
-    if enabled_count > 1 {
-      return result.err("Generate supports one enabled LoRA at a time; disable another LoRA first")
-    }
     let runtime_strength: f32 = cast.float(entry.strength)
     if not math.is_finite(entry.strength) or
        not math.is_finite(cast.float(runtime_strength)) {

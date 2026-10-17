@@ -2,11 +2,11 @@
 module app.mm_air.tests.masked_reference_capture
 import "../generate.ai" as generation
 import "../masked_runtime.ai" as masked
-import "../.air/deps/h3/conditioning.ai" as conditioning
-import "../.air/deps/h3/deployment.ai" as deployment
-import "../.air/deps/h3/media.ai" as media
-import "../.air/deps/h3/session.ai" as session
-import "../.air/deps/h3/vae.ai" as vae
+import std.inference.h3.conditioning as conditioning
+import std.inference.h3.deployment as deployment
+import std.inference.h3.media as media
+import std.inference.h3.session as session
+import std.inference.h3.vae as vae
 import "../.air/deps/qwen/tokenizer.ai" as tokenizer
 import std.channel as channel
 import std.files as files

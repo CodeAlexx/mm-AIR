@@ -4,7 +4,7 @@ module app.mm_air.outpaint
 
 import std.codec as codec
 import std.text as text
-import ".air/deps/h3/timeline.ai" as timeline
+import std.inference.h3.timeline as timeline
 import ".air/deps/prompt/types.ai" as prompt_types
 import "masked_edit.ai" as edit
 

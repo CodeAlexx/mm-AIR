@@ -6,8 +6,8 @@ module app.mm_air.tests.seedvr2_postprocess
 import "../generate.ai" as generation
 import "../seedvr2_post.ai" as seedvr2
 import "../character_sheet.ai" as sheet
-import "../.air/deps/h3/media.ai" as media
-import "../.air/deps/h3/session.ai" as session
+import std.inference.h3.media as media
+import std.inference.h3.session as session
 import std.channel as channel
 
 fn require(value:bool,message:str)->unit effects {io.write} {

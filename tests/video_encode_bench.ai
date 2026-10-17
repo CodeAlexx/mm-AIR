@@ -5,8 +5,8 @@
 // compares them with BASELINE.
 module app.mm_air.tests.video_encode_bench
 
-import "../.air/deps/h3/media.ai" as media
-import "../.air/deps/h3/vae.ai" as vae
+import std.inference.h3.media as media
+import std.inference.h3.vae as vae
 import std.compute_offload as offload
 import std.files as files
 import std.gpu as agpu

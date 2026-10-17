@@ -3,7 +3,7 @@
 // policy without copying model code into this repository.
 module app.mm_air.tests.h3_library_import
 
-import "../.air/deps/h3/session.ai" as session
+import std.inference.h3.session as session
 
 pub fn main(args: view<str>) -> i32 effects {alloc, io.write} {
   match session.attention_for_evaluation(

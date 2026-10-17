@@ -1,7 +1,7 @@
 // Generate parameter persistence contract. Requires the refreshed H3 package.
 module app.mm_air.tests.parameters
 import "../parameters.ai" as parameters
-import "../.air/deps/h3/request.ai" as h3
+import std.inference.h3.request as h3
 import std.text as text
 import std.json as json
 
@@ -39,8 +39,9 @@ fn lora_round_trip() -> bool effects {alloc} {
   // Clone owns independent rows, including disabled entries for saved UI state.
   struct.set(array.borrow(entries,0),9.0,field=strength)
   if array.borrow(copies,0).strength != 0.75 { return false }
+  // Several enabled LoRAs are valid; each runs at its own strength.
   struct.set(array.borrow(entries,1),true,field=enabled)
-  match parameters.validate_loras(entries) { ok(_) => { return false },err(_) => {}, }
+  match parameters.validate_loras(entries) { ok(_) => {},err(_) => { return false }, }
   struct.set(array.borrow(entries,1),false,field=enabled)
   let legacy: str = "{\"schema\":\"mm-air.krea2.parameters\",\"version\":1,\"model\":\"krea2-turbo\",\"prompt\":\"robot\",\"seed\":42,\"width\":1024,\"height\":1024,\"steps\":8,\"precision\":\"bf16\",\"output\":\"/tmp/robot.png\"}"
   var old = match parameters.decode_krea(legacy) { ok(v) => v,err(_) => { return false }, }

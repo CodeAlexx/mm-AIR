@@ -10,7 +10,7 @@ import std.path as path
 import std.process as proc
 import std.text as text
 import std.system as system
-import ".air/deps/h3/request.ai" as h3
+import std.inference.h3.request as h3
 
 pub type Take=struct{output:string,state:string,seed:u64}
 pub type Character=struct{id:u64,name:string,role:string,identity:string,image:string}

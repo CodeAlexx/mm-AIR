@@ -6,8 +6,8 @@ module app.mm_air.tests.rolling_repair_generate
 
 import "../generate.ai" as generation
 import "../repair_runtime.ai" as repair_runtime
-import "../.air/deps/h3/media.ai" as media
-import "../.air/deps/h3/session.ai" as session
+import std.inference.h3.media as media
+import std.inference.h3.session as session
 import "../.air/deps/h3_repair/plan.ai" as repair_plan
 import std.channel as channel
 import std.files as files

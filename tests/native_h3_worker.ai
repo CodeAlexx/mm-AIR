@@ -1,7 +1,7 @@
 module app.mm_air.tests.native_h3_worker
 import "../generate.ai" as generation
 import "../parameters.ai" as parameters
-import "../.air/deps/h3/request.ai" as h3
+import std.inference.h3.request as h3
 import std.channel as channel
 import std.files as files
 import std.path as path
