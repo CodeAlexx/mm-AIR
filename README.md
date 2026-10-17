@@ -193,7 +193,7 @@ hardlinks 2.1's text encoder, processor and VAE.
 
 Double-click a splitter handle to collapse or restore the side panel. Each parameter
 section has a ▾/▸ header that collapses it. Splitter sizes, collapsed panels and
-collapsed sections are remembered in your preferences (`%LOCALAPPDATA%\mm-airuntime.json`,
+collapsed sections are remembered in your preferences (`%LOCALAPPDATA%\mm-air\runtime.json`,
 `MM_AIR_UI_*` keys), and so is the Turbo checkbox (`MM_AIR_QWEN_TURBO`). This needs the matching `MM-Air-UI.exe` (AIR
 `toolkits/desktop/windows/air_ui.cpp`).
 
