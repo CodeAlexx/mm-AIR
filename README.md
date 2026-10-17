@@ -174,7 +174,8 @@ A 1024² image takes about 15 s and a 1 MP edit about 22 s. Weights come from
 `FLUX3_KLEIN_ROOT` (the downloaded folder plus its `air-int8/` DiT).
 
 **Qwen-Image-2.1-Turbo** is the **Turbo (8 steps)** checkbox on Generate (Qwen
-Sampling) and Image Edit. It is on by default and turned back on by Reset. While it is on:
+Sampling) and Image Edit. It is on by default, keeps your last choice across restarts, and
+Reset turns it back on. While it is on:
 - it loads the Turbo transformer from `QWEN_IMAGE21_TURBO_ROOT`;
 - Steps is fixed at 8 and the schedule dropdown is greyed out;
 - it uses the checkpoint's own sigma schedule.
@@ -191,8 +192,9 @@ hardlinks 2.1's text encoder, processor and VAE.
 - between the image and the prompt dock.
 
 Double-click a splitter handle to collapse or restore the side panel. Each parameter
-section has a ▾/▸ header that collapses it. Splitter sizes and collapsed sections reset
-when the app restarts. This needs the matching `MM-Air-UI.exe` (AIR
+section has a ▾/▸ header that collapses it. Splitter sizes, collapsed panels and
+collapsed sections are remembered in your preferences (`%LOCALAPPDATA%\mm-airuntime.json`,
+`MM_AIR_UI_*` keys), and so is the Turbo checkbox (`MM_AIR_QWEN_TURBO`). This needs the matching `MM-Air-UI.exe` (AIR
 `toolkits/desktop/windows/air_ui.cpp`).
 
 **Enhance prompt** checkboxes on Generate and Image Edit (both on by default) run

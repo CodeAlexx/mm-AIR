@@ -16,6 +16,7 @@ import std.media as media_io
 import std.system as system
 import "runtime_config.ai" as runtime_config
 import "settings.ai" as settings
+import "layout_memory.ai" as layout_memory
 import ".air/deps/h3/request.ai" as h3
 import ".air/deps/h3/lora.ai" as h3_lora
 import ".air/deps/h3/session.ai" as h3_session
@@ -1269,9 +1270,10 @@ pub fn main(args: view<str>) -> i32
   var character_sheet_style: u32 = character_sheet.keep_picture_style()
   var resolution_index: u32 = 6
   var qwen_image_resolution_index:u32=0
-  var qwen_image_steps:u64=qwen_image_contract.turbo_steps()
+  var qwen_turbo:bool=layout_memory.turbo()
+  var qwen_image_steps:u64=if qwen_turbo{qwen_image_contract.turbo_steps()}
+    else{qwen_image_contract.default_steps()}
   var qwen_image_scheduler:u32=qwen_image_contract.scheduler_creator_dynamic()
-  var qwen_turbo:bool=true
   var qwen_image_sampler:u32=qwen_image_contract.sampler_euler()
   var width: u64 = 832
   var height: u64 = 480
@@ -1527,6 +1529,9 @@ pub fn main(args: view<str>) -> i32
           initial_qwen_edit_seed)))
         let _=desk.set_bool(session,"qwen_edit_seed_lock","active",qwen_edit_seed_locked)
         show_qwen_turbo(session,qwen_turbo)
+        let _=desk.set_number(session,"qwen_image_steps","value",cast.float(qwen_image_steps))
+        let _=desk.set_number(session,"qwen_edit_steps","value",cast.float(qwen_image_steps))
+        layout_memory.restore(session)
         update_qwen_edit_sources(session,qwen_edit_references)
         select_mode(session, "generate")
         source_widgets(session, task_index)
@@ -2980,6 +2985,11 @@ pub fn main(args: view<str>) -> i32
               "Manual subject mask ready · feathering is applied during localized edit")
             continue
           }
+          if kind == "change" and layout_memory.is_layout(str.view(id)) {
+            match layout_memory.remember(event,str.view(id)){ok(_)=>{},
+              err(message)=>{io.ewrite(text.concat("Layout preference: ",text.concat(message,"\n")))}}
+            continue
+          }
           if kind == "change" {
             if id=="settings_panel_width" or id=="settings_navigation_width" or id=="settings_navigation_height" {
               let size:u64=cast.sat(desk.number(event,"value"))
@@ -3622,7 +3632,11 @@ pub fn main(args: view<str>) -> i32
               continue
             }
             if id=="qwen_image_turbo" or id=="qwen_edit_turbo"{
-              qwen_turbo=desk.boolean(event,"value")
+              let chosen=desk.boolean(event,"value")
+              if chosen!=qwen_turbo{
+                match layout_memory.remember_turbo(chosen){ok(_)=>{},
+                  err(message)=>{io.ewrite(text.concat("Turbo preference: ",text.concat(message,"\n")))}}}
+              qwen_turbo=chosen
               show_qwen_turbo(session,qwen_turbo)
               qwen_image_steps=qwen_turbo_steps(session,
                 qwen_effective_scheduler(qwen_turbo,qwen_image_scheduler),qwen_image_steps)
@@ -4894,6 +4908,7 @@ pub fn main(args: view<str>) -> i32
               qwen_image_resolution_index=0
               qwen_image_steps=qwen_image_contract.turbo_steps()
               qwen_image_scheduler=qwen_image_contract.scheduler_creator_dynamic()
+              if not qwen_turbo{let _=layout_memory.remember_turbo(true)}
               qwen_turbo=true
               show_qwen_turbo(session,qwen_turbo)
               qwen_image_sampler=qwen_image_contract.sampler_euler()

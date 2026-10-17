@@ -1,0 +1,86 @@
+// Remembers the Generate layout (splitter sizes, collapsed side panels and parameter
+// sections) and the Qwen Turbo choice in the user's runtime preferences.
+module app.mm_air.layout_memory
+import "runtime_config.ai" as config
+import "../../AIR/toolkits/desktop/ui.ai" as desk
+import std.json as json
+import std.text as text
+
+fn splits()->array<string> effects{alloc}{
+  ["gen_left_split","gen_right_split","gen_stage_split"]
+}
+fn sections()->array<string> effects{alloc}{
+  ["gen_model_group_expander","gen_swap_group_expander","gen_character_group_expander",
+   "gen_lora_group_expander","gen_krea_sampling_expander","gen_enhance_group_expander",
+   "gen_seed_group_expander","gen_h3_core_group_expander","gen_qwen_sampling_expander",
+   "gen_h3_geometry_group_expander","gen_output_summary_group_expander",
+   "gen_seedvr2_group_expander","gen_h3_runtime_group_expander"]
+}
+fn listed(names:ref<array<string>>,id:str)->bool{
+  var i:u64=0
+  loop{if i>=array.len(names){break}
+    if array.borrow(names,i)==id{return true}
+    i=i+1}
+  false
+}
+fn key(id:str)->string effects{alloc}{text.concat("MM_AIR_UI_",id)}
+fn stored(name:str)->string effects{alloc,env,fs.read,fs.meta}{
+  match config.value(name){ok(found)=>match found{some(value)=>value,none=>string.new(),},
+    err(_)=>string.new(),}
+}
+
+pub fn is_layout(id:str)->bool effects{alloc}{
+  var split_ids=splits()
+  var section_ids=sections()
+  listed(split_ids,id) or listed(section_ids,id)
+}
+
+// Push every remembered size and open/closed state to the window.
+pub fn restore(session:ref<desk.Session>)->unit effects{alloc,env,fs.read,fs.meta,net,time}{
+  var split_ids=splits()
+  var i:u64=0
+  loop{if i>=array.len(split_ids){break}
+    let id=array.borrow(split_ids,i)
+    let size=stored(str.view(key(id)))
+    match text.parse_u64(str.view(size)){
+      some(value)=>{let _=desk.set_number(session,id,"kept",cast.float(value))},none=>{},}
+    let folded=stored(str.view(text.concat(str.view(key(id)),"_COLLAPSED")))
+    if folded!=""{let _=desk.set_bool(session,id,"collapsed",folded=="1")}
+    i=i+1}
+  var section_ids=sections()
+  i=0
+  loop{if i>=array.len(section_ids){break}
+    let id=array.borrow(section_ids,i)
+    let open=stored(str.view(key(id)))
+    if open!=""{let _=desk.set_bool(session,id,"expanded",open=="1")}
+    i=i+1}
+}
+
+// Save one splitter or section change reported by the window.
+pub fn remember(event:ref<json.Document>,id:str)->result<string,string>
+    effects{alloc,env,fs.read,fs.meta,fs.write}{
+  var names:array<string> = []
+  var values:array<string> = []
+  var split_ids=splits()
+  if listed(split_ids,id){
+    let size:u64=cast.sat(desk.number(event,"value"))
+    array.push(names,key(id))
+    array.push(values,string.from_int(cast.sat(size)))
+    array.push(names,text.concat(str.view(key(id)),"_COLLAPSED"))
+    array.push(values,string.copy(if desk.boolean(event,"collapsed"){"1"}else{"0"}))
+  }else{
+    array.push(names,key(id))
+    array.push(values,string.copy(if desk.boolean(event,"value"){"1"}else{"0"}))
+  }
+  config.save(names,values)
+}
+
+// Turbo is on unless the user turned it off last time.
+pub fn turbo()->bool effects{alloc,env,fs.read,fs.meta}{
+  stored("MM_AIR_QWEN_TURBO")!="0"
+}
+pub fn remember_turbo(on:bool)->result<string,string> effects{alloc,env,fs.read,fs.meta,fs.write}{
+  var names:array<string> = ["MM_AIR_QWEN_TURBO"]
+  var values:array<string> = [string.copy(if on{"1"}else{"0"})]
+  config.save(names,values)
+}
