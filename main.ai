@@ -467,6 +467,22 @@ fn qwen_turbo_steps(session:ref<desk.Session>,scheduler:u32,steps:u64)->u64 effe
   next
 }
 
+// Turbo is a checkbox rather than a schedule: it picks the Turbo checkpoint and its
+// fixed 8 steps. The schedule dropdowns keep the base model's choice underneath.
+fn qwen_effective_scheduler(turbo:bool,scheduler:u32)->u32{
+  if turbo{qwen_image_contract.scheduler_turbo()}else{scheduler}
+}
+
+fn show_qwen_turbo(session:ref<desk.Session>,turbo:bool)->unit effects{alloc,net,time}{
+  let _=desk.set_bool(session,"qwen_image_turbo","active",turbo)
+  let _=desk.set_bool(session,"qwen_edit_turbo","active",turbo)
+  let _=desk.set_bool(session,"qwen_image_scheduler","sensitive",not turbo)
+  let _=desk.set_bool(session,"qwen_edit_scheduler","sensitive",not turbo)
+  let _=desk.set_bool(session,"qwen_image_steps","sensitive",not turbo)
+  let _=desk.set_bool(session,"qwen_edit_steps","sensitive",not turbo)
+  ()
+}
+
 fn show_qwen_recipe(session:ref<desk.Session>,scheduler:u32,sampler:u32)
     ->unit effects{alloc,net,time}{
   // Scheduler and sampler are already visible in their controls.
@@ -1253,8 +1269,9 @@ pub fn main(args: view<str>) -> i32
   var character_sheet_style: u32 = character_sheet.keep_picture_style()
   var resolution_index: u32 = 6
   var qwen_image_resolution_index:u32=0
-  var qwen_image_steps:u64=qwen_image_contract.default_steps()
+  var qwen_image_steps:u64=qwen_image_contract.turbo_steps()
   var qwen_image_scheduler:u32=qwen_image_contract.scheduler_creator_dynamic()
+  var qwen_turbo:bool=true
   var qwen_image_sampler:u32=qwen_image_contract.sampler_euler()
   var width: u64 = 832
   var height: u64 = 480
@@ -1509,6 +1526,7 @@ pub fn main(args: view<str>) -> i32
         let _=desk.set_text(session,"qwen_edit_seed",str.view(string.from_int(
           initial_qwen_edit_seed)))
         let _=desk.set_bool(session,"qwen_edit_seed_lock","active",qwen_edit_seed_locked)
+        show_qwen_turbo(session,qwen_turbo)
         update_qwen_edit_sources(session,qwen_edit_references)
         select_mode(session, "generate")
         source_widgets(session, task_index)
@@ -1562,13 +1580,16 @@ pub fn main(args: view<str>) -> i32
                     let _=desk.set_number(session,"qwen_edit_width","value",cast.float(qwen_edit_width))
                     let _=desk.set_number(session,"qwen_edit_height","value",cast.float(qwen_edit_height))
                     qwen_image_steps=request.steps
-                    qwen_image_scheduler=request.scheduler
+                    qwen_turbo=request.scheduler==qwen_image_contract.scheduler_turbo()
+                    qwen_image_scheduler=if qwen_turbo{qwen_image_contract.scheduler_creator_dynamic()}
+                      else{request.scheduler}
                     qwen_image_sampler=request.sampler
                     qwen_edit_seed=request.seed
                     let _=desk.set_number(session,"qwen_edit_resolution","selected",
                       cast.float(qwen_edit_resolution_index))
                     let _=desk.set_number(session,"qwen_edit_steps","value",cast.float(request.steps))
-                    let _=desk.set_number(session,"qwen_edit_scheduler","selected",cast.float(request.scheduler))
+                    let _=desk.set_number(session,"qwen_edit_scheduler","selected",cast.float(qwen_image_scheduler))
+                    show_qwen_turbo(session,qwen_turbo)
                     let _=desk.set_number(session,"qwen_edit_sampler","selected",cast.float(request.sampler))
                     let restored_seed:i64=cast.sat(request.seed)
                     let _=desk.set_text(session,"qwen_edit_seed",str.view(string.from_int(restored_seed)))
@@ -1595,7 +1616,9 @@ pub fn main(args: view<str>) -> i32
                     let _=desk.set_number(session,"gen_width","value",cast.float(width))
                     let _=desk.set_number(session,"gen_height","value",cast.float(height))
                     qwen_image_steps=request.steps
-                    qwen_image_scheduler=request.scheduler
+                    qwen_turbo=request.scheduler==qwen_image_contract.scheduler_turbo()
+                    qwen_image_scheduler=if qwen_turbo{qwen_image_contract.scheduler_creator_dynamic()}
+                      else{request.scheduler}
                     qwen_image_sampler=request.sampler
                     qwen_image_resolution_index=match qwen_image_contract.resolution_index(
                         request.width,request.height){
@@ -1614,6 +1637,7 @@ pub fn main(args: view<str>) -> i32
                       cast.float(qwen_image_scheduler))
                     let _=desk.set_number(session,"qwen_image_sampler","selected",
                       cast.float(qwen_image_sampler))
+                    show_qwen_turbo(session,qwen_turbo)
                     let _=desk.set_text(session,"gen_seed",string.from_int(seed))
                     show_qwen_recipe(session,qwen_image_scheduler,qwen_image_sampler)
                     let _=desk.set_text(session,"gen_prompt_buffer",str.view(prompt))
@@ -3150,7 +3174,8 @@ pub fn main(args: view<str>) -> i32
             }
             if id=="qwen_edit_scheduler"{
               qwen_image_scheduler=cast.sat(desk.number(event,"value"))
-              qwen_image_steps=qwen_turbo_steps(session,qwen_image_scheduler,qwen_image_steps)
+              qwen_image_steps=qwen_turbo_steps(session,
+                qwen_effective_scheduler(qwen_turbo,qwen_image_scheduler),qwen_image_steps)
               continue
             }
             if id=="qwen_edit_sampler"{
@@ -3596,6 +3621,13 @@ pub fn main(args: view<str>) -> i32
               qwen_edit_match_source=desk.boolean(event,"value")
               continue
             }
+            if id=="qwen_image_turbo" or id=="qwen_edit_turbo"{
+              qwen_turbo=desk.boolean(event,"value")
+              show_qwen_turbo(session,qwen_turbo)
+              qwen_image_steps=qwen_turbo_steps(session,
+                qwen_effective_scheduler(qwen_turbo,qwen_image_scheduler),qwen_image_steps)
+              continue
+            }
             if id=="qwen_edit_enhance"{
               qwen_edit_enhance=desk.boolean(event,"value")
               continue
@@ -3618,7 +3650,8 @@ pub fn main(args: view<str>) -> i32
             }
             if id=="qwen_image_scheduler"{
               qwen_image_scheduler=cast.sat(desk.number(event,"value"))
-              qwen_image_steps=qwen_turbo_steps(session,qwen_image_scheduler,qwen_image_steps)
+              qwen_image_steps=qwen_turbo_steps(session,
+                qwen_effective_scheduler(qwen_turbo,qwen_image_scheduler),qwen_image_steps)
               show_qwen_recipe(session,qwen_image_scheduler,qwen_image_sampler)
             }
             if id=="qwen_image_sampler"{
@@ -3824,9 +3857,10 @@ pub fn main(args: view<str>) -> i32
                 source:string.copy(str.view(array.borrow(qwen_edit_references,0))),
                 references:additional_sources,
                 width:qwen_edit_width,height:qwen_edit_height,
-                steps:if qwen_image_scheduler==qwen_image_contract.scheduler_turbo(){
+                steps:if qwen_turbo{
                   qwen_image_contract.turbo_steps()}else{qwen_image_steps},seed:qwen_edit_seed,
-                scheduler:qwen_image_scheduler,sampler:qwen_image_sampler,enhance:qwen_edit_enhance}
+                scheduler:qwen_effective_scheduler(qwen_turbo,qwen_image_scheduler),
+                sampler:qwen_image_sampler,enhance:qwen_edit_enhance}
               let folder=path.join(output_directory,"qwen-image-2.1/edit")
               let stem=text.concat("qwen-edit-",string.from_int(time.monotonic_ns()))
               let allocated=match library.unused_output(str.view(folder),str.view(stem),".png"){
@@ -4858,8 +4892,10 @@ pub fn main(args: view<str>) -> i32
             }
             if id == "reset_generate" {
               qwen_image_resolution_index=0
-              qwen_image_steps=qwen_image_contract.default_steps()
+              qwen_image_steps=qwen_image_contract.turbo_steps()
               qwen_image_scheduler=qwen_image_contract.scheduler_creator_dynamic()
+              qwen_turbo=true
+              show_qwen_turbo(session,qwen_turbo)
               qwen_image_sampler=qwen_image_contract.sampler_euler()
               let _=desk.set_number(session,"qwen_image_resolution","selected",0.0)
               let _=desk.set_number(session,"qwen_image_steps","value",
@@ -5756,10 +5792,11 @@ pub fn main(args: view<str>) -> i32
                 var request=parameters.QwenImageRequest{prompt:string.copy(prompt),
                   output:string.copy(output_media),source:string.new(),references:array.new(),
                   width:width,height:height,
-                  steps:if qwen_image_scheduler==qwen_image_contract.scheduler_turbo(){
+                  steps:if qwen_turbo{
                     qwen_image_contract.turbo_steps()}else{qwen_image_steps},
                   seed:if seed<0{time.monotonic_ns()}else{cast.wrap(seed)},
-                  scheduler:qwen_image_scheduler,sampler:qwen_image_sampler,enhance:enhance_prompt}
+                  scheduler:qwen_effective_scheduler(qwen_turbo,qwen_image_scheduler),
+                  sampler:qwen_image_sampler,enhance:enhance_prompt}
                 if id=="gen_save_parameters"{
                   match parameters.encode_qwen_image(request){
                     ok(value)=>{save_parameter_snapshot(session,output_directory,value)},
