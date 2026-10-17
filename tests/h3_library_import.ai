@@ -28,6 +28,6 @@ pub fn main(args: view<str>) -> i32 effects {alloc, io.write} {
     ok(value)=>{if value!=session.AttentionStep.CkInt8{return 2}},
     err(_)=>{return 2},
   }
-  io.write("MM-Air imported models.h3.session: PASS\n")
+  io.write("MM-Air imported std.inference.h3.session: PASS\n")
   0
 }

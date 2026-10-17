@@ -16,7 +16,7 @@ copied into MM-Air.
 | Project bibles and controls | `desktop.ui` + `main.ai` | Working |
 | Shot deck; add/duplicate/delete/select | `movie_project.ai` + native `GtkListBox` | Working |
 | Brief, shot plan, sound and prompt | `movie_project.compile_prompt` | Working |
-| T2VA/I2VA/FL2VA/L2VA/Ref2VA precedence | `main.ai` queue routing + `models/h3/session.ai` | Working; a lone ending frame uses the Base model's native last-keyframe anchor |
+| T2VA/I2VA/FL2VA/L2VA/Ref2VA precedence | `main.ai` queue routing + `stdlib/inference/h3/session.ai` | Working; a lone ending frame uses the Base model's native last-keyframe anchor |
 | Qwen Director | AIR Qwen3-VL 8B `prompt_lab.run` | Working; H3 stays blocked until Qwen fully unloads |
 | Multiple takes and selected take | `Shot.takes`, take list and monitor | Working |
 | Render all | UI `render_all` + sequential native button activation | Working; one GPU job at a time |

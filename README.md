@@ -736,7 +736,7 @@ maps source audio independently. Exact Source publishes lossless RGB H.264 so
 the decoded saved source rectangle remains byte-identical; Blended may modify
 only its selected seam width.
 
-Long clips use `models/h3/timeline.ai` as the single window authority. Every
+Long clips use `stdlib/inference/h3/timeline.ai` as the single window authority. Every
 window receives its matching source slice. AIR's Base path supports direct
 latent carry, but Ref2VA direct latent carry is not yet implemented; Video
 Outpaint therefore uses the explicit `decoded-tail-reference` fallback. Only
@@ -830,7 +830,7 @@ scene plans, and director notes, plus H3 Expand, Shorten, Cinematic, and Shot Li
 Results can replace or append Generate's prompt, populate Movie Maker Director, be preserved
 as a variant, or be saved as versioned JSON under `output/prompt-history`.
 
-The expanded **H3 Window Plan** uses AIR's shared `models.h3.timeline` geometry.
+The expanded **H3 Window Plan** uses AIR's shared `std.inference.h3.timeline` geometry.
 Total, approximate window, and approximate overlap seconds are resolved into the
 actual `17j+5` / `5j+2` H3 endpoints. The report lists every ordered delivery-frame,
 video-latent, and separately mapped 40 Hz audio-latent span. Scene Plan injects
