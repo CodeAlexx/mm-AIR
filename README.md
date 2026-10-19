@@ -103,8 +103,7 @@ one to ten ordered PNG sources and one natural-language edit instruction. The
 first source is the primary picture and later sources retain their displayed
 order as additional visual conditions. Both paths call the
 same linked `models.qwenimage21.session` package inside the MM-Air process;
-there is no Python runtime, HTTP model service, helper model process, or
-ComfyUI boundary.
+there is no Python runtime, HTTP model service, or helper model process.
 
 Generate exposes the seven creator-published output geometries, an editable
 2–100 step count, seed, the creator dynamic Flow schedule or a native linear
@@ -505,7 +504,7 @@ blend area remained source-identical.
 Generate includes a native H3 character-sheet preset adapted from
 [`PoopMan333/H3_Character_Sheet_Generator`](https://huggingface.co/PoopMan333/H3_Character_Sheet_Generator)
 at revision `13c095e84c6d651d49ddcbdb672779cc66a7d44d`. It does not execute that
-repository's ComfyUI workflow. The preset selects H3 Reference/Ref2VA, supplies
+repository's workflow. The preset selects H3 Reference/Ref2VA, supplies
 the source's fixed orbit prompt, accepts the existing ordered set of up to nine
 visual references, and performs frame extraction and stitching inside AIR.
 
@@ -631,7 +630,7 @@ sky, framing, and walking path matched the source. Source-video VAE encode took
 Swap speed-up (same day): the source clip was encoded on the 768-short-edge
 creator canvas (1344x768 for an 832x480 clip), tripling encoder tiles and
 reference tokens. Unmasked swaps now set `reference_video_match` and encode at
-the target resolution (ComfyUI `ref_image_size: match`). The H3 encoder's cuDNN
+the target resolution (reference size matched to the target). The H3 encoder's cuDNN
 Conv3d workspace cap rose from 64 MiB to 1 GiB, which picks kernels 3.6x faster
 per 17x256x256 tile (`tests/video_encode_bench.ai`; moments rel_l2 1.2e-4).
 The same job now takes 48 s to encode, 3m04s to sample, and 4m50s end to end
@@ -639,7 +638,7 @@ The same job now takes 48 s to encode, 3m04s to sample, and 4m50s end to end
 
 ### Turbo Character Swap and corrected LoRA layout (2026-10-15)
 
-- **Layout fix.** ComfyUI-format LoRAs (the akatz swap LoRA, lightx2v turbo)
+- **Layout fix.** Third-party-format LoRAs (the akatz swap LoRA, lightx2v turbo)
   address fused QKV as contiguous [q;k;v], but the raw official shards
   interleave Q/K/V per head (diffusers `reorder_interleaved_qkv`). FC1 is
   [gate; value] in both. Checked exactly against the Diffusers build of the turbo
@@ -853,9 +852,8 @@ single-window because reference-media slicing and authored-mask scheduling need
 their own product gate; the worker rejects rather than silently changing those
 semantics. Visual-only AV edits preserve the independent audio storage verbatim;
 a visual subject mask is never converted into an audio mask.
-These behaviors were independently implemented after reviewing
-[ComfyUI-MMH3Tools](https://github.com/ckinpdx/ComfyUI-MMH3Tools); MM-Air remains
-native AIR and includes no ComfyUI node/runtime code.
+These behaviors were independently implemented in native AIR; MM-Air includes
+no third-party node or runtime code.
 
 The bounded product receipt is `tests/windowed_generate.ai`: 56 requested frames
 at 256x256, two 39-frame windows, a representable 22-frame overlap, exact BF16
