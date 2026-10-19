@@ -604,14 +604,15 @@ workflow instead of a Qwen scene description:
   this direct form or a full six-section prompt; Masked Character Swap keeps
   its Qwen build.
 - **LoRA root (superseded 2026-10-17, see below).** MM-Air sampled Ref2VA with
-  fused ConvRot INT8 kernels that had no LoRA insertion points, so `tools/h3_swap_lora_merge.py merge` bakes
-  the LoRA into the official BF16 weights and re-quantizes them with the
+  fused ConvRot INT8 kernels that had no LoRA insertion points, so a Python
+  merge script (`tools/h3_swap_lora_merge.py`, deleted 2026-10-19) baked
+  the LoRA into the official BF16 weights and re-quantized them with the
   difh3convrot H256 recipe into a separate root (junctions and hard links for
-  everything else; token-refiner pairs go into a small merged shard).
-  `verify` re-quantizes unmerged blocks and must match the existing cache byte
-  for byte; it does for blocks 0 and 49. Set `MM_AIR_H3_CHARACTER_SWAP_ROOT`
-  (Settings or runtime.json) to that root. Unmasked swap jobs then use it and
-  force ConvRot transformer projection, because only the ConvRot cache carries
+  everything else; token-refiner pairs went into a small merged shard).
+  Its `verify` re-quantized unmerged blocks and matched the existing cache byte
+  for byte for blocks 0 and 49. `MM_AIR_H3_CHARACTER_SWAP_ROOT`
+  (Settings or runtime.json) pointed at that root; unmasked swap jobs used it and
+  forced ConvRot transformer projection, because only the ConvRot cache carried
   the adapter.
 - **Character reference.** The gallery's **Swap Char** button makes the
   selected Krea image or H3 character sheet `<Picture 1>` and switches Generate
@@ -642,15 +643,17 @@ The same job now takes 48 s to encode, 3m04s to sample, and 4m50s end to end
   address fused QKV as contiguous [q;k;v], but the raw official shards
   interleave Q/K/V per head (diffusers `reorder_interleaved_qkv`). FC1 is
   [gate; value] in both. Checked exactly against the Diffusers build of the turbo
-  LoRA. `tools/h3_swap_lora_merge.py` now re-interleaves QKV deltas, honours
-  per-projection `.alpha` (scale alpha/rank) and stacks several LoRAs. The first
+  LoRA. The merge script (since deleted) re-interleaved QKV deltas, honoured
+  per-projection `.alpha` (scale alpha/rank) and stacked several LoRAs. The first
   `reference-charswap` root was merged without the QKV reorder; use
   `reference-charswap-v2`.
 - **Turbo.** `reference-charswap-turbo4` = swap LoRA + lightx2v
   `minimax_h3_ref2v_turbo_4step_v0.1` (shift 12/3, which is exactly MM-Air's
   simple grid at four evaluations). New profile `profile_turbo_4` (four Euler
   evaluations) reads `native-modcache-ref2va[-audio]-steps5-blocks50`, built by
-  `tools/h3_modcache.py`. That tool regenerates the shipped 7-step caches with
+  AIR's `h3-modcache` (`std.inference.h3.modcache`, see AIR `tools/h3/README.md`;
+  it replaced the Python `tools/h3_modcache.py` on 2026-10-19 with byte-identical
+  output). It regenerates the shipped 7-step caches with
   99.7% of values bit-identical and the rest within one BF16 ulp. Character Swap
   selects Turbo automatically when `MM_AIR_H3_CHARACTER_SWAP_TURBO_ROOT` is set;
   any 19-evaluation schedule uses `MM_AIR_H3_CHARACTER_SWAP_ROOT`. Turbo is
@@ -673,8 +676,9 @@ ConvRot path now applies PEFT adapters at runtime (`std.inference.h3`
   LoRA list and force ConvRot projection; Turbo requires the turbo file.
 - **Your own LoRAs** from the Generate LoRA section stack on top. The section is
   shown for Krea 2 and every H3 run, and the one-enabled-LoRA limit is gone.
-- `MM_AIR_H3_CHARACTER_SWAP_ROOT` / `_TURBO_ROOT` and
-  `tools/h3_swap_lora_merge.py` are no longer read by Character Swap.
+- `MM_AIR_H3_CHARACTER_SWAP_ROOT` / `_TURBO_ROOT` are no longer read by
+  Character Swap, and the merge script `tools/h3_swap_lora_merge.py` was deleted
+  (2026-10-19): LoRAs are never merged into base weights.
 
 Gate (RTX 5080 16 GB, 2 s 832x480 Ref2VA, both LoRAs, turbo 4 evaluations):
 3/3 runs completed with bit-identical output in about 128 s each (the merged
