@@ -652,8 +652,8 @@ The same job now takes 48 s to encode, 3m04s to sample, and 4m50s end to end
   simple grid at four evaluations). New profile `profile_turbo_4` (four Euler
   evaluations) reads `native-modcache-ref2va[-audio]-steps5-blocks50`, built by
   AIR's `h3-modcache` (`std.inference.h3.modcache`, see AIR `tools/h3/README.md`;
-  it replaced the Python `tools/h3_modcache.py` on 2026-10-19 with byte-identical
-  output). It regenerates the shipped 7-step caches with
+  it replaced the Python `tools/h3_modcache.py` on 2026-10-19 and matches it byte
+  for byte when numpy's BLAS runs one thread). It regenerates the shipped 7-step caches with
   99.7% of values bit-identical and the rest within one BF16 ulp. Character Swap
   selects Turbo automatically when `MM_AIR_H3_CHARACTER_SWAP_TURBO_ROOT` is set;
   any 19-evaluation schedule uses `MM_AIR_H3_CHARACTER_SWAP_ROOT`. Turbo is
