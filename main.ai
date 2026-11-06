@@ -5620,10 +5620,6 @@ pub fn main(args: view<str>) -> i32
                   none => match env.get("HOME") { some(home) => path.join(home,"models/loras"), none => string.new(), }, },
                 err(_) => match env.get("HOME") { some(home) => path.join(home,"models/loras"), none => string.new(), },
               }
-              let folder = if text.trim(str.view(configured_folder)) != "" {configured_folder}
-                else {match env.get("HOME") {
-                  some(value) => path.join(value,".serenity/models/loras"), none => string.new(),
-                }}
               let title = if model_index == parameters.krea_model_index() {
                 "Add Krea LoRA"} else if parameters.image_model(model_index) {"Add LoRA"} else {"Add H3 LoRA"}
               let _ = desk.dialog_multiple(session,id,title,folder)
