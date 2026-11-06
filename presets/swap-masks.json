@@ -1,0 +1,30 @@
+{
+  "schema": "mm-air.swap-masks.preset.v1",
+  "prompt": "person",
+  "tracker": "sam3.1",
+  "score_threshold": 0.7,
+  "tracker_hotstart_frames": 1,
+  "selection_switch_area_factor": 2.0,
+  "selection_min_iou": 0.1,
+  "headroom": 0.1,
+  "hold_frames": 2,
+  "reference_short_edge": 736,
+  "margins": [
+    {"name": "tight", "grow_px": 20, "blur_px": 5},
+    {"name": "normal", "grow_px": 40, "blur_px": 10},
+    {"name": "loose", "grow_px": 64, "blur_px": 16}
+  ],
+  "default_margin": "normal",
+  "mannequin_grey": 128,
+  "mannequin_shrink_px": 8,
+  "motion_reference_short_edges": [512, 768, 1376],
+  "motion_reference_default": 512,
+  "motion_reference_max_pixels": 1032192,
+  "fps": 24,
+  "min_frames": 22,
+  "tint_alpha": 0.45,
+  "edit_source_mode": "blank",
+  "edit_tint": [0, 255, 255],
+  "person_tint": [255, 140, 0],
+  "preview_crf": 16
+}

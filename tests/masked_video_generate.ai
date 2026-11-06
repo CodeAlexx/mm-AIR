@@ -3,6 +3,7 @@
 // replacement identity.
 module app.mm_air.tests.masked_video_generate
 
+import std.inference.h3.policy as h3_policy
 import "../generate.ai" as generation
 import "../masked_runtime.ai" as masked
 import std.inference.h3.media as media
@@ -37,7 +38,7 @@ pub fn main(args:view<str>)->i32
   var job=generation.job(configuration,prompt,session.Model.Reference,
     session.Task.Ref2VA,geometry,references,audio,view.get(args,4),0,"",424242,19,
     session.Projection.ExactBF16,session.Projection.RowScaledI8,
-    session.Attention.DenseInt8,channel.ticket(receiver),session.Schedule.Exponential)
+    session.Attention.DenseInt8,channel.ticket(receiver),session.Schedule.Exponential,h3_policy.Sampler.Euler)
   generation.enable_masked_composite(job,masked.settings(view.get(args,2),false,0.0,0.0,
     0.0,0.0,2,8,4,0,96,true))
   match generation.enable_two_matte(job,view.get(args,5),view.get(args,6)) {

@@ -1,5 +1,6 @@
 // Bounded real-model receipt for the native Video Outpaint worker.
 module app.mm_air.tests.outpaint_generate
+import std.inference.h3.policy as h3_policy
 import "../generate.ai" as generation
 import "../outpaint.ai" as outpaint
 import "../outpaint_runtime.ai" as outpaint_runtime
@@ -36,7 +37,7 @@ pub fn main(args:view<str>)->i32
   var job=generation.job(configuration,prompt,session.Model.Reference,
     session.Task.Ref2VA,geometry,references,[],view.get(args,2),0,"",20260912,7,
     session.Projection.ExactBF16,session.Projection.RowScaledI8,
-    session.Attention.DenseInt8,channel.ticket(receiver),session.Schedule.Exponential)
+    session.Attention.DenseInt8,channel.ticket(receiver),session.Schedule.Exponential,h3_policy.Sampler.ResMultistep)
   generation.enable_outpaint(job,outpaint_runtime.settings(384,256,
     outpaint.right(),outpaint.anchor_center(),outpaint.exact(),0,window_frames,
     overlap_frames,false))

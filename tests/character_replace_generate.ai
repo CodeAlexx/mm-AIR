@@ -1,5 +1,6 @@
 // Bounded real-model receipt for mask-free Character Replace.
 module app.mm_air.tests.character_replace_generate
+import std.inference.h3.policy as h3_policy
 import "../generate.ai" as generation
 import std.inference.h3.media as media
 import std.inference.h3.session as session
@@ -32,7 +33,7 @@ pub fn main(args:view<str>)->i32
   var job=generation.job(configuration,prompt,session.Model.Reference,
     session.Task.Ref2VA,geometry,references,[],view.get(args,3),0,"",2026091202,7,
     session.Projection.ExactBF16,session.Projection.RowScaledI8,
-    session.Attention.DenseInt8,channel.ticket(receiver),session.Schedule.Exponential)
+    session.Attention.DenseInt8,channel.ticket(receiver),session.Schedule.Exponential,h3_policy.Sampler.ResMultistep)
   var completed=generation.Outcome{succeeded:false,output:string.new(),
     message:string.copy("Character Replace worker did not complete"),runtime_ms:0,
     peak_vram_bytes:0}

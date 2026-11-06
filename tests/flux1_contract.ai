@@ -1,0 +1,51 @@
+// Shared native request/presenter/retained-runtime contract; no model open.
+module app.mm_air.tests.flux1_contract
+import "../native_flux1.ai" as bridge
+import "../native_view.ai" as presenter
+import "../parameters.ai" as parameters
+import "../library.ai" as library
+import std.inference.h3.request as h3
+import std.widgets as w
+import std.text as text
+
+pub fn main(args:view<str>) -> i32 effects {alloc,io.write} {
+  if parameters.flux1_model_index()!=7 {return 1}
+  var value:parameters.Flux1Request=parameters.flux1_defaults()
+  value.prompt="a red fox in a forest"
+  value.output="C:/AIR-output/fox.png"
+  value.seed=9007199254740993
+  value.width=96
+  value.height=160
+  var encoded:string=match parameters.encode_flux1(value) {ok(result)=>result,err(_)=>{return 2},}
+  if not parameters.is_flux1(encoded) {return 3}
+  var decoded:parameters.Flux1Request=match parameters.decode_flux1(encoded) {ok(result)=>result,err(_)=>{return 4},}
+  if decoded.seed!=9007199254740993 or decoded.width!=96 or decoded.height!=160 or decoded.steps!=30 or decoded.guidance!=3.5 {return 5}
+  var selected=match bridge.request(decoded) {ok(result)=>result,err(_)=>{return 6},}
+  if selected.width!=128 or selected.height!=128 or selected.seed!=decoded.seed or selected.steps!=30 {return 7}
+  match selected.sequence {some(_)=>{return 8},none=>{},}
+  var wrong:string=text.replace(encoded,"mm-air.flux1-dev.parameters.v1","mm-air.flux1-dev.parameters.v2")
+  match parameters.decode_flux1(wrong) {ok(_)=>{return 9},err(_)=>{},}
+  value.output="relative.png"
+  match parameters.validate_flux1(value) {ok(_)=>{return 10},err(_)=>{},}
+  value.output="C:/AIR-output/fox.png"
+  var qwen:parameters.QwenImageRequest=parameters.QwenImageRequest {prompt:"",output:"qwen.png",source:"",references:[],
+    width:1024,height:1024,steps:40,seed:42,scheduler:0,sampler:0,enhance:false,loras:[]}
+  var krea:parameters.KreaRequest=parameters.KreaRequest {prompt:"",output:"krea.png",width:1024,height:1024,seed:42,loras:[]}
+  var video:parameters.H3Parameters=parameters.H3Parameters {request:h3.request("",0,0,3,1,2,3,42,6,[],"movie.mp4"),loras:[]}
+  var history:array<library.Item>=[]
+  var ui:w.Ui=w.new(1600,1000)
+  presenter.layout(ui,qwen,krea,false,0,history,video,true)
+  bridge.restore(ui,1200,value)
+  presenter.select_flux1(ui)
+  if not w.checked_of(ui,w.find(ui,19)) or not w.visible_of(ui,w.find(ui,39)) or w.visible_of(ui,w.find(ui,36)) or
+      w.visible_of(ui,w.find(ui,37)) or w.visible_of(ui,w.find(ui,38)) {return 11}
+  var form:parameters.Flux1Request=match bridge.read(ui,1200) {ok(result)=>result,err(_)=>{return 12},}
+  if form.seed!=value.seed or str.view(struct.borrow(form,field=prompt))!=str.view(struct.borrow(value,field=prompt)) or
+      str.view(struct.borrow(form,field=output))!=str.view(struct.borrow(value,field=output)) {return 13}
+  presenter.select_image_edit(ui)
+  if w.visible_of(ui,w.find(ui,39)) or w.checked_of(ui,w.find(ui,19)) {return 14}
+  var work:bridge.Work=bridge.Work {state:bridge.empty(),action:bridge.Action.Begin(parameters.copy_flux1(value))}
+  if array.len(struct.borrow(struct.borrow(work,field=state),field=loaded))!=0 or work.state.attempted_open {return 15}
+  io.write("MM-Air FLUX.1 shared contract:15 controls PASS; model opens0\n")
+  0
+}

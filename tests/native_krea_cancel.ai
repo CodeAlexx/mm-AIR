@@ -9,7 +9,7 @@ import std.path as path
 import std.text as text
 import std.files as files
 
-// Execute the real CK worker and its channel/task lifetime. A pre-raised signal
+// Execute the real worker and its channel/task lifetime. A pre-raised signal
 // must finish before model intake, without requiring or producing model assets.
 pub fn main(args:view<str>)->i32
     effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
@@ -33,7 +33,7 @@ pub fn main(args:view<str>)->i32
   var updates:u64=0
   task.scope {
     var jobs:array<task<generation.Outcome>> = [
-      task.spawn(work,fn=generation.run_krea_ck_cancelable)]
+      task.spawn(work,fn=generation.run_krea_cancelable)]
     loop{
       match channel.recv_now(receiver,time.monotonic_ns()){
         ok(value)=>match value{some(_)=>{updates=updates+1},none=>{},},err(_)=>{},
@@ -49,6 +49,6 @@ pub fn main(args:view<str>)->i32
   let _=tasks.release(token)
   if updates==0{return 5}
   if match files.exists(output){ok(value)=>value,err(_)=>true,}{return 6}
-  if code==0{io.write("Native Krea CK worker cancellation, progress and teardown passed\n")}
+  if code==0{io.write("Native Krea worker cancellation, progress and teardown passed\n")}
   code
 }

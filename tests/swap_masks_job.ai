@@ -1,0 +1,46 @@
+// Command-line driver for one swap-mask job (the same swap_masks.run the Edit
+// screen calls): SAM 3 tracks, People Mask, edit mask, mannequin motion
+// reference, check-mask preview and manifest.json in OUTPUT_DIR.
+module app.mm_air.tests.swap_masks_job
+
+import std.text as text
+import "../swap_masks.ai" as swap
+import "../video_swap.ai" as video_swap
+
+fn usage()->i32 effects{io.write}{
+  io.ewrite("usage: swap-masks-job PLUGIN MODEL PRESET SOURCE OUTPUT_DIR [PROMPT MARGIN PART SECONDS OFFSET_SECONDS MOTION_SHORT_EDGE]\n")
+  2
+}
+
+pub fn main(args:view<str>)->i32
+    effects{alloc,ffi,fs.meta,fs.read,fs.write,gpu,io.write,process}{
+  if view.len(args)!=6 and view.len(args)!=12 {return usage()}
+  var preset=match swap.load_preset(view.get(args,3)){ok(value)=>value,
+    err(message)=>{io.ewrite(text.concat(str.view(message),"\n"))
+      return 2}}
+  let full:bool=view.len(args)==12
+  let prompt=if full {string.copy(view.get(args,6))} else {
+    string.copy(struct.borrow(preset,field=prompt))}
+  let chosen=if full {string.copy(view.get(args,7))} else {
+    string.copy(struct.borrow(preset,field=default_margin))}
+  let part=if full {string.copy(view.get(args,8))} else {string.copy("whole")}
+  let seconds:f64=if full {match text.parse_f64(view.get(args,9)){some(v)=>v,
+    none=>{return usage()}}} else {0.0}
+  let offset:f64=if full {match text.parse_f64(view.get(args,10)){some(v)=>v,
+    none=>{return usage()}}} else {0.0}
+  let short_edge:u64=if full {match text.parse_u64(view.get(args,11)){some(v)=>v,
+    none=>{return usage()}}} else {preset.motion_reference_default}
+  var job=swap.Job{plugin:string.copy(view.get(args,1)),model:string.copy(view.get(args,2)),
+    preset:preset,source:string.copy(view.get(args,4)),output_dir:string.copy(view.get(args,5)),
+    prompt:prompt,margin:chosen,part_mode:part,part_seconds:seconds,
+    offset_seconds:offset,motion_short_edge:short_edge}
+  // Preset tracker "sam3.1": MODEL is the SAM 3.1 safetensors (the Edit screen's path).
+  let sam31=struct.borrow(struct.borrow(job,field=preset),field=tracker)==swap.sam31_tracker()
+  match if sam31 {video_swap.write_with_sam31(job)} else {swap.run_and_write(job)}{
+    ok(manifest)=>{io.write(text.concat("swap-masks manifest ",text.concat(
+      str.view(manifest),"\n")))
+      0},
+    err(message)=>{io.ewrite(text.concat(str.view(message),"\n"))
+      3},
+  }
+}

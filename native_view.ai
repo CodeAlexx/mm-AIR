@@ -5,6 +5,7 @@ import std.draw as draw
 import std.path as path
 import "native_generate.ai" as form
 import "native_krea.ai" as krea_form
+import "native_flux1.ai" as flux_form
 import "native_h3.ai" as h3_form
 import "parameters.ai" as parameters
 import "library.ai" as library
@@ -28,6 +29,8 @@ pub fn history_rows(ui:ref<w.Ui>,history:ref<array<library.Item>>)->unit effects
 }
 pub fn image_edit(ui:ref<w.Ui>)->bool effects {} {w.checked_of(ui,w.find(ui,62))}
 pub fn select_model(ui:ref<w.Ui>,krea:bool,h3_active:bool)->unit effects {alloc} {
+  w.check(ui,w.find(ui,19),false)
+  w.show(ui,w.find(ui,39),false)
   w.check(ui,w.find(ui,63),false)
   w.show(ui,w.find(ui,9000),false)
   w.show(ui,w.find(ui,3),true)
@@ -46,6 +49,16 @@ pub fn select_model(ui:ref<w.Ui>,krea:bool,h3_active:bool)->unit effects {alloc}
   w.set_text(ui,w.find(ui,14),"Generate")
   w.set_text(ui,w.find(ui,110),"Source image (optional)")
   w.set_text(ui,w.find(ui,20),if h3_active{"H3 video and audio generation"}else{""})
+  w.layout(ui)
+}
+pub fn select_flux1(ui:ref<w.Ui>)->unit effects {alloc} {
+  select_model(ui,false,false)
+  w.check(ui,w.find(ui,16),false)
+  w.check(ui,w.find(ui,19),true)
+  w.show(ui,w.find(ui,36),false)
+  w.show(ui,w.find(ui,39),true)
+  w.enable(ui,w.find(ui,12),false)
+  w.set_text(ui,w.find(ui,20),"FLUX.1 DEV · image generation")
   w.layout(ui)
 }
 pub fn select_image_edit(ui:ref<w.Ui>)->unit effects {alloc} {
@@ -111,6 +124,7 @@ pub fn layout(ui:ref<w.Ui>,request:ref<parameters.QwenImageRequest>,krea_request
   let _=w.tab(ui,18,models,180,"MiniMax H3",h3_active)
   let _=w.tab(ui,16,models,200,"Qwen-Image-2.1",not krea and not h3_active)
   let _=w.tab(ui,17,models,180,"Krea 2 Turbo",krea)
+  let _=w.tab(ui,19,models,170,"FLUX.1 DEV",false)
   let content=w.panel(ui,30,workspace,false,0,1,12,0)
   let editor=w.panel(ui,31,content,true,600,0,6,12)
   w.set_chrome(ui,editor,draw.rgb(28,31,35),draw.rgb(48,53,59),1)
@@ -119,6 +133,8 @@ pub fn layout(ui:ref<w.Ui>,request:ref<parameters.QwenImageRequest>,krea_request
   form.qwen_fields(ui,qwen_panel,100,request)
   let krea_panel=w.panel(ui,37,editor,true,0,1,8,0)
   krea_form.fields_page(ui,krea_panel,300,krea_request,krea_page)
+  let flux_panel=w.panel(ui,39,editor,true,0,1,8,0)
+  flux_form.fields(ui,flux_panel,1200)
   let h3_panel=w.panel(ui,38,editor,true,0,1,4,0)
   h3_form.fields(ui,h3_panel,700,struct.borrow(h3_state,field=request))
   let preview=w.panel(ui,32,content,true,0,1,8,12)

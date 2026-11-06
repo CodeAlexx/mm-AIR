@@ -1,0 +1,46 @@
+// GPU kernels for the masked-edit / Video Swap mask steps (masked_edit.cleanup): grow/shrink
+// (iterated 3x3 max/min = separable clipped box max/min of radius n), box blur (clipped-window
+// mean, separable) and the feather core max. Planes are F32 [frames, height, width].
+module app.mm_air.mask_kernels
+
+// One separable pass. axis 0: along x, axis 1: along y. mode 0: max, 1: min, 2: sum / count.
+pub kernel fn mask_window(input: cptr<f32>, out: ptr<f32>, total: i64, height: i64, width: i64,
+    radius: i64, axis: i64, mode: i64) effects {gpu} launch_bounds(256) {
+  let p: i64 = i64(block_idx.x) * 256 + i64(thread_idx.x)
+  if p >= total { return }
+  let x: i64 = p % width
+  let y: i64 = (p / width) % height
+  let base: i64 = p - (y * width + x)
+  var length: i64 = height
+  var at: i64 = y
+  if axis == 0 {
+    length = width
+    at = x
+  }
+  var low: i64 = 0
+  if at > radius { low = at - radius }
+  var high: i64 = length - 1
+  if at + radius < length - 1 { high = at + radius }
+  var acc: f32 = 0.0
+  if mode == 0 { acc = -1.0 }
+  if mode == 1 { acc = 2.0 }
+  var i: i64 = low
+  loop {
+    if i > high { break }
+    var v: f32 = 0.0
+    if axis == 0 { v = input[base + y * width + i] } else { v = input[base + i * width + x] }
+    if mode == 0 { acc = fmax(acc, v) }
+    if mode == 1 { acc = fmin(acc, v) }
+    if mode == 2 { acc = acc + v }
+    i += 1
+  }
+  if mode == 2 { acc = acc / f32(high - low + 1) }
+  out[p] = acc
+}
+
+// out = max(out, core)
+pub kernel fn mask_max_into(core: cptr<f32>, out: ptr<f32>, total: i64) effects {gpu} launch_bounds(256) {
+  let p: i64 = i64(block_idx.x) * 256 + i64(thread_idx.x)
+  if p >= total { return }
+  out[p] = fmax(out[p], core[p])
+}

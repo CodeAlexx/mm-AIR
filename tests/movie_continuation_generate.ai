@@ -2,6 +2,7 @@
 // Motion Context continuation, then the same selected-take stitch used by UI.
 module app.mm_air.tests.movie_continuation_generate
 
+import std.inference.h3.policy as h3_policy
 import "../generate.ai" as generation
 import "../movie_project.ai" as movie
 import std.inference.h3.media as media
@@ -35,7 +36,7 @@ fn run_take(configuration:ref<generation.Configuration>,output:str,
     session.Model.Base,session.Task.T2VA,geometry,references,audio,output,0,"",
     424242,19,session.Projection.ExactBF16,session.Projection.ConvRotI8,
     session.Attention.HybridExact3DenseInt8,channel.ticket(receiver),
-    session.Schedule.Exponential)
+    session.Schedule.Exponential,h3_policy.Sampler.Euler)
   if str.len(context_path)!=0{
     match generation.enable_motion_context(job,context_path,22,120){
       ok(_)=>{},err(message)=>{let _=channel.close(receiver)

@@ -1,0 +1,163 @@
+// Video Swap (Edit mode 8): one person in a video becomes the character in the reference pictures.
+// The swap-mask job tracks the main person, builds the edit mask, the grey-mannequin motion
+// reference and the check preview; H3 Ref2VA then regenerates only the edit mask with
+// <Video 1> = the part with its edit area blanked, <Video 2> = the mannequin, <Picture N> = character.
+module app.mm_air.video_swap
+
+import "swap_masks.ai" as swap_masks
+import ".air/deps/sam31/video.ai" as sam31
+import std.files as files
+import std.path as path
+import std.text as text
+
+pub fn mode() -> u32 effects {} { 8 }
+pub fn is_mode(value:u32) -> bool effects {} { value == mode() }
+
+// Settings the Edit screen passes for one swap-mask job.
+pub type Request = struct {
+  plugin:string,
+  model:string,
+  preset_file:string,
+  sam31_model:string,
+  source:string,
+  output_dir:string,
+  prompt:string,
+  margin_index:u64,
+  part_index:u64,
+  part_seconds:f64,
+  offset_seconds:f64,
+  motion_index:u64,
+  edit_source_index:u64
+}
+
+// Dropdown positions of the Edit screen's Video Swap controls.
+pub fn part_mode(index:u64) -> str effects {} {
+  if index==1 {"start"} else if index==2 {"middle"} else if index==3 {"end"} else {"whole"}
+}
+pub fn edit_source_mode(index:u64) -> str effects {} {
+  if index==1 {"silhouette"} else {"blank"}
+}
+
+// What the Edit screen needs from a finished job.
+pub type Outcome = struct {
+  succeeded:bool,
+  message:string,
+  manifest:string,
+  edit_source:string,
+  part_video:string,
+  edit_mask:string,
+  motion_reference:string,
+  check_preview:string,
+  frames:u64,
+  has_audio:bool
+}
+
+fn failed(message:str) -> Outcome effects {alloc} {
+  Outcome{succeeded:false,message:text.copy(message),manifest:string.new(),
+    edit_source:string.new(),part_video:string.new(),edit_mask:string.new(),motion_reference:string.new(),
+    check_preview:string.new(),frames:0,has_audio:false}
+}
+
+// Runs on a worker task: tracking, masks, mannequin and preview, then the manifest.
+pub fn run(request:Request own) -> Outcome
+    effects {alloc,ffi,fs.meta,fs.read,fs.write,gpu,process} {
+  var held=request
+  var preset=match swap_masks.load_preset(str.view(struct.borrow(held,field=preset_file))) {
+    ok(value)=>value, err(message)=>{return failed(str.view(message))},}
+  // Margin names and motion sizes come from the preset, in dropdown order.
+  if held.margin_index>=array.len(struct.borrow(preset,field=margins)) or
+     held.motion_index>=array.len(struct.borrow(preset,field=motion_reference_short_edges)) {
+    return failed("Video Swap setting is outside the swap-mask preset")}
+  let margin_name=string.copy(array.borrow(struct.borrow(preset,field=margins),
+    held.margin_index).name)
+  let motion_short_edge:u64=array.get(struct.borrow(preset,field=motion_reference_short_edges),
+    held.motion_index)
+  let _old_mode=ref.swap(struct.borrow(preset,field=edit_source_mode),
+    string.copy(edit_source_mode(held.edit_source_index)))
+  var job=swap_masks.Job{plugin:string.copy(struct.borrow(held,field=plugin)),
+    model:string.copy(struct.borrow(held,field=model)),preset:preset,
+    source:string.copy(struct.borrow(held,field=source)),
+    output_dir:string.copy(struct.borrow(held,field=output_dir)),
+    prompt:string.copy(struct.borrow(held,field=prompt)),
+    margin:margin_name,
+    part_mode:string.copy(part_mode(held.part_index)),
+    part_seconds:held.part_seconds,offset_seconds:held.offset_seconds,
+    motion_short_edge:motion_short_edge}
+  let use_sam31=struct.borrow(struct.borrow(job,field=preset),field=tracker)==swap_masks.sam31_tracker()
+  if use_sam31 {
+    let _old_model=ref.swap(struct.borrow(job,field=model),string.copy(struct.borrow(held,field=sam31_model)))
+  }
+  let manifest_path=match if use_sam31 {write_with_sam31(job)} else {swap_masks.run_and_write(job)} {
+    ok(value)=>value, err(message)=>{return failed(str.view(message))},}
+  let source=match files.read_text(str.view(manifest_path)) {ok(value)=>value,
+    err(_)=>{return failed("Cannot read the swap-mask manifest")},}
+  var manifest=match swap_masks.decode_manifest(str.view(source)) {ok(value)=>value,
+    err(message)=>{return failed(str.view(message))},}
+  let frames:u64=struct.borrow(manifest,field=part).frames
+  Outcome{succeeded:true,
+    message:text.concat("Video Swap masks ready · ",text.concat(
+      str.view(string.from_int(frames))," frames · check the preview, then Run")),
+    manifest:string.copy(str.view(manifest_path)),
+    edit_source:string.copy(struct.borrow(struct.borrow(manifest,field=edit_source),field=video)),
+    part_video:string.copy(struct.borrow(manifest,field=part_video)),
+    edit_mask:string.copy(struct.borrow(struct.borrow(manifest,field=edit_mask),field=video)),
+    motion_reference:string.copy(struct.borrow(struct.borrow(manifest,
+      field=motion_reference),field=video)),
+    check_preview:string.copy(struct.borrow(manifest,field=check_preview)),
+    frames:frames,has_audio:manifest.has_audio}
+}
+
+// Native AIR SAM 3.1: one pass tracks every person (up to 16 ids) for the People Mask choice.
+fn sam31_backend(request:ref<swap_masks.TrackRequest>) -> result<unit,string>
+    effects {alloc,fs.meta,fs.read,fs.write,gpu} {
+  var job=sam31.Job{model:string.copy(struct.borrow(request,field=model)),
+    source_rgb:string.copy(struct.borrow(request,field=source_rgb)),
+    prompt:string.copy(struct.borrow(request,field=prompt)),
+    output_dir:string.copy(struct.borrow(request,field=output_dir)),
+    frames:request.frames,width:request.width,height:request.height}
+  sam31.track(job)
+}
+
+pub fn write_with_sam31(job:ref<swap_masks.Job>) -> result<string,string>
+    effects {alloc,fs.meta,fs.read,fs.write,gpu,process} {
+  var manifest=try swap_masks.run_with_backend(job,sam31_backend,swap_masks.sam31_tracker())
+  let encoded=try swap_masks.encode_manifest(manifest)
+  let target=path.join(struct.borrow(job,field=output_dir),"manifest.json")
+  match files.write_text(str.view(target),str.view(encoded)) {ok(_)=>{},
+    err(problem)=>{return result.err(text.concat("Cannot write the swap-mask manifest: ",
+      problem.message))}}
+  result.ok(target)
+}
+
+// H3 references for a swap: Video 1 (edit source), Video 2 (motion), then the character pictures.
+pub fn h3_references(edit_source:str,motion_reference:str,pictures:ref<array<string>>)
+    -> array<string> effects {alloc} {
+  var out:array<string> = [text.copy(edit_source),text.copy(motion_reference)]
+  var index:u64=0
+  loop {if index>=array.len(pictures){break}
+    array.push(out,string.copy(array.borrow(pictures,index)))
+    index=index+1}
+  out
+}
+
+// The H3 prompt: the official full-reference form for edit + motion reference + character.
+pub fn prompt(character:str,role:str,has_audio:bool) -> string effects {alloc} {
+  let who:string=if str.len(role)==0 {text.copy("the main person in the source video")} else {text.copy(role)}
+  let looks:string=if str.len(character)==0 {text.copy("the character")} else {text.copy(character)}
+  var out:string = text.copy("subject_definitions:\n<Subject 1> is ")
+  string.append(out, str.view(who))
+  string.append(out, " replaced by ")
+  string.append(out, str.view(looks))
+  string.append(out, ", whose appearance comes from <Picture 1> and whose motion, pose and placement come from the grey figure in <Video 2>.\n<Video 1> is the source video for the target video edit.\n\nsummary:\n[video editing + reference generation] The target video is an edited version of <Video 1>. The edit area of <Video 1> (where the old person was) is filled with ")
+  string.append(out, str.view(looks))
+  string.append(out, " from <Picture 1>, following the exact motion, pose and timing of the grey figure in <Video 2>.\n\nretention_analysis:\n<Video 1>: partially_preserved; everything outside the grey area is kept: camera, framing, background, lighting, other people and timing.\n<Picture 1>: fully_preserved; face, hair, body shape, clothing and colours of the character are kept.\n<Video 2>: reference; only the motion, pose and placement of the grey figure are used; its outline shows the old clothing, which is not kept: the clothing and body shape come only from <Picture 1>.\n\ndetailed_description:\n[Shot 1] <Subject 1> stands where the grey figure of <Video 2> stands and repeats its every movement frame by frame, with the body shape of <Picture 1>. One coherent character in every frame: no ghost or double outline of the old person, no extra people. The rest of <Video 1> is unchanged.\n\noverall_soundscape:\n")
+  string.append(out, if has_audio {"Reuse the soundtrack of <Video 1> unchanged."} else {"Quiet room tone."})
+  string.append(out, "\n\nnon_diegetic_music:\n")
+  string.append(out, if has_audio {"Keep the source music; add none."} else {"N/A"})
+  out
+}
+
+// The job folder for one swap-mask run, next to the edit output folder.
+pub fn job_folder(root:str,token:str) -> string effects {alloc} {
+  path.join(root,text.concat("video-swap-",token))
+}

@@ -1,6 +1,7 @@
-// Real checkpoint gate for MM-Air's imported-mask edit worker with CK INT8.
+// Real checkpoint gate for MM-Air's imported-mask edit worker with owned dense INT8.
 // Use a still image or video and matching grayscale mask; retain source media.
 module app.mm_air.tests.masked_reference_generate
+import std.inference.h3.policy as h3_policy
 import "../generate.ai" as generation
 import "../masked_runtime.ai" as masked
 import std.inference.h3.media as media
@@ -35,7 +36,7 @@ pub fn main(args:view<str>)->i32
   var job=generation.job(configuration,prompt,session.Model.Reference,
     session.Task.Ref2VA,geometry,references,audio,view.get(args,3),0,"",42,7,
     session.Projection.ConvRotI8,session.Projection.ConvRotI8,
-    session.Attention.CkInt8,channel.ticket(receiver),session.Schedule.Exponential)
+    session.Attention.DenseInt8,channel.ticket(receiver),session.Schedule.Exponential,h3_policy.Sampler.ResMultistep)
   generation.enable_masked(job,masked.settings(view.get(args,2),false,0.0,0.0,
     0.0,0.0,1,4,2,0,32,true))
   var completed=generation.Outcome{succeeded:false,output:string.new(),

@@ -1,17 +1,20 @@
 module app.mm_air.tests.movie_project
 import "../movie_project.ai" as movie
+import "h3_presets_fixture.ai" as fixture
+import std.inference.h3.request as h3
 import std.text as text
 
 pub fn main(args:view<str>)->i32 effects{alloc,env,fs.meta,fs.read,fs.write,process,time}{
   var project=movie.create()
-  if movie.resolution_for_aspect(1161,2048)!=5 or
-     movie.resolution_for_aspect(2048,1161)!=0 or
-     movie.resolution_for_aspect(1024,1024)!=3{
+  var presets:h3.Presets=fixture.presets()
+  if movie.resolution_for_aspect(presets,1161,2048)!=5 or
+     movie.resolution_for_aspect(presets,2048,1161)!=0 or
+     movie.resolution_for_aspect(presets,1024,1024)!=3{
     panic "opening frame aspect must select an admitted matching H3 canvas"}
-  movie.set_resolution(project,0,movie.resolution_for_aspect(1161,2048))
+  movie.set_resolution(presets,project,0,movie.resolution_for_aspect(presets,1161,2048))
   var portrait=movie.snapshot_shot(project,0)
   if portrait.width!=768 or portrait.height!=1344{panic "portrait opening geometry"}
-  movie.set_resolution(project,0,0)
+  movie.set_resolution(presets,project,0,0)
   if array.len(struct.borrow(project,field=shots))!=1{panic "default shot"}
   let first=array.borrow(struct.borrow(project,field=shots),0)
   let _=ref.swap(struct.borrow(first,field=brief),

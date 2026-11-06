@@ -1,0 +1,177 @@
+// Actual retained MM-Air worker bridge. No window, model subprocess or sampler
+// substitute. Run only after the production INT8 Session admission is enabled.
+module app.mm_air.tests.flux1_worker_gpu
+import "../native_flux1.ai" as bridge
+import "../parameters.ai" as parameters
+import "../.air/deps/flux1/session.ai" as session
+import std.generation_backend as lifecycle
+import std.trainers.core.quantized_linear as projections
+import std.files as files
+import std.path as path
+import std.image as image
+import std.text as text
+
+type Observation=struct {action:string,status:string,completed_units:u64,total_units:u64,
+  checkpoint_bytes:u64,checkpoint_sealed:u64,OS_reads:u64,OS_sealed:u64,
+  allocated_GPU_bytes:u64,peak_GPU_bytes:u64,host_resident_bytes:u64} derive codec(strict)
+type Artifact=struct {path:string,width:u64,height:u64,sha256:string} derive codec(strict)
+type Seal=struct {bytes:u64}
+type Report=struct {schema:string,PASS:bool,worker_actions:u64,retained_sessions:u64,
+  startup_checkpoint_bytes:u64,two_prompts_completed:bool,cancel_after_step1:bool,
+  checkpoint_reads_flat:bool,warmed_OS_reads_flat:bool,within_budget:bool,
+  model_processes:u64,windows_opened:u64,optimizer_updates:u64,
+  observations:array<Observation>,artifacts:array<Artifact>} derive codec(strict)
+
+fn label(value:lifecycle.Status) -> string effects {alloc} {
+  string.copy(match value {Idle=>"idle",Running=>"running",Cancelling=>"cancelling",
+    Complete=>"complete",Failed=>"failed",Cancelled=>"cancelled",})
+}
+// This is the same owned task handoff as native.ai. Every action returns the
+// identical Runtime to its caller before another worker may touch the model.
+fn worker(runtime:ref<bridge.Runtime>,action:bridge.Action own) -> result<lifecycle.Event,string>
+    effects {alloc,env,gpu,fs.read,fs.write,fs.meta,thread} {
+  var idle:lifecycle.State=lifecycle.idle()
+  var event:lifecycle.Event=lifecycle.event(idle)
+  task.scope {
+    var pending:array<task<bridge.Completed>>=[]
+    var work:bridge.Work=bridge.Work {state:ref.swap(runtime,bridge.empty()),action:action}
+    array.push(pending,task.spawn(work,fn=bridge.execute))
+    var completed:bridge.Completed=task.join(option.unwrap(array.pop(pending)))
+    let _=ref.swap(runtime,struct.replace(completed,bridge.empty(),field=state))
+    if completed.problem!="" {return result.err(struct.replace(completed,"",field=problem))}
+    event=struct.replace(completed,lifecycle.event(idle),field=event)
+  }
+  result.ok(event)
+}
+fn observe(runtime:ref<bridge.Runtime>,event:ref<lifecycle.Event>,action:str,
+    sealed:ref<Seal>,rows:ref<array<Observation>>) -> result<unit,string> effects {alloc,gpu,fs.read} {
+  if not runtime.attempted_open or array.len(struct.borrow(runtime,field=loaded))!=1 {
+    return result.err("Worker action lost the one retained model Session")
+  }
+  let model=array.borrow(struct.borrow(runtime,field=loaded),0)
+  if model.projections.backend!=projections.Backend.BnbInt8 or
+      match struct.borrow(struct.borrow(model,field=projections),field=nf4) {some(_)=>true,none=>false,} {
+    return result.err("Worker loaded an unselected historical projection engine")
+  }
+  let value:session.Telemetry=try session.telemetry(model)
+  if sealed.bytes==0 {sealed.bytes=value.checkpoint_sealed}
+  if value.checkpoint_sealed==0 or value.checkpoint_sealed!=sealed.bytes or value.checkpoint_bytes!=sealed.bytes or
+      not value.checkpoint_reads_flat or not value.OS_reads_flat or not value.within_budget {
+    return result.err("Worker handoff changed startup/read/memory admission")
+  }
+  array.push(rows,Observation {action:string.copy(action),status:label(event.status),
+    completed_units:event.completed_units,total_units:event.total_units,
+    checkpoint_bytes:value.checkpoint_bytes,checkpoint_sealed:value.checkpoint_sealed,
+    OS_reads:value.OS_reads,OS_sealed:value.OS_sealed,allocated_GPU_bytes:value.allocated_GPU_bytes,
+    peak_GPU_bytes:value.peak_GPU_bytes,host_resident_bytes:value.host_resident_bytes})
+  result.ok(())
+}
+fn expected(event:ref<lifecycle.Event>,status:lifecycle.Status,units:u64) -> result<unit,string> effects {alloc} {
+  if event.status!=status or event.completed_units!=units or event.total_units!=2 or
+      event.terminal!=(status==lifecycle.Status.Complete or status==lifecycle.Status.Cancelled) {
+    return result.err("Worker returned an unexpected typed generation transition")
+  }
+  result.ok(())
+}
+fn request(root:str,name:str,prompt:str,seed:u64) -> parameters.Flux1Request effects {alloc} {
+  parameters.Flux1Request {prompt:string.copy(prompt),output:path.join(root,name),
+    width:64,height:64,steps:2,seed:seed,guidance:3.5}
+}
+fn artifact(filename:str) -> result<Artifact,string> effects {alloc,fs.read} {
+  var raw:bytes=match files.read_bytes(filename) {ok(v)=>v,err(_)=>{return result.err("Worker PNG is missing")},}
+  var decoded=match image.decode_png(raw) {ok(v)=>v,err(_)=>{return result.err("Worker output is not a native decodable PNG")},}
+  if decoded.width!=64 or decoded.height!=64 {return result.err("Worker PNG geometry changed")}
+  result.ok(Artifact {path:string.copy(filename),width:64,height:64,sha256:bytes.hex(hash.sha256(raw))})
+}
+fn run(root:str) -> result<unit,string> effects {alloc,env,gpu,fs.read,fs.write,fs.meta,thread,io.write} {
+  if not path.is_absolute(root) {return result.err("Worker output directory must be absolute")}
+  // A false public flag must never be bypassed by this harness.
+  if not session.inference_qualified() {return result.err("Production FLUX.1 INT8 Session admission is still false")}
+  let _=match files.mkdirs(root) {ok(_)=>(),err(_)=>{return result.err("Worker output directory unavailable")},}
+  var names:array<string>=["prompt1.png","prompt2.png","cancelled.png"]
+  var i:u64=0
+  loop {if i==array.len(names) {break}
+    let filename:string=path.join(root,array.borrow(names,i))
+    if match files.exists(filename) {ok(v)=>v,err(_)=>true,} or
+        match files.exists(text.concat(filename,".json")) {ok(v)=>v,err(_)=>true,} {
+      return result.err("Worker test requires fresh artifact paths")
+    }
+    i+=1
+  }
+  var runtime:bridge.Runtime=bridge.empty()
+  var rows:array<Observation>=[]
+  var sealed:Seal=Seal {bytes:0}
+  var event:lifecycle.Event=try worker(runtime,bridge.Action.Status)
+  if event.status!=lifecycle.Status.Idle or event.terminal or runtime.attempted_open or
+      array.len(struct.borrow(runtime,field=loaded))!=0 {return result.err("Empty worker status opened a model")}
+  var actions:u64=1
+  i=0
+  loop {if i==2 {break}
+    let prompt:str=if i==0 {"a red fox on a mossy rock in a forest"}else{"a blue bird on a flowering branch in morning light"}
+    var value:parameters.Flux1Request=request(root,array.borrow(names,i),prompt,42+i)
+    event=try worker(runtime,bridge.Action.Begin(value))
+    actions+=1
+    let _=try expected(event,lifecycle.Status.Running,0)
+    let _=try observe(runtime,event,if i==0 {"prompt1.begin"}else{"prompt2.begin"},sealed,rows)
+    if i==0 {
+      event=try worker(runtime,bridge.Action.Status)
+      actions+=1
+      let _=try expected(event,lifecycle.Status.Running,0)
+      let _=try observe(runtime,event,"prompt1.status",sealed,rows)
+    }
+    var step:u64=0
+    loop {if step==2 {break}
+      event=try worker(runtime,bridge.Action.Advance)
+      actions+=1
+      step+=1
+      let _=try expected(event,if step==2 {lifecycle.Status.Complete}else{lifecycle.Status.Running},step)
+      let _=try observe(runtime,event,if i==0 {"prompt1.advance"}else{"prompt2.advance"},sealed,rows)
+    }
+    i+=1
+  }
+  var cancelled:parameters.Flux1Request=request(root,"cancelled.png","a blue bird on a flowering branch in morning light",44)
+  event=try worker(runtime,bridge.Action.Begin(cancelled))
+  actions+=1
+  let _=try expected(event,lifecycle.Status.Running,0)
+  let _=try observe(runtime,event,"cancel.begin",sealed,rows)
+  event=try worker(runtime,bridge.Action.Advance)
+  actions+=1
+  let _=try expected(event,lifecycle.Status.Running,1)
+  let _=try observe(runtime,event,"cancel.advance",sealed,rows)
+  event=try worker(runtime,bridge.Action.Cancel)
+  actions+=1
+  let _=try expected(event,lifecycle.Status.Cancelled,1)
+  let _=try observe(runtime,event,"cancel.acknowledged",sealed,rows)
+  event=try worker(runtime,bridge.Action.Status)
+  actions+=1
+  let _=try expected(event,lifecycle.Status.Cancelled,1)
+  let _=try observe(runtime,event,"cancel.status",sealed,rows)
+  if array.len(struct.borrow(array.borrow(struct.borrow(runtime,field=loaded),0),field=job))!=0 {
+    return result.err("Cancelled worker retained a live generation job")
+  }
+  // Read output files only after the final telemetry observation. Artifact
+  // inspection itself must not pollute a warmed model read window.
+  if match files.exists(path.join(root,"cancelled.png")) {ok(v)=>v,err(_)=>true,} or
+      match files.exists(path.join(root,"cancelled.png.json")) {ok(v)=>v,err(_)=>true,} {
+    return result.err("Cancelled worker published an artifact")
+  }
+  var outputs:array<Artifact>=[try artifact(path.join(root,"prompt1.png")),try artifact(path.join(root,"prompt2.png"))]
+  if str.view(struct.borrow(array.borrow(outputs,0),field=sha256))==str.view(struct.borrow(array.borrow(outputs,1),field=sha256)) {
+    return result.err("Two distinct prompt/seed jobs returned identical PNG bytes")
+  }
+  var report:Report=Report {schema:"air.mm-air.flux1-worker-smoke.v1",PASS:true,worker_actions:actions,
+    retained_sessions:array.len(struct.borrow(runtime,field=loaded)),startup_checkpoint_bytes:sealed.bytes,
+    two_prompts_completed:true,cancel_after_step1:true,checkpoint_reads_flat:true,warmed_OS_reads_flat:true,
+    within_budget:true,model_processes:1,windows_opened:0,optimizer_updates:0,observations:rows,artifacts:outputs}
+  var encoded:string=match Report_encode(report) {ok(v)=>v,err(_)=>{return result.err("Worker report encoding failed")},}
+  let _=match files.write_text(path.join(root,"worker-native.json"),encoded) {ok(_)=>(),err(_)=>{return result.err("Worker report write failed")},}
+  io.write("MM-Air FLUX.1 retained worker smoke: two prompts + cancellation PASS\n")
+  result.ok(())
+}
+pub fn main(args:view<str>) -> i32 effects {alloc,env,gpu,fs.read,fs.write,fs.meta,thread,io.write} {
+  if view.len(args)!=2 {io.ewrite("usage: flux1_worker_gpu ABSOLUTE_FRESH_OUTPUT_DIRECTORY\n")
+    return 2}
+  match run(view.get(args,1)) {ok(_)=>0,err(message)=>{io.ewrite(message)
+    io.ewrite("\n")
+    1},}
+}

@@ -1,6 +1,5 @@
-// Exercise the same CK worker used by the Windows presenter, with real weights.
-// Usage: native-qwen-generate PARAMETERS.json [--exact]
-// Exact attention is a diagnostic control for isolating CK approximation.
+// Exercise the same worker used by the Windows presenter, with real weights.
+// Usage: native-qwen-generate PARAMETERS.json
 module app.mm_air.tests.native_qwen_generate
 import "../generate.ai" as generation
 import "../parameters.ai" as parameters
@@ -9,11 +8,8 @@ import std.files as files
 
 pub fn main(args:view<str>)->i32
     effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
-  if view.len(args)<2 or view.len(args)>3{io.ewrite("Usage: native-qwen-generate PARAMETERS.json [--exact]\n")
+  if view.len(args)!=2{io.ewrite("Usage: native-qwen-generate PARAMETERS.json\n")
     return 2}
-  let exact=view.len(args)==3
-  if exact{if view.get(args,2)!="--exact"{io.ewrite("Expected --exact\n")
-    return 2}}
   let source=match files.read_text(view.get(args,1)){ok(value)=>value,
     err(problem)=>{io.ewrite(problem.message)
       return 2},}
@@ -26,9 +22,7 @@ pub fn main(args:view<str>)->i32
   var work=generation.QwenImageJob{request:request,progress:channel.ticket(receiver)}
   var code:i32=1
   task.scope {
-    var jobs:array<task<generation.Outcome>> = [if exact{
-      task.spawn(work,fn=generation.run_qwen_image)
-    }else{task.spawn(work,fn=generation.run_qwen_image_ck)}]
+    var jobs:array<task<generation.Outcome>> = [task.spawn(work,fn=generation.run_qwen_image)]
     loop{
       match channel.recv_now(receiver,time.monotonic_ns()){
         ok(value)=>match value{some(message)=>{var update=message

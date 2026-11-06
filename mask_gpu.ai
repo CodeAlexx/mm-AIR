@@ -1,0 +1,72 @@
+// masked_edit.cleanup on the GPU for the no-region-cleanup case (strength 0, which Video Swap and
+// the masked Character Swap removal mask use): morph(expand) then box blur(feather), with the
+// morphed core kept under the feather. Same result as the CPU loops (window mean in separable order).
+module app.mm_air.mask_gpu
+
+import std.gpu as agpu
+import std.tensor as tensor
+import "masked_edit.ai" as edit
+import "mask_kernels.ai" as mk
+
+fn lift(problem: gpu.error) -> string effects {alloc} { string.copy(problem.message) }
+
+fn operand(args: ref<GpuArgs>, value: ref<tensor.Tensor>) -> result<unit, gpu.error> effects {alloc, gpu} {
+  match value.memory {
+    some(data) => agpu.push_memory_at(args, data, 0),
+    none => { panic "mask_gpu: a kernel operand is closed" },
+  }
+}
+
+fn blocks(total: u64) -> u32 effects {} { cast.wrap((total + 255) / 256) }
+
+fn pass(context: ref<GpuContext>, stream: ref<GpuStream>, kernels: ref<GpuModule>, input: ref<tensor.Tensor>,
+    out: ref<tensor.Tensor>, total: u64, height: u64, width: u64, radius: u64, axis: u64, mode: u64)
+    -> result<unit, gpu.error> effects {alloc, gpu} {
+  var args: GpuArgs = try agpu.arguments(context)
+  let _ = try operand(args, input)
+  let _ = try operand(args, out)
+  let _ = try agpu.push_u64(args, total)
+  let _ = try agpu.push_u64(args, height)
+  let _ = try agpu.push_u64(args, width)
+  let _ = try agpu.push_u64(args, radius)
+  let _ = try agpu.push_u64(args, axis)
+  let _ = try agpu.push_u64(args, mode)
+  gpu.launch(kernels, stream, args, kernel.entry(mk.mask_window), blocks(total), 1, 1, 256, 1, 1, 0)
+}
+
+pub fn supported(strength: u64) -> bool effects {} { strength == 0 }
+
+pub fn cleanup(source: ref<edit.Mask>, feather_radius: u64, expand_shrink: i64) -> result<edit.Mask, string>
+    effects {alloc, gpu} {
+  let total: u64 = source.frames * source.width * source.height
+  var context: GpuContext = try agpu.open(0) map_err lift
+  var stream: GpuStream = try agpu.compute_stream(context) map_err lift
+  var kernels: GpuModule = try agpu.compile(context, kernel.unit(mk.mask_window, mk.mask_max_into),
+    "mm_air_mask.cu") map_err lift
+  var shape: array<u64> = [total]
+  var a: tensor.Tensor = try tensor.from_f32(context, stream, array.view(struct.borrow(source, field=weights)),
+    array.view(shape), tensor.DType.F32) map_err lift
+  var b: tensor.Tensor = try tensor.empty(context, array.view(shape), tensor.DType.F32) map_err lift
+  var c: tensor.Tensor = try tensor.empty(context, array.view(shape), tensor.DType.F32) map_err lift
+  // core = morph(source, expand): x pass a->b, y pass b->a
+  if expand_shrink != 0 {
+    let radius: u64 = cast.wrap(if expand_shrink < 0 { 0 - expand_shrink } else { expand_shrink })
+    let mode: u64 = if expand_shrink > 0 { 0 } else { 1 }
+    let _ = try pass(context, stream, kernels, a, b, total, source.height, source.width, radius, 0, mode) map_err lift
+    let _ = try pass(context, stream, kernels, b, a, total, source.height, source.width, radius, 1, mode) map_err lift
+  }
+  // feathered = blur(core): a->b (x), b->c (y); then c = max(c, a)
+  if feather_radius == 0 {
+    var held: array<f32> = try tensor.to_f32(stream, a) map_err lift
+    return result.ok(edit.Mask {frames: source.frames, width: source.width, height: source.height, weights: held})
+  }
+  let _ = try pass(context, stream, kernels, a, b, total, source.height, source.width, feather_radius, 0, 2) map_err lift
+  let _ = try pass(context, stream, kernels, b, c, total, source.height, source.width, feather_radius, 1, 2) map_err lift
+  var args: GpuArgs = try agpu.arguments(context) map_err lift
+  let _ = try operand(args, a) map_err lift
+  let _ = try operand(args, c) map_err lift
+  let _ = try agpu.push_u64(args, total) map_err lift
+  let _ = try gpu.launch(kernels, stream, args, kernel.entry(mk.mask_max_into), blocks(total), 1, 1, 256, 1, 1, 0) map_err lift
+  var out: array<f32> = try tensor.to_f32(stream, c) map_err lift
+  result.ok(edit.Mask {frames: source.frames, width: source.width, height: source.height, weights: out})
+}

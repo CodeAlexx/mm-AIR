@@ -1,0 +1,1465 @@
+// Video character-swap masks for the Edit screen: SAM 3 instance tracks, the
+// main-person ("People Mask") selection, the edit mask (headroom above the head,
+// pose hold, grow with blur), the grey-mannequin motion reference, the check-mask
+// preview, and the "part to use" cut with its audio. Every mask stays at source
+// geometry and is written as raw 8-bit planes plus a lossless H.264 video
+// that masked_runtime reads as an authored mask. Defaults come from the preset
+// presets/swap-masks.json (installed as share/mm-air/swap-masks.json).
+module app.mm_air.swap_masks
+
+import "mask_gpu.ai" as mask_gpu
+import "masked_edit.ai" as edit
+import std.files as files
+import std.math as math
+import std.path as path
+import std.process as proc
+import std.safetensors_index as ranges
+import std.text as text
+import std.inference.h3.reference_media as reference_media
+import ".air/deps/sam3/tracks.ai" as sam_tracks
+
+// ---------------------------------------------------------------- preset
+
+pub type Margin = struct {name:string, grow_px:u64, blur_px:u64} derive codec(strict)
+
+pub type Preset = struct {
+  schema:string,
+  prompt:string,
+  tracker:string,
+  score_threshold:f64,
+  tracker_hotstart_frames:u64,
+  selection_switch_area_factor:f64,
+  selection_min_iou:f64,
+  headroom:f64,
+  hold_frames:u64,
+  reference_short_edge:u64,
+  margins:array<Margin>,
+  default_margin:string,
+  mannequin_grey:u64,
+  mannequin_shrink_px:u64,
+  motion_reference_short_edges:array<u64>,
+  motion_reference_default:u64,
+  motion_reference_max_pixels:u64,
+  fps:u64,
+  min_frames:u64,
+  tint_alpha:f64,
+  edit_source_mode:string,
+  edit_tint:array<u64>,
+  person_tint:array<u64>,
+  preview_crf:u64
+} derive codec(strict)
+
+pub fn preset_schema() -> str effects {} { "mm-air.swap-masks.preset.v1" }
+
+pub fn decode_preset(source:str) -> result<Preset,string> effects {alloc} {
+  var value:Preset=match Preset_decode(source) {ok(found)=>found,
+    err(_)=>{return result.err("Swap-mask preset does not match its strict schema")},}
+  if value.schema!=preset_schema() {return result.err("Unsupported swap-mask preset schema")}
+  if value.headroom<0.0 or value.headroom>1.0 or value.hold_frames==0 or
+     value.reference_short_edge==0 or array.len(struct.borrow(value,field=margins))==0 or
+     value.mannequin_grey>255 or value.fps==0 or value.min_frames<5 or
+     value.tint_alpha<0.0 or value.tint_alpha>1.0 or
+     value.score_threshold<=0.0 or value.score_threshold>=1.0 or
+     (value.tracker!=sam3cpp_tracker() and value.tracker!=sam31_tracker()) or
+     (value.edit_source_mode!="blank" and value.edit_source_mode!="silhouette") or
+     value.motion_reference_max_pixels==0 or
+     value.selection_switch_area_factor<1.0 or value.selection_min_iou<0.0 or
+     value.selection_min_iou>1.0 or
+     array.len(struct.borrow(value,field=edit_tint))!=3 or
+     array.len(struct.borrow(value,field=person_tint))!=3 {
+    return result.err("Swap-mask preset has an out-of-range value")
+  }
+  let default_name:string=string.copy(struct.borrow(value,field=default_margin))
+  let _=try margin(value,str.view(default_name))
+  result.ok(value)
+}
+
+pub fn load_preset(filename:str) -> result<Preset,string> effects {alloc,fs.read} {
+  match files.read_text(filename) {
+    ok(source)=>decode_preset(str.view(source)),
+    err(_)=>result.err(text.concat("Cannot read the swap-mask preset ",filename)),
+  }
+}
+
+pub fn margin(preset:ref<Preset>,name:str) -> result<Margin,string> effects {alloc} {
+  var index:u64=0
+  loop {if index>=array.len(struct.borrow(preset,field=margins)){break}
+    let found=array.borrow(struct.borrow(preset,field=margins),index)
+    if found.name==name {
+      return result.ok(Margin{name:string.copy(found.name),grow_px:found.grow_px,
+        blur_px:found.blur_px})}
+    index=index+1}
+  result.err(text.concat("Unknown mask margin ",name))
+}
+
+// Preset pixel sizes are stated at reference_short_edge; scale them to the
+// mask's own geometry so a margin covers the same part of the frame.
+pub fn scaled_px(value:u64,reference_short_edge:u64,width:u64,height:u64)
+    -> u64 effects {} {
+  let short:u64=if width<height {width} else {height}
+  cast.sat(math.round(cast.float(value)*cast.float(short)/
+    cast.float(reference_short_edge)))
+}
+
+// ---------------------------------------------------------------- bytes
+
+fn bv(value:u64)->byte effects {} {let lane:u8=cast.wrap(value)
+cast.bits(lane)}
+fn uv(value:byte)->u64 effects {} {let lane:u8=cast.bits(value)
+cast.wrap(lane)}
+
+pub fn zeros(count:u64) -> array<byte> effects {alloc} {
+  var out:array<byte> = array.new()
+  var index:u64=0
+  loop {if index>=count{break}
+    array.push(out,bv(0))
+    index=index+1}
+  out
+}
+
+fn on(value:byte) -> bool effects {} { uv(value)>=128 }
+
+// ---------------------------------------------------------------- track choice
+
+pub fn track_area_sum(track:ref<sam_tracks.Track>) -> u64 effects {} {
+  var sum:u64=0
+  var index:u64=0
+  loop {if index>=array.len(struct.borrow(track,field=appearances)){break}
+    sum=sum+array.borrow(struct.borrow(track,field=appearances),index).area
+    index=index+1}
+  sum
+}
+
+// "People Mask": the instance that fills the most of the frame over the part,
+// i.e. the largest summed area across all frames. Ties keep the lower id.
+pub fn largest_track(tracks:ref<array<sam_tracks.Track>>) -> option<u64> effects {} {
+  var best:u64=0
+  var best_area:u64=0
+  var found:bool=false
+  var index:u64=0
+  loop {if index>=array.len(tracks){break}
+    let area=track_area_sum(array.borrow(tracks,index))
+    if not found or area>best_area {best=index
+      best_area=area
+      found=true}
+    index=index+1}
+  if found {option.some(best)} else {option.none()}
+}
+
+// Per-frame People Mask. In each frame the largest instance is the default;
+// the instance with the best IoU against the last selected mask is kept instead
+// while its IoU >= min_iou and switch_factor * its area >= the largest area, so
+// a jump to another instance needs a clear area win. This does not depend on
+// the tracker keeping one id per figure.
+pub type SelectionEntry = struct {frame:u64, track_id:i64} derive codec(strict)
+
+pub type SelectionRule = struct {switch_area_factor:f64, min_iou:f64} derive codec(strict)
+
+pub type Selection = struct {people:array<byte>, entries:array<SelectionEntry>,
+  dominant:i64}
+
+fn plane_iou(a:view<byte>,b:view<byte>) -> f64 effects {} {
+  var both:u64=0
+  var either:u64=0
+  var index:u64=0
+  loop {if index>=view.len(a){break}
+    let x:bool=on(view.get(a,index))
+    let y:bool=on(view.get(b,index))
+    if x and y {both=both+1}
+    if x or y {either=either+1}
+    index=index+1}
+  if either==0 {0.0} else {cast.float(both)/cast.float(either)}
+}
+
+fn area_at(track:ref<sam_tracks.Track>,frame:u64) -> u64 effects {} {
+  var index:u64=0
+  loop {if index>=array.len(struct.borrow(track,field=appearances)){break}
+    let item=array.borrow(struct.borrow(track,field=appearances),index)
+    if item.frame==frame {return item.area}
+    if item.frame>frame {return 0}
+    index=index+1}
+  0
+}
+
+pub fn select_per_frame(tracks:ref<array<sam_tracks.Track>>,frames:u64,width:u64,
+    height:u64,switch_factor:f64,min_iou:f64) -> result<Selection,string>
+    effects {alloc,fs.read} {
+  let plane:u64=width*height
+  var people:array<byte> = array.new()
+  var entries:array<SelectionEntry> = array.new()
+  var counts:array<u64> = array.new()
+  var t:u64=0
+  loop {if t>=array.len(tracks){break}
+    array.push(counts,0)
+    t=t+1}
+  var previous:array<byte> = array.new()
+  var have_previous:bool=false
+  var frame:u64=0
+  loop {if frame>=frames{break}
+    var largest:u64=0
+    var largest_area:u64=0
+    var keep:u64=0
+    var keep_iou:f64=0.0
+    var keep_area:u64=0
+    var keep_plane:array<byte> = array.new()
+    var largest_plane:array<byte> = array.new()
+    var index:u64=0
+    loop {if index>=array.len(tracks){break}
+      let area=area_at(array.borrow(tracks,index),frame)
+      if area>0 {
+        let data=match ranges.read_file_range(struct.borrow(array.borrow(tracks,index),
+            field=raw),frame*plane,plane){ok(value)=>value,
+          err(message)=>{return result.err(message)}}
+        if view.len(bytes.view(data))!=plane {
+          return result.err("SAM 3 track file is shorter than its frames")}
+        if area>largest_area {largest=index
+          largest_area=area
+          largest_plane=array.new()
+          var k:u64=0
+          loop {if k>=plane{break}
+            array.push(largest_plane,view.get(bytes.view(data),k))
+            k=k+1}}
+        if have_previous {
+          let overlap=plane_iou(array.view(previous),bytes.view(data))
+          if overlap>keep_iou {keep=index
+            keep_iou=overlap
+            keep_area=area
+            keep_plane=array.new()
+            var k:u64=0
+            loop {if k>=plane{break}
+              array.push(keep_plane,view.get(bytes.view(data),k))
+              k=k+1}}
+        }
+      }
+      index=index+1}
+    if largest_area==0 {
+      var k:u64=0
+      loop {if k>=plane{break}
+        array.push(people,bv(0))
+        k=k+1}
+      array.push(entries,SelectionEntry{frame:frame,track_id:-1})
+    } else {
+      let keep_weight:f64=cast.float(keep_area)
+      let largest_weight:f64=cast.float(largest_area)
+      let continuity:bool=have_previous and keep_iou>=min_iou and keep_iou>0.0 and
+        keep_weight*switch_factor>=largest_weight
+      let chosen:u64=if continuity {keep} else {largest}
+      var k:u64=0
+      loop {if k>=plane{break}
+        array.push(people,if continuity {array.get(keep_plane,k)}
+          else {array.get(largest_plane,k)})
+        k=k+1}
+      previous=if continuity {keep_plane} else {largest_plane}
+      have_previous=true
+      array.set(counts,chosen,array.get(counts,chosen)+1)
+      let id:i64=cast.wrap(array.borrow(tracks,chosen).id)
+      array.push(entries,SelectionEntry{frame:frame,track_id:id})
+    }
+    frame=frame+1}
+  var dominant:i64=-1
+  var best:u64=0
+  t=0
+  loop {if t>=array.len(tracks){break}
+    if array.get(counts,t)>best {best=array.get(counts,t)
+      dominant=cast.wrap(array.borrow(tracks,t).id)}
+    t=t+1}
+  result.ok(Selection{people:people,entries:entries,dominant:dominant})
+}
+
+// ---------------------------------------------------------------- edit mask
+
+// Headroom: every mask pixel also covers the `amount` pixels above it, where
+// amount = round(fraction * height of that frame's mask bounding box). Output
+// is binary 0/255.
+pub fn headroom(mask:view<byte>,frames:u64,width:u64,height:u64,fraction:f64)
+    -> array<byte> effects {alloc} {
+  var out=zeros(frames*width*height)
+  let plane:u64=width*height
+  var frame:u64=0
+  loop {if frame>=frames{break}
+    let base:u64=frame*plane
+    var top:u64=height
+    var bottom:u64=0
+    var y:u64=0
+    loop {if y>=height{break}
+      var x:u64=0
+      loop {if x>=width{break}
+        if on(view.get(mask,base+y*width+x)) {
+          if top==height {top=y}
+          bottom=y}
+        x=x+1}
+      y=y+1}
+    if top<height {
+      let amount:u64=cast.sat(math.round(cast.float(bottom-top+1)*fraction))
+      var x:u64=0
+      loop {if x>=width{break}
+        // Scan up the column; `below` is the nearest mask row at or below y.
+        var below:u64=height
+        var row:u64=height
+        loop {if row==0{break}
+          row=row-1
+          if on(view.get(mask,base+row*width+x)) {below=row}
+          if below<height and below-row<=amount {
+            array.set(out,base+row*width+x,bv(255))}
+          }
+        x=x+1}
+    }
+    frame=frame+1}
+  out
+}
+
+// Pose hold: out[t] = max(in[t-window+1 .. t]) (trailing window, clipped at 0).
+pub fn hold(mask:view<byte>,frames:u64,plane:u64,window:u64)
+    -> array<byte> effects {alloc} {
+  var out=zeros(frames*plane)
+  var frame:u64=0
+  loop {if frame>=frames{break}
+    let first:u64=if frame+1>=window {frame+1-window} else {0}
+    var local:u64=0
+    loop {if local>=plane{break}
+      var value:u64=0
+      var source:u64=first
+      loop {if source>frame{break}
+        let candidate=uv(view.get(mask,source*plane+local))
+        if candidate>value {value=candidate}
+        source=source+1}
+      array.set(out,frame*plane+local,bv(value))
+      local=local+1}
+    frame=frame+1}
+  out
+}
+
+// Exact 1-D squared distance transform (lower envelope of parabolas).
+fn distance_1d(input:ref<array<f64>>,output:ref<array<f64>>,count:u64,
+    hull:ref<array<u64>>,bounds:ref<array<f64>>) -> unit effects {} {
+  var k:u64=0
+  array.set(hull,0,0)
+  array.set(bounds,0,-1.0e30)
+  array.set(bounds,1,1.0e30)
+  var q:u64=1
+  loop {if q>=count{break}
+    let fq:f64=array.get(input,q)+cast.float(q*q)
+    loop {
+      let v:u64=array.get(hull,k)
+      let s:f64=(fq-(array.get(input,v)+cast.float(v*v)))/
+        (2.0*cast.float(q)-2.0*cast.float(v))
+      if s<=array.get(bounds,k) and k>0 {k=k-1
+        continue}
+      if s<=array.get(bounds,k) {
+        // k==0: the new parabola dominates the whole envelope.
+        array.set(hull,0,q)
+        array.set(bounds,0,-1.0e30)
+        array.set(bounds,1,1.0e30)
+        break}
+      k=k+1
+      array.set(hull,k,q)
+      array.set(bounds,k,s)
+      array.set(bounds,k+1,1.0e30)
+      break}
+    q=q+1}
+  k=0
+  q=0
+  loop {if q>=count{break}
+    loop {if array.get(bounds,k+1)<cast.float(q){k=k+1}else{break}}
+    let v:u64=array.get(hull,k)
+    let d:f64=if q>=v {cast.float(q-v)} else {cast.float(v-q)}
+    array.set(output,q,d*d+array.get(input,v))
+    q=q+1}
+}
+
+fn filled_f64(count:u64,value:f64) -> array<f64> effects {alloc} {
+  var out:array<f64> = array.new()
+  var index:u64=0
+  loop {if index>=count{break}
+    array.push(out,value)
+    index=index+1}
+  out
+}
+
+fn filled_u64(count:u64) -> array<u64> effects {alloc} {
+  var out:array<u64> = array.new()
+  var index:u64=0
+  loop {if index>=count{break}
+    array.push(out,0)
+    index=index+1}
+  out
+}
+
+// Grow: binary dilation by a Euclidean disk of `radius` pixels — a pixel is on
+// when the nearest mask pixel is at distance <= radius. Output is 0/255.
+pub fn grow(mask:view<byte>,frames:u64,width:u64,height:u64,radius:u64)
+    -> array<byte> effects {alloc} {
+  let plane:u64=width*height
+  var out=zeros(frames*plane)
+  // Finite "far" cost keeps the parabola arithmetic exact in f64.
+  let far:f64=cast.float((width+height)*(width+height))
+  let longest:u64=if width>height {width} else {height}
+  var column_in=filled_f64(height,0.0)
+  var column_out=filled_f64(height,0.0)
+  var row_in=filled_f64(width,0.0)
+  var row_out=filled_f64(width,0.0)
+  var hull=filled_u64(longest+1)
+  var bounds=filled_f64(longest+2,0.0)
+  var squared=filled_f64(plane,0.0)
+  let limit:f64=cast.float(radius*radius)
+  var frame:u64=0
+  loop {if frame>=frames{break}
+    let base:u64=frame*plane
+    var x:u64=0
+    loop {if x>=width{break}
+      var y:u64=0
+      loop {if y>=height{break}
+        array.set(column_in,y,if on(view.get(mask,base+y*width+x)){0.0}else{far})
+        y=y+1}
+      distance_1d(column_in,column_out,height,hull,bounds)
+      y=0
+      loop {if y>=height{break}
+        array.set(squared,y*width+x,array.get(column_out,y))
+        y=y+1}
+      x=x+1}
+    var y:u64=0
+    loop {if y>=height{break}
+      x=0
+      loop {if x>=width{break}
+        array.set(row_in,x,array.get(squared,y*width+x))
+        x=x+1}
+      distance_1d(row_in,row_out,width,hull,bounds)
+      x=0
+      loop {if x>=width{break}
+        if array.get(row_out,x)<=limit {array.set(out,base+y*width+x,bv(255))}
+        x=x+1}
+      y=y+1}
+    frame=frame+1}
+  out
+}
+
+fn clamped(position:u64,offset:i64,length:u64) -> u64 effects {} {
+  let raw:i64=cast.wrap(position)+offset
+  if raw<0 {return 0}
+  let value:u64=cast.wrap(raw)
+  if value>=length {length-1} else {value}
+}
+
+// One clamp-to-edge box pass of radius r along rows (horizontal) or columns,
+// as a running sum: identical to summing the 2r+1 clamped samples directly.
+fn box_pass(source:ref<array<u64>>,target:ref<array<u64>>,width:u64,height:u64,
+    radius:u64,horizontal:bool) -> unit effects {} {
+  let lines:u64=if horizontal {height} else {width}
+  let length:u64=if horizontal {width} else {height}
+  let span:u64=2*radius+1
+  let r:i64=cast.wrap(radius)
+  var line:u64=0
+  loop {if line>=lines{break}
+    var sum:u64=0
+    var offset:i64=0-r
+    loop {if offset>r{break}
+      let at:u64=clamped(0,offset,length)
+      sum=sum+array.get(source,if horizontal {line*width+at} else {at*width+line})
+      offset=offset+1}
+    var position:u64=0
+    loop {if position>=length{break}
+      let index:u64=if horizontal {line*width+position} else {position*width+line}
+      // Round half up: (sum + span/2) / span, values stay in 0..255.
+      array.set(target,index,(sum+span/2)/span)
+      let enter:u64=clamped(position,r+1,length)
+      let leave:u64=clamped(position,0-r,length)
+      sum=sum+array.get(source,if horizontal {line*width+enter} else {enter*width+line})
+      sum=sum-array.get(source,if horizontal {line*width+leave} else {leave*width+line})
+      position=position+1}
+    line=line+1}
+}
+
+// Blur: separable clamp-to-edge box filter of radius r, horizontal then
+// vertical, applied three times (approximately Gaussian), integer rounding
+// half up after every pass. radius 0 returns the input unchanged.
+pub fn blur(mask:view<byte>,frames:u64,width:u64,height:u64,radius:u64)
+    -> array<byte> effects {alloc} {
+  let plane:u64=width*height
+  var out=zeros(frames*plane)
+  var a=filled_u64(plane)
+  var b=filled_u64(plane)
+  var frame:u64=0
+  loop {if frame>=frames{break}
+    let base:u64=frame*plane
+    var index:u64=0
+    loop {if index>=plane{break}
+      array.set(a,index,uv(view.get(mask,base+index)))
+      index=index+1}
+    if radius>0 {
+      var pass:u64=0
+      loop {if pass>=3{break}
+        box_pass(a,b,width,height,radius,true)
+        box_pass(b,a,width,height,radius,false)
+        pass=pass+1}
+    }
+    index=0
+    loop {if index>=plane{break}
+      array.set(out,base+index,bv(array.get(a,index)))
+      index=index+1}
+    frame=frame+1}
+  out
+}
+
+pub type EditSettings = struct {headroom:f64, hold_frames:u64, grow_px:u64, blur_px:u64}
+
+// The README order: headroom above the head, pose hold, grow, then blur.
+pub fn edit_mask(people:view<byte>,frames:u64,width:u64,height:u64,
+    settings:EditSettings) -> array<byte> effects {alloc} {
+  var raised=headroom(people,frames,width,height,settings.headroom)
+  var held=hold(array.view(raised),frames,width*height,settings.hold_frames)
+  var grown=grow(array.view(held),frames,width,height,settings.grow_px)
+  blur(array.view(grown),frames,width,height,settings.blur_px)
+}
+
+// ---------------------------------------------------------------- pictures
+
+// Mannequin: every pixel whose mask is on (>=128) becomes flat grey; every
+// other pixel keeps the source RGB exactly. The edge is hard (no blending).
+// The grey figure for H3's motion reference: holes closed, then thinned by `radius` so loose
+// clothing of the old person (a flared skirt) does not come back as cloth on the new character.
+// Returns [shrunk, closed] byte planes (255 on); the rim between them is filled with background.
+pub fn figure_masks(source:ref<array<byte>>,frames:u64,width:u64,height:u64,radius:u64)
+    -> result<array<array<byte>>,string> effects {alloc,gpu} {
+  var weights:array<f32> = array.new()
+  var i:u64=0
+  loop {if i>=array.len(source){break}
+    array.push(weights,if on(array.get(source,i)) {1.0} else {0.0})
+    i=i+1}
+  var mask=edit.Mask{frames:frames,width:width,height:height,weights:weights}
+  let close:i64=cast.wrap(radius/2+2)
+  var grown=try mask_gpu.cleanup(mask,0,close)
+  var closed=try mask_gpu.cleanup(grown,0,0-close)
+  var shrunk=try mask_gpu.cleanup(closed,0,0-cast.wrap(radius))
+  var out:array<array<byte>> = array.new()
+  var planes:array<edit.Mask> = [shrunk,closed]
+  var p:u64=0
+  loop {if p>=2{break}
+    var bytes_out:array<byte> = array.new()
+    let w=struct.borrow(array.borrow(planes,p),field=weights)
+    var k:u64=0
+    loop {if k>=array.len(w){break}
+      array.push(bytes_out,if array.get(w,k)>=0.5 {bv(255)} else {bv(0)})
+      k=k+1}
+    array.push(out,bytes_out)
+    p=p+1}
+  result.ok(out)
+}
+
+// Mannequin frame with a thinned figure: grey where `shrunk` is on; on the rim (closed or the
+// original person, but not shrunk) the row is filled by interpolating the nearest pixels outside
+// both masks, so no part of the old person shows.
+pub fn mannequin_thin(out:ref<array<byte>>,rgb:view<byte>,person:view<byte>,shrunk:view<byte>,
+    closed:view<byte>,width:u64,height:u64,grey:u64) -> result<unit,string> effects {alloc} {
+  let pixels:u64=width*height
+  if view.len(rgb)!=pixels*3 or view.len(person)!=pixels or view.len(shrunk)!=pixels or view.len(closed)!=pixels {
+    return result.err("Mannequin geometry does not match")}
+  let start:u64=array.len(out)
+  var i:u64=0
+  loop {if i>=pixels*3{break}
+    array.push(out,view.get(rgb,i))
+    i=i+1}
+  var y:u64=0
+  loop {if y>=height{break}
+    var x:u64=0
+    loop {if x>=width{break}
+      let at:u64=y*width+x
+      let covered:bool=on(view.get(person,at)) or on(view.get(closed,at))
+      if not covered {x=x+1
+        continue}
+      var end:u64=x
+      loop {if end>=width{break}
+        let e:u64=y*width+end
+        if not (on(view.get(person,e)) or on(view.get(closed,e))) {break}
+        end=end+1}
+      let span:u64=end-x+1
+      var k:u64=x
+      loop {if k>=end{break}
+        let here:u64=y*width+k
+        var c:u64=0
+        loop {if c>=3{break}
+          if on(view.get(shrunk,here)) {array.set(out,start+here*3+c,bv(grey))}
+          else {
+            let left:u64=if x>0 {uv(view.get(rgb,(y*width+x-1)*3+c))} else {if end<width {uv(view.get(rgb,(y*width+end)*3+c))} else {grey}}
+            let right:u64=if end<width {uv(view.get(rgb,(y*width+end)*3+c))} else {left}
+            let t:u64=k-x+1
+            array.set(out,start+here*3+c,bv((left*(span-t)+right*t+span/2)/span))
+          }
+          c=c+1}
+        k=k+1}
+      x=end}
+    y=y+1}
+  result.ok(())
+}
+
+pub fn mannequin(out:ref<array<byte>>,rgb:view<byte>,mask:view<byte>,pixels:u64,
+    grey:u64) -> result<unit,string> effects {alloc} {
+  if view.len(rgb)!=pixels*3 or view.len(mask)!=pixels {
+    return result.err("Mannequin RGB and mask geometry do not match")}
+  var index:u64=0
+  loop {if index>=pixels{break}
+    if on(view.get(mask,index)) {
+      array.push(out,bv(grey))
+      array.push(out,bv(grey))
+      array.push(out,bv(grey))
+    } else {
+      array.push(out,view.get(rgb,index*3))
+      array.push(out,view.get(rgb,index*3+1))
+      array.push(out,view.get(rgb,index*3+2))
+    }
+    index=index+1}
+  result.ok(())
+}
+
+// Blank edit source: every pixel blends toward grey by its edit-mask weight,
+// out = (src*(255-m) + grey*m + 127) / 255 per channel (m = 0 keeps the source
+// exactly, m = 255 is flat grey).
+pub fn blank(out:ref<array<byte>>,rgb:view<byte>,mask:view<byte>,pixels:u64,grey:u64)
+    -> result<unit,string> effects {alloc} {
+  if view.len(rgb)!=pixels*3 or view.len(mask)!=pixels {
+    return result.err("Blank edit source RGB and mask geometry do not match")}
+  var index:u64=0
+  loop {if index>=pixels{break}
+    let weight:u64=uv(view.get(mask,index))
+    var channel:u64=0
+    loop {if channel>=3{break}
+      let source:u64=uv(view.get(rgb,index*3+channel))
+      array.push(out,bv((source*(255-weight)+grey*weight+127)/255))
+      channel=channel+1}
+    index=index+1}
+  result.ok(())
+}
+
+// Background plate for the blank edit source: per pixel, the mean source colour over the frames
+// where the edit mask leaves it uncovered (weight < 8), so the old person is painted over with the
+// room behind them instead of flat grey. Pixels covered in every frame stay grey. 3 bytes per pixel.
+pub fn background_plate(rgb:view<byte>,mask:view<byte>,frames:u64,pixels:u64,grey:u64)
+    -> result<array<byte>,string> effects {alloc} {
+  background_plate_rows(rgb,mask,frames,pixels,0,grey)
+}
+
+// As background_plate; with `width` > 0, pixels never uncovered are filled per row by linear
+// interpolation between the nearest uncovered pixels left and right (one side: copied), so the
+// area the person always covers reads as wall and floor instead of a grey hole.
+pub fn background_plate_rows(rgb:view<byte>,mask:view<byte>,frames:u64,pixels:u64,width:u64,grey:u64)
+    -> result<array<byte>,string> effects {alloc} {
+  if view.len(rgb)!=frames*pixels*3 or view.len(mask)!=frames*pixels {
+    return result.err("Background plate RGB and mask geometry do not match")}
+  var sums:array<u64> = array.new()
+  var counts:array<u64> = array.new()
+  var index:u64=0
+  loop {if index>=pixels*3{break}
+    array.push(sums,0)
+    index=index+1}
+  index=0
+  loop {if index>=pixels{break}
+    array.push(counts,0)
+    index=index+1}
+  var frame:u64=0
+  loop {if frame>=frames{break}
+    let base:u64=frame*pixels
+    var p:u64=0
+    loop {if p>=pixels{break}
+      if uv(view.get(mask,base+p))<8 {
+        array.set(counts,p,array.get(counts,p)+1)
+        var c:u64=0
+        loop {if c>=3{break}
+          array.set(sums,p*3+c,array.get(sums,p*3+c)+uv(view.get(rgb,(base+p)*3+c)))
+          c=c+1}
+      }
+      p=p+1}
+    frame=frame+1}
+  var plate:array<byte> = array.new()
+  index=0
+  loop {if index>=pixels{break}
+    let n:u64=array.get(counts,index)
+    var c:u64=0
+    loop {if c>=3{break}
+      array.push(plate,bv(if n==0 {grey} else {(array.get(sums,index*3+c)+n/2)/n}))
+      c=c+1}
+    index=index+1}
+  if width==0 or pixels%width!=0 {return result.ok(plate)}
+  let rows:u64=pixels/width
+  var row:u64=0
+  loop {if row>=rows{break}
+    let start:u64=row*width
+    var x:u64=0
+    loop {if x>=width{break}
+      if array.get(counts,start+x)!=0 {x=x+1
+        continue}
+      var end:u64=x
+      loop {if end>=width or array.get(counts,start+end)!=0{break}
+        end=end+1}
+      let has_left:bool=x>0
+      let has_right:bool=end<width
+      if has_left or has_right {
+        let span:u64=end-x+1
+        var k:u64=x
+        loop {if k>=end{break}
+          var c:u64=0
+          loop {if c>=3{break}
+            let left:u64=if has_left {uv(array.get(plate,(start+x-1)*3+c))} else {uv(array.get(plate,(start+end)*3+c))}
+            let right:u64=if has_right {uv(array.get(plate,(start+end)*3+c))} else {left}
+            let t:u64=k-x+1
+            array.set(plate,(start+k)*3+c,bv((left*(span-t)+right*t+span/2)/span))
+            c=c+1}
+          k=k+1}
+      }
+      x=end}
+    row=row+1}
+  result.ok(plate)
+}
+
+// Blank edit source over a background plate: out = (src*(255-m) + plate*m + 127) / 255.
+pub fn blank_over(out:ref<array<byte>>,rgb:view<byte>,mask:view<byte>,plate:view<byte>,pixels:u64)
+    -> result<unit,string> effects {alloc} {
+  if view.len(rgb)!=pixels*3 or view.len(mask)!=pixels or view.len(plate)!=pixels*3 {
+    return result.err("Blank edit source RGB, mask and plate geometry do not match")}
+  var index:u64=0
+  loop {if index>=pixels{break}
+    let weight:u64=uv(view.get(mask,index))
+    var channel:u64=0
+    loop {if channel>=3{break}
+      let source:u64=uv(view.get(rgb,index*3+channel))
+      let behind:u64=uv(view.get(plate,index*3+channel))
+      array.push(out,bv((source*(255-weight)+behind*weight+127)/255))
+      channel=channel+1}
+    index=index+1}
+  result.ok(())
+}
+
+fn mix(value:u64,tint:u64,alpha:f64) -> u64 effects {} {
+  cast.sat(math.round(cast.float(value)*(1.0-alpha)+cast.float(tint)*alpha))
+}
+
+// Check-mask frame (one frame): left = source tinted orange (alpha = tint_alpha)
+// where the tracked person is on, elsewhere cyan by the edit-mask weight
+// (alpha = tint_alpha * edit/255); right = the mannequin. Output 2*width x height.
+pub fn check_frame(out:ref<array<byte>>,rgb:view<byte>,edit:view<byte>,people:view<byte>,
+    figure:view<byte>,width:u64,height:u64,tint_alpha:f64,
+    edit_tint:ref<array<u64>>,person_tint:ref<array<u64>>)
+    -> result<unit,string> effects {alloc} {
+  let pixels:u64=width*height
+  if view.len(rgb)!=pixels*3 or view.len(figure)!=pixels*3 or
+     view.len(edit)!=pixels or view.len(people)!=pixels {
+    return result.err("Check-mask inputs do not share one geometry")}
+  var y:u64=0
+  loop {if y>=height{break}
+    var x:u64=0
+    loop {if x>=width{break}
+      let at:u64=y*width+x
+      let alpha:f64=tint_alpha*cast.float(uv(view.get(edit,at)))/255.0
+      let person:bool=on(view.get(people,at))
+      var channel:u64=0
+      loop {if channel>=3{break}
+        let source:u64=uv(view.get(rgb,at*3+channel))
+        let value:u64=if person {mix(source,array.get(person_tint,channel),tint_alpha)}
+          else {mix(source,array.get(edit_tint,channel),alpha)}
+        array.push(out,bv(value))
+        channel=channel+1}
+      x=x+1}
+    x=0
+    loop {if x>=width{break}
+      let at:u64=(y*width+x)*3
+      array.push(out,view.get(figure,at))
+      array.push(out,view.get(figure,at+1))
+      array.push(out,view.get(figure,at+2))
+      x=x+1}
+    y=y+1}
+  result.ok(())
+}
+
+// Nearest-neighbour resample of 8-bit planes; keeps a binary mask binary so the
+// mannequin silhouette stays sharp at the motion-reference size.
+pub fn resample_nearest(mask:view<byte>,frames:u64,width:u64,height:u64,
+    target_width:u64,target_height:u64) -> array<byte> effects {alloc} {
+  var out:array<byte> = array.new()
+  var frame:u64=0
+  loop {if frame>=frames{break}
+    var y:u64=0
+    loop {if y>=target_height{break}
+      let sy:u64=(2*y+1)*height/(2*target_height)
+      var x:u64=0
+      loop {if x>=target_width{break}
+        let sx:u64=(2*x+1)*width/(2*target_width)
+        array.push(out,view.get(mask,frame*width*height+sy*width+sx))
+        x=x+1}
+      y=y+1}
+    frame=frame+1}
+  out
+}
+
+// ---------------------------------------------------------------- part to use
+
+pub type Part = struct {
+  mode:string,
+  offset_frames:i64,
+  first_frame:u64,
+  frames:u64,
+  source_frames:u64
+} derive codec(strict)
+
+// Largest H3 delivery length 17n+5 that does not exceed `frames`.
+pub fn h3_frames_down(frames:u64) -> u64 effects {} {
+  if frames<5 {0} else {((frames-5)/17)*17+5}
+}
+
+// mode: "whole", or "start" | "middle" | "end" with a requested length; the
+// signed offset shifts the placed window and is clamped inside the source.
+pub fn plan_part(mode:str,source_frames:u64,length_frames:u64,offset_frames:i64,
+    min_frames:u64) -> result<Part,string> effects {alloc} {
+  let whole:bool=mode=="whole"
+  if not whole and mode!="start" and mode!="middle" and mode!="end" {
+    return result.err("Part to use must be whole, start, middle or end")}
+  let requested:u64=if whole or length_frames>source_frames {source_frames}
+    else {length_frames}
+  let frames:u64=h3_frames_down(requested)
+  if frames<min_frames or frames==0 {
+    return result.err(text.concat("Part to use is shorter than the H3 minimum of ",
+      text.concat(str.view(string.from_int(min_frames))," frames")))}
+  let room:u64=source_frames-frames
+  let anchor:u64=if whole or mode=="start" {0} else if mode=="middle" {room/2} else {room}
+  var placed:i64=cast.wrap(anchor)
+  if not whole {placed=placed+offset_frames}
+  let positive:u64=if placed<0 {0} else {cast.wrap(placed)}
+  let first:u64=if positive>room {room} else {positive}
+  result.ok(Part{mode:string.copy(mode),offset_frames:if whole {0} else {offset_frames},
+    first_frame:first,frames:frames,source_frames:source_frames})
+}
+
+// Audio sample index of a 24 FPS frame boundary (ceil, as H3's timeline does).
+pub fn audio_sample_at(frame:u64,fps:u64,sample_rate:u64) -> u64 effects {} {
+  let product:u64=frame*sample_rate
+  product/fps+if rem(product,fps)==0 {0} else {1}
+}
+
+// ---------------------------------------------------------------- manifest
+
+pub type FrameBox = struct {frame:u64, area_fraction:f64, score:f64, bbox:array<u64>} derive codec(strict)
+
+pub type TrackInfo = struct {
+  id:u64,
+  first_frame:u64,
+  last_frame:u64,
+  frames_present:u64,
+  max_area_fraction:f64,
+  mean_area_fraction:f64,
+  raw:string,
+  frames:array<FrameBox>
+} derive codec(strict)
+
+pub type MaskFiles = struct {raw:string, video:string, pixel_format:string} derive codec(strict)
+
+pub type EditMaskInfo = struct {
+  raw:string,
+  video:string,
+  pixel_format:string,
+  margin:string,
+  grow_px:u64,
+  blur_px:u64,
+  grow_px_at_source:u64,
+  blur_px_at_source:u64,
+  reference_short_edge:u64,
+  headroom:f64,
+  hold_frames:u64
+} derive codec(strict)
+
+pub type EditSource = struct {
+  mode:string,
+  video:string,
+  silhouette:string,
+  blank:string
+} derive codec(strict)
+
+pub type MotionReference = struct {
+  video:string,
+  width:u64,
+  height:u64,
+  short_edge:u64,
+  max_pixels:u64,
+  grey:u64,
+  first_frame:u64,
+  frames:u64
+} derive codec(strict)
+
+pub type Manifest = struct {
+  schema:string,
+  source:string,
+  prompt:string,
+  model:string,
+  tracker:string,
+  fps:u64,
+  width:u64,
+  height:u64,
+  part:Part,
+  part_video:string,
+  part_audio:string,
+  has_audio:bool,
+  audio_sample_rate:u64,
+  audio_samples:u64,
+  tracks:array<TrackInfo>,
+  selected_track:i64,
+  selection:array<SelectionEntry>,
+  selection_rule:SelectionRule,
+  people_mask:MaskFiles,
+  edit_mask:EditMaskInfo,
+  motion_reference:MotionReference,
+  edit_source:EditSource,
+  check_preview:string
+} derive codec(strict)
+
+pub fn manifest_schema() -> str effects {} { "mm-air.swap-masks.v1" }
+
+pub fn encode_manifest(value:ref<Manifest>) -> result<string,string> effects {alloc} {
+  match Manifest_encode(value) {ok(found)=>result.ok(found),
+    err(_)=>result.err("Swap-mask manifest encoding failed"),}
+}
+
+pub fn decode_manifest(source:str) -> result<Manifest,string> effects {alloc} {
+  var value:Manifest=match Manifest_decode(source) {ok(found)=>found,
+    err(_)=>{return result.err("Swap-mask manifest does not match its strict schema")},}
+  if value.schema!=manifest_schema() {return result.err("Unsupported swap-mask manifest schema")}
+  result.ok(value)
+}
+
+pub fn track_info(track:ref<sam_tracks.Track>,width:u64,height:u64,frames:u64)
+    -> TrackInfo effects {alloc} {
+  let plane:f64=cast.float(width*height)
+  var boxes:array<FrameBox> = array.new()
+  var max_fraction:f64=0.0
+  var index:u64=0
+  let count:u64=array.len(struct.borrow(track,field=appearances))
+  loop {if index>=count{break}
+    let item=array.get(struct.borrow(track,field=appearances),index)
+    let fraction:f64=cast.float(item.area)/plane
+    if fraction>max_fraction {max_fraction=fraction}
+    array.push(boxes,FrameBox{frame:item.frame,area_fraction:fraction,score:item.score,
+      bbox:[item.x0,item.y0,item.x1,item.y1]})
+    index=index+1}
+  let first:u64=if count==0 {0} else {
+    array.get(struct.borrow(track,field=appearances),0).frame}
+  let last:u64=if count==0 {0} else {
+    array.get(struct.borrow(track,field=appearances),count-1).frame}
+  TrackInfo{id:track.id,first_frame:first,last_frame:last,frames_present:count,
+    max_area_fraction:max_fraction,
+    mean_area_fraction:cast.float(track_area_sum(track))/(plane*cast.float(frames)),
+    raw:string.copy(struct.borrow(track,field=raw)),frames:boxes}
+}
+
+// ---------------------------------------------------------------- pipeline
+
+pub type Job = struct {
+  plugin:string,
+  model:string,
+  preset:Preset,
+  source:string,
+  output_dir:string,
+  prompt:string,
+  margin:string,
+  part_mode:string,
+  part_seconds:f64,
+  offset_seconds:f64,
+  motion_short_edge:u64
+}
+
+fn check(arguments:array<string> own,message:str) -> result<unit,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process} {
+  match proc.check(arguments) {
+    ok(_) => result.ok(()),
+    err(problem) => { var held=problem
+      let detail:string=match held {
+        Launch(error)=>string.copy(error.message),
+        Exit(status)=>text.concat("exit status ",str.view(string.from_int(
+          proc.exit_code(status)))),
+      }
+      result.err(text.concat(message,text.concat(": ",str.view(detail)))) },
+  }
+}
+
+fn n(value:u64) -> string effects {alloc} { string.from_int(value) }
+
+fn size_text(width:u64,height:u64) -> string effects {alloc} {
+  text.concat(str.view(n(width)),text.concat("x",str.view(n(height))))
+}
+
+pub type Probe = struct {width:u64, height:u64, duration:f64, has_audio:bool,
+  sample_rate:u64}
+
+// Parse `ffprobe -of default=nw=1` lines for the first video stream, the first
+// audio stream and the container duration.
+pub fn parse_probe(source:str) -> result<Probe,string> effects {alloc} {
+  var lines=text.lines(source)
+  var value=Probe{width:0,height:0,duration:0.0,has_audio:false,sample_rate:0}
+  var current:string=string.new()
+  var index:u64=0
+  loop {if index>=array.len(lines){break}
+    var parts=text.split(array.borrow(lines,index),"=")
+    if array.len(parts)==2 {
+      let key:str=array.borrow(parts,0)
+      let item:str=array.borrow(parts,1)
+      if key=="codec_type" {current=string.copy(item)
+        if item=="audio" and not value.has_audio {value.has_audio=true}}
+      if key=="width" and current=="video" and value.width==0 {
+        value.width=match text.parse_u64(item){some(v)=>v,none=>0}}
+      if key=="height" and current=="video" and value.height==0 {
+        value.height=match text.parse_u64(item){some(v)=>v,none=>0}}
+      if key=="sample_rate" and current=="audio" and value.sample_rate==0 {
+        value.sample_rate=match text.parse_u64(item){some(v)=>v,none=>0}}
+      if key=="duration" {value.duration=match text.parse_f64(item){some(v)=>v,none=>0.0}}
+    }
+    index=index+1}
+  if value.width==0 or value.height==0 {return result.err("Source has no video stream")}
+  if value.duration<=0.0 {return result.err("Source has no readable duration")}
+  if value.has_audio and value.sample_rate==0 {
+    return result.err("Source audio has no sample rate")}
+  result.ok(value)
+}
+
+fn probe(source:str,work:str) -> result<Probe,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process} {
+  let log=path.join(work,"probe.txt")
+  match proc.run(["ffprobe","-v","error","-show_entries",
+      "stream=codec_type,width,height,sample_rate:format=duration","-of",
+      "default=nw=1",string.copy(source)],work,str.view(log),false) {
+    ok(status)=>{if not proc.success(status){
+      return result.err("ffprobe could not read the source")}},
+    err(_)=>{return result.err("ffprobe could not be started")},
+  }
+  let found=match files.read_text(str.view(log)){ok(value)=>value,
+    err(_)=>{return result.err("Cannot read the source probe")}}
+  parse_probe(str.view(found))
+}
+
+fn read_exact(filename:str,expected:u64,message:str) -> result<bytes,string>
+    effects {alloc,fs.read} {
+  let data=match files.read_limited(filename,expected) {ok(value)=>value,
+    err(_)=>{return result.err(string.copy(message))},}
+  if view.len(bytes.view(data))!=expected {return result.err(string.copy(message))}
+  result.ok(data)
+}
+
+fn write_raw(filename:str,data:view<byte>) -> result<unit,string>
+    effects {alloc,fs.write} {
+  match files.write_bytes(filename,data) {ok(_)=>result.ok(()),
+    err(problem)=>result.err(text.concat("Cannot write ",text.concat(filename,
+      text.concat(": ",problem.message)))),}
+}
+
+// Lossless full-range H.264 (yuvj420p, crf 0): the luma plane carries the
+// mask bytes exactly (chroma is constant) and decodes back unchanged through
+// masked_runtime's `format=gray` mask decoder (tests/swap_masks.ai).
+pub fn mask_pixel_format() -> str effects {} { "yuvj420p" }
+
+pub fn encode_gray(raw:str,output:str,width:u64,height:u64,frames:u64,fps:u64)
+    -> result<unit,string> effects {alloc,fs.meta,fs.read,fs.write,process} {
+  check(["ffmpeg","-nostdin","-v","error","-y","-f","rawvideo","-pixel_format",
+    "gray","-video_size",size_text(width,height),"-framerate",n(fps),"-i",
+    string.copy(raw),"-frames:v",n(frames),"-an","-c:v","libx264","-preset",
+    "medium","-crf","0","-pix_fmt",string.copy(mask_pixel_format()),string.copy(output)],
+    "FFmpeg could not encode a lossless mask video")
+}
+
+fn encode_rgb(raw:str,output:str,width:u64,height:u64,frames:u64,fps:u64,
+    audio:str) -> result<unit,string> effects {alloc,fs.meta,fs.read,fs.write,process} {
+  var arguments:array<string> = ["ffmpeg","-nostdin","-v","error","-y","-f",
+    "rawvideo","-pixel_format","rgb24","-video_size",size_text(width,height),
+    "-framerate",n(fps),"-i",string.copy(raw)]
+  if str.len(audio)!=0 {array.push(arguments,"-i")
+    array.push(arguments,string.copy(audio))}
+  array.push(arguments,"-map")
+  array.push(arguments,"0:v:0")
+  if str.len(audio)!=0 {array.push(arguments,"-map")
+    array.push(arguments,"1:a:0")
+    array.push(arguments,"-c:a")
+    array.push(arguments,"aac")
+    array.push(arguments,"-b:a")
+    array.push(arguments,"192k")}
+  array.push(arguments,"-frames:v")
+  array.push(arguments,n(frames))
+  array.push(arguments,"-c:v")
+  array.push(arguments,"libx264rgb")
+  array.push(arguments,"-preset")
+  array.push(arguments,"medium")
+  array.push(arguments,"-crf")
+  array.push(arguments,"0")
+  array.push(arguments,"-pix_fmt")
+  array.push(arguments,"rgb24")
+  array.push(arguments,string.copy(output))
+  check(arguments,"FFmpeg could not encode a lossless RGB video")
+}
+
+fn decode_part(source:str,output:str,part:ref<Part>,fps:u64,width:u64,height:u64)
+    -> result<bytes,string> effects {alloc,fs.meta,fs.read,fs.write,process} {
+  let filter=text.concat("fps=",text.concat(str.view(n(fps)),text.concat(
+    ",trim=start_frame=",text.concat(str.view(n(part.first_frame)),text.concat(
+    ":end_frame=",text.concat(str.view(n(part.first_frame+part.frames)),
+    ",setpts=PTS-STARTPTS"))))))
+  var arguments:array<string> = ["ffmpeg","-nostdin","-v","error","-y","-i",
+    string.copy(source),"-map","0:v:0","-vf",filter]
+  array.push(arguments,"-frames:v")
+  array.push(arguments,n(part.frames))
+  array.push(arguments,"-pix_fmt")
+  array.push(arguments,"rgb24")
+  array.push(arguments,"-f")
+  array.push(arguments,"rawvideo")
+  array.push(arguments,string.copy(output))
+  let _=try check(arguments,"FFmpeg could not decode the part to use")
+  read_exact(output,part.frames*width*height*3,
+    "The source does not contain every frame of the part to use")
+}
+
+// Scale an RGB raw stream with FFmpeg's Lanczos resampler (picture content only;
+// masks are resampled nearest in AIR so silhouettes stay hard).
+fn scale_rgb(raw:str,output:str,width:u64,height:u64,target_width:u64,
+    target_height:u64,frames:u64) -> result<bytes,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process} {
+  let _=try check(["ffmpeg","-nostdin","-v","error","-y","-f","rawvideo",
+    "-pixel_format","rgb24","-video_size",size_text(width,height),"-i",
+    string.copy(raw),"-vf",text.concat("scale=",text.concat(str.view(n(target_width)),
+    text.concat(":",text.concat(str.view(n(target_height)),":flags=lanczos")))),
+    "-pix_fmt","rgb24","-f","rawvideo",string.copy(output)],
+    "FFmpeg could not scale the motion reference")
+  read_exact(output,frames*target_width*target_height*3,
+    "Scaled motion reference has the wrong size")
+}
+
+fn cut_audio(source:str,output:str,part:ref<Part>,fps:u64,sample_rate:u64)
+    -> result<u64,string> effects {alloc,fs.meta,fs.read,fs.write,process} {
+  let first:u64=audio_sample_at(part.first_frame,fps,sample_rate)
+  let last:u64=audio_sample_at(part.first_frame+part.frames,fps,sample_rate)
+  let _=try check(["ffmpeg","-nostdin","-v","error","-y","-i",string.copy(source),
+    "-map","0:a:0","-af",text.concat("atrim=start_sample=",text.concat(
+    str.view(n(first)),text.concat(":end_sample=",text.concat(str.view(n(last)),
+    ",asetpts=PTS-STARTPTS")))),"-c:a","pcm_s16le",string.copy(output)],
+    "FFmpeg could not cut the part's audio")
+  result.ok(last-first)
+}
+
+fn plane_view(data:view<byte>,frame:u64,size:u64) -> view<byte> from data effects {} {
+  view.slice(data,frame*size,frame*size+size)
+}
+
+pub type PartFiles = struct {
+  root:string,
+  width:u64,
+  height:u64,
+  has_audio:bool,
+  sample_rate:u64,
+  part:Part,
+  part_rgb:string,
+  part_video:string,
+  part_audio:string,
+  audio_samples:u64
+}
+
+// Stage 1: probe, plan the part to use and write part.rgb (the tracking input),
+// part.mp4 and part.wav into the job directory.
+pub fn prepare_part(job:ref<Job>) -> result<PartFiles,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process} {
+  let preset=struct.borrow(job,field=preset)
+  let root=struct.borrow(job,field=output_dir)
+  let fps:u64=preset.fps
+  let _=try margin(preset,struct.borrow(job,field=margin))
+  var short_ok:bool=false
+  var index:u64=0
+  loop {if index>=array.len(struct.borrow(preset,field=motion_reference_short_edges)){break}
+    if array.get(struct.borrow(preset,field=motion_reference_short_edges),index)==
+       job.motion_short_edge {short_ok=true}
+    index=index+1}
+  if not short_ok {return result.err("Motion reference size is not one of the preset sizes")}
+  match files.mkdirs(root) {ok(_)=>{},err(_)=>{
+    return result.err("Cannot create the swap-mask job directory")}}
+  let info=try probe(struct.borrow(job,field=source),root)
+  let width=info.width
+  let height=info.height
+  let source_frames:u64=cast.sat(math.floor(info.duration*cast.float(fps)))
+  let length_frames:u64=cast.sat(math.round(job.part_seconds*cast.float(fps)))
+  let offset_frames:i64=cast.sat(math.round(job.offset_seconds*cast.float(fps)))
+  var part=try plan_part(struct.borrow(job,field=part_mode),source_frames,
+    length_frames,offset_frames,preset.min_frames)
+  let frames=part.frames
+
+  // Part: lossless frames + sample-exact audio.
+  let part_rgb=path.join(root,"part.rgb")
+  let _=try decode_part(struct.borrow(job,field=source),str.view(part_rgb),
+    part,fps,width,height)
+  let part_audio:string=if info.has_audio {path.join(root,"part.wav")} else {string.new()}
+  var audio_samples:u64=0
+  if info.has_audio {audio_samples=try cut_audio(struct.borrow(job,field=source),
+    str.view(part_audio),part,fps,info.sample_rate)}
+  let part_video=path.join(root,"part.mp4")
+  let _=try encode_rgb(str.view(part_rgb),str.view(part_video),width,height,frames,fps,
+    str.view(part_audio))
+  result.ok(PartFiles{root:string.copy(root),width:width,height:height,
+    has_audio:info.has_audio,sample_rate:info.sample_rate,part:part,part_rgb:part_rgb,
+    part_video:part_video,part_audio:part_audio,audio_samples:audio_samples})
+}
+
+// Stage 2, tracking backend "sam3.cpp": the native toolkit writes
+// <job>/tracks/track-<id>.gray and tracks.tsv. Any other backend only has to
+// produce the same two files (or the same array<Track>) for part.rgb.
+pub fn sam3cpp_tracker() -> str effects {} { "sam3.cpp" }
+
+pub fn track_sam3cpp(job:ref<Job>,prepared:ref<PartFiles>)
+    -> result<array<sam_tracks.Track>,string> effects {alloc,ffi,fs.meta,fs.read,fs.write,gpu} {
+  let preset=struct.borrow(job,field=preset)
+  let frames=prepared.part.frames
+  let width=prepared.width
+  let height=prepared.height
+  let part_rgb=string.copy(struct.borrow(prepared,field=part_rgb))
+  let root=struct.borrow(prepared,field=root)
+  let track_dir=path.join(root,"tracks")
+  match files.mkdirs(str.view(track_dir)) {ok(_)=>{},err(_)=>{
+    return result.err("Cannot create the track directory")}}
+  var track_job=sam_tracks.Job{plugin:string.copy(struct.borrow(job,field=plugin)),
+    model:string.copy(struct.borrow(job,field=model)),source_rgb:string.copy(str.view(part_rgb)),
+    prompt:string.copy(struct.borrow(job,field=prompt)),output_dir:string.copy(str.view(track_dir)),
+    frames:frames,width:width,height:height,score_threshold:cast.float(preset.score_threshold),
+    hotstart_frames:preset.tracker_hotstart_frames}
+  sam_tracks.run(track_job)
+}
+
+// Stage 3: People Mask selection, edit mask, mannequin, check preview and the
+// manifest, from any tracker's tracks for prepared.part_rgb.
+pub fn finish(job:ref<Job>,prepared:ref<PartFiles>,tracks:ref<array<sam_tracks.Track>>,
+    tracker:str) -> result<Manifest,string> effects {alloc,fs.meta,fs.read,fs.write,gpu,process} {
+  let preset=struct.borrow(job,field=preset)
+  let root=struct.borrow(prepared,field=root)
+  let fps:u64=preset.fps
+  let chosen=try margin(preset,struct.borrow(job,field=margin))
+  let width=prepared.width
+  let height=prepared.height
+  let plane:u64=width*height
+  let frames=prepared.part.frames
+  var part=Part{mode:string.copy(struct.borrow(struct.borrow(prepared,field=part),field=mode)),
+    offset_frames:prepared.part.offset_frames,first_frame:prepared.part.first_frame,
+    frames:frames,source_frames:prepared.part.source_frames}
+  let part_rgb=string.copy(struct.borrow(prepared,field=part_rgb))
+  let part_audio=string.copy(struct.borrow(prepared,field=part_audio))
+  let part_video=string.copy(struct.borrow(prepared,field=part_video))
+  let audio_samples=prepared.audio_samples
+  var source_pixels=try read_exact(str.view(part_rgb),frames*plane*3,
+    "part.rgb does not hold every frame of the part")
+  var index:u64=0
+  var infos:array<TrackInfo> = array.new()
+  loop {if index>=array.len(tracks){break}
+    array.push(infos,track_info(array.borrow(tracks,index),width,height,frames))
+    index=index+1}
+  var chosen_frames=try select_per_frame(tracks,frames,width,height,
+    preset.selection_switch_area_factor,preset.selection_min_iou)
+  if chosen_frames.dominant<0 {return result.err("SAM 3 found no instance to replace")}
+  let people_raw=path.join(root,"people-mask.gray")
+  let _=try write_raw(str.view(people_raw),array.view(struct.borrow(chosen_frames,field=people)))
+  let people=try read_exact(str.view(people_raw),frames*plane,
+    "People Mask file is incomplete")
+  let people_video=path.join(root,"people-mask.mp4")
+  let _=try encode_gray(str.view(people_raw),str.view(people_video),width,height,frames,fps)
+
+  // Edit mask.
+  let grow_source=scaled_px(chosen.grow_px,preset.reference_short_edge,width,height)
+  let blur_source=scaled_px(chosen.blur_px,preset.reference_short_edge,width,height)
+  var edit=edit_mask(bytes.view(people),frames,width,height,EditSettings{
+    headroom:preset.headroom,hold_frames:preset.hold_frames,grow_px:grow_source,
+    blur_px:blur_source})
+  let edit_raw=path.join(root,"edit-mask.gray")
+  let _=try write_raw(str.view(edit_raw),array.view(edit))
+  let edit_video=path.join(root,"edit-mask.mp4")
+  let _=try encode_gray(str.view(edit_raw),str.view(edit_video),width,height,frames,fps)
+
+  // Mannequin at source size (for the preview) and at the reference size.
+  var figure_source:array<byte> = array.new()
+  var frame:u64=0
+  loop {if frame>=frames{break}
+    let _=try mannequin(figure_source,plane_view(bytes.view(source_pixels),frame,plane*3),
+      plane_view(bytes.view(people),frame,plane),plane,preset.mannequin_grey)
+    frame=frame+1}
+  let canvas=try reference_media.video_canvas(width,height,job.motion_short_edge,
+    preset.motion_reference_max_pixels)
+  let scaled_raw=path.join(root,"motion-source.rgb")
+  var scaled=try scale_rgb(str.view(part_rgb),str.view(scaled_raw),width,height,
+    canvas.width,canvas.height,frames)
+  var scaled_mask=resample_nearest(bytes.view(people),frames,width,height,
+    canvas.width,canvas.height)
+  var figure=try figure_masks(scaled_mask,frames,canvas.width,canvas.height,preset.mannequin_shrink_px)
+  let canvas_plane:u64=canvas.width*canvas.height
+  var figure_reference:array<byte> = array.new()
+  frame=0
+  loop {if frame>=frames{break}
+    let _=try mannequin_thin(figure_reference,plane_view(bytes.view(scaled),frame,canvas_plane*3),
+      plane_view(array.view(scaled_mask),frame,canvas_plane),
+      plane_view(array.view(array.borrow(figure,0)),frame,canvas_plane),
+      plane_view(array.view(array.borrow(figure,1)),frame,canvas_plane),
+      canvas.width,canvas.height,preset.mannequin_grey)
+    frame=frame+1}
+  let figure_raw=path.join(root,"mannequin.rgb")
+  let _=try write_raw(str.view(figure_raw),array.view(figure_reference))
+  let figure_video=path.join(root,"mannequin.mp4")
+  let _=try encode_rgb(str.view(figure_raw),str.view(figure_video),canvas.width,
+    canvas.height,frames,fps,"")
+
+  // Edit sources (Video 1 for the masked H3 edit): the part with the person
+  // greyed (silhouette) or with the whole edit-mask area blended to grey (blank).
+  // Source geometry, part length, lossless, with the part audio.
+  let silhouette_raw=path.join(root,"edit-source-silhouette.rgb")
+  let _=try write_raw(str.view(silhouette_raw),array.view(figure_source))
+  let silhouette_video=path.join(root,"edit-source-silhouette.mp4")
+  let _=try encode_rgb(str.view(silhouette_raw),str.view(silhouette_video),width,height,
+    frames,fps,str.view(part_audio))
+  let _=files.remove(str.view(silhouette_raw))
+  var blanked:array<byte> = array.new()
+  var plate:array<byte> = try background_plate_rows(bytes.view(source_pixels),array.view(edit),
+    frames,plane,width,preset.mannequin_grey)
+  frame=0
+  loop {if frame>=frames{break}
+    let _=try blank_over(blanked,plane_view(bytes.view(source_pixels),frame,plane*3),
+      plane_view(array.view(edit),frame,plane),array.view(plate),plane)
+    frame=frame+1}
+  let blank_raw=path.join(root,"edit-source-blank.rgb")
+  let _=try write_raw(str.view(blank_raw),array.view(blanked))
+  let blank_video=path.join(root,"edit-source-blank.mp4")
+  let _=try encode_rgb(str.view(blank_raw),str.view(blank_video),width,height,frames,fps,
+    str.view(part_audio))
+  let _=files.remove(str.view(blank_raw))
+  let source_mode=string.copy(struct.borrow(preset,field=edit_source_mode))
+  let chosen_source:string=if source_mode=="silhouette" {string.copy(str.view(silhouette_video))}
+    else {string.copy(str.view(blank_video))}
+
+  // Check-mask preview (scrubbable MP4 with the part's audio).
+  var preview:array<byte> = array.new()
+  frame=0
+  loop {if frame>=frames{break}
+    let _=try check_frame(preview,plane_view(bytes.view(source_pixels),frame,plane*3),
+      plane_view(array.view(edit),frame,plane),plane_view(bytes.view(people),frame,plane),
+      plane_view(array.view(figure_source),frame,plane*3),width,height,
+      preset.tint_alpha,struct.borrow(preset,field=edit_tint),
+      struct.borrow(preset,field=person_tint))
+    frame=frame+1}
+  let preview_raw=path.join(root,"check.rgb")
+  let _=try write_raw(str.view(preview_raw),array.view(preview))
+  let preview_video=path.join(root,"check.mp4")
+  var preview_args:array<string> = ["ffmpeg","-nostdin","-v","error","-y","-f",
+    "rawvideo","-pixel_format","rgb24","-video_size",size_text(2*width,height),
+    "-framerate",n(fps),"-i",string.copy(str.view(preview_raw))]
+  if prepared.has_audio {array.push(preview_args,"-i")
+    array.push(preview_args,string.copy(str.view(part_audio)))
+    array.push(preview_args,"-map")
+    array.push(preview_args,"0:v:0")
+    array.push(preview_args,"-map")
+    array.push(preview_args,"1:a:0")
+    array.push(preview_args,"-c:a")
+    array.push(preview_args,"aac")}
+  array.push(preview_args,"-frames:v")
+  array.push(preview_args,n(frames))
+  array.push(preview_args,"-vf")
+  array.push(preview_args,"pad=ceil(iw/2)*2:ceil(ih/2)*2")
+  array.push(preview_args,"-c:v")
+  array.push(preview_args,"libx264")
+  array.push(preview_args,"-crf")
+  array.push(preview_args,n(preset.preview_crf))
+  array.push(preview_args,"-g")
+  array.push(preview_args,"1")
+  array.push(preview_args,"-pix_fmt")
+  array.push(preview_args,"yuv420p")
+  array.push(preview_args,"-movflags")
+  array.push(preview_args,"+faststart")
+  array.push(preview_args,string.copy(str.view(preview_video)))
+  let _=try check(preview_args,"FFmpeg could not encode the check-mask preview")
+  // Raw scratch that the manifest does not reference.
+  let _=files.remove(str.view(preview_raw))
+  let _=files.remove(str.view(scaled_raw))
+  let _=files.remove(str.view(figure_raw))
+
+  let selected_id:i64=chosen_frames.dominant
+  let selection_entries=struct.replace(chosen_frames,array.new(),field=entries)
+  result.ok(Manifest{schema:string.copy(manifest_schema()),
+    source:string.copy(struct.borrow(job,field=source)),
+    prompt:string.copy(struct.borrow(job,field=prompt)),
+    model:string.copy(struct.borrow(job,field=model)),tracker:string.copy(tracker),fps:fps,width:width,height:height,
+    part:Part{mode:string.copy(struct.borrow(part,field=mode)),
+      offset_frames:part.offset_frames,first_frame:part.first_frame,frames:frames,
+      source_frames:part.source_frames},
+    part_video:part_video,part_audio:part_audio,has_audio:prepared.has_audio,
+    audio_sample_rate:prepared.sample_rate,audio_samples:audio_samples,
+    tracks:infos,selected_track:selected_id,selection:selection_entries,
+    selection_rule:SelectionRule{switch_area_factor:preset.selection_switch_area_factor,
+      min_iou:preset.selection_min_iou},
+    people_mask:MaskFiles{raw:people_raw,video:people_video,
+      pixel_format:string.copy(mask_pixel_format())},
+    edit_mask:EditMaskInfo{raw:edit_raw,video:edit_video,
+      pixel_format:string.copy(mask_pixel_format()),margin:string.copy(chosen.name),
+      grow_px:chosen.grow_px,blur_px:chosen.blur_px,grow_px_at_source:grow_source,
+      blur_px_at_source:blur_source,reference_short_edge:preset.reference_short_edge,
+      headroom:preset.headroom,hold_frames:preset.hold_frames},
+    motion_reference:MotionReference{video:figure_video,width:canvas.width,
+      height:canvas.height,short_edge:job.motion_short_edge,
+      max_pixels:preset.motion_reference_max_pixels,grey:preset.mannequin_grey,
+      first_frame:part.first_frame,frames:frames},
+    edit_source:EditSource{mode:source_mode,video:chosen_source,
+      silhouette:silhouette_video,blank:blank_video},
+    check_preview:preview_video})
+}
+
+// A tracking backend outside this module (the native AIR SAM 3.1 port): it
+// reads request.source_rgb and writes request.output_dir/track-<id>.gray and
+// tracks.tsv in the toolkits/sam3 format; the parse stays here.
+pub type TrackRequest = struct {
+  model:string,
+  source_rgb:string,
+  prompt:string,
+  output_dir:string,
+  frames:u64,
+  width:u64,
+  height:u64
+}
+
+pub fn sam31_tracker() -> str effects {} { "sam3.1" }
+
+pub fn track_external(job:ref<Job>,prepared:ref<PartFiles>,
+    backend:fn(ref<TrackRequest>) -> result<unit,string> effects {alloc,fs.meta,fs.read,fs.write,gpu})
+    -> result<array<sam_tracks.Track>,string> effects {alloc,fs.meta,fs.read,fs.write,gpu} {
+  let track_dir=path.join(struct.borrow(prepared,field=root),"tracks")
+  match files.mkdirs(str.view(track_dir)) {ok(_)=>{},err(_)=>{
+    return result.err("Cannot create the track directory")}}
+  var request=TrackRequest{model:string.copy(struct.borrow(job,field=model)),
+    source_rgb:string.copy(struct.borrow(prepared,field=part_rgb)),
+    prompt:string.copy(struct.borrow(job,field=prompt)),
+    output_dir:string.copy(str.view(track_dir)),frames:prepared.part.frames,
+    width:prepared.width,height:prepared.height}
+  let _=try backend(request)
+  let index=match files.read_text(str.view(path.join(str.view(track_dir),"tracks.tsv"))){
+    ok(value)=>value,err(_)=>{return result.err("Tracking backend wrote no tracks.tsv")}}
+  sam_tracks.parse_index(str.view(index),str.view(track_dir),prepared.part.frames)
+}
+
+// The whole job with the built-in sam3.cpp backend (preset tracker "sam3.cpp").
+pub fn run(job:ref<Job>) -> result<Manifest,string>
+    effects {alloc,ffi,fs.meta,fs.read,fs.write,gpu,process} {
+  let selected=string.copy(struct.borrow(struct.borrow(job,field=preset),field=tracker))
+  if selected!=sam3cpp_tracker() {
+    return result.err(text.concat("Tracker ",text.concat(str.view(selected),
+      " is supplied by the caller; use run_with_backend")))}
+  var prepared=try prepare_part(job)
+  var tracks=try track_sam3cpp(job,prepared)
+  finish(job,prepared,tracks,sam3cpp_tracker())
+}
+
+// The whole job with a caller-supplied backend (preset tracker "sam3.1").
+pub fn run_with_backend(job:ref<Job>,
+    backend:fn(ref<TrackRequest>) -> result<unit,string> effects {alloc,fs.meta,fs.read,fs.write,gpu},
+    name:str) -> result<Manifest,string>
+    effects {alloc,fs.meta,fs.read,fs.write,gpu,process} {
+  var prepared=try prepare_part(job)
+  var tracks=try track_external(job,prepared,backend)
+  finish(job,prepared,tracks,name)
+}
+
+// Run the job and write <output_dir>/manifest.json; returns the manifest path.
+pub fn run_and_write(job:ref<Job>) -> result<string,string>
+    effects {alloc,ffi,fs.meta,fs.read,fs.write,gpu,process} {
+  var manifest=try run(job)
+  let encoded=try encode_manifest(manifest)
+  let target=path.join(struct.borrow(job,field=output_dir),"manifest.json")
+  match files.write_text(str.view(target),str.view(encoded)) {ok(_)=>{},
+    err(problem)=>{return result.err(text.concat("Cannot write the swap-mask manifest: ",
+      problem.message))}}
+  result.ok(target)
+}

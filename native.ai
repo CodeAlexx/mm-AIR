@@ -11,10 +11,12 @@ import std.tasks as tasks
 import std.system as system
 import std.path as path
 import "generate.ai" as generation
-import "../../AIR/toolkits/portable/fonts.ai" as fonts
-import "../../AIR/toolkits/portable/dialogs.ai" as dialogs
+import "../AIR/toolkits/portable/fonts.ai" as fonts
+import "../AIR/toolkits/portable/dialogs.ai" as dialogs
 import "native_generate.ai" as form
 import "native_krea.ai" as krea_form
+import "native_flux1.ai" as flux_form
+import std.generation_backend as lifecycle
 import "native_h3.ai" as h3_form
 import "native_seed.ai" as seed
 import "native_view.ai" as presenter
@@ -47,30 +49,43 @@ fn restore(ui:ref<w.Ui>,request:ref<parameters.QwenImageRequest>)->unit effects 
   if struct.borrow(request,field=source)!="" or array.len(struct.borrow(request,field=references))!=0{presenter.select_image_edit(ui)}
   ()
 }
-fn load(file:str,qwen:ref<parameters.QwenImageRequest>,krea:ref<parameters.KreaRequest>,h3_state:ref<parameters.H3Parameters>,h3_active:ref<bool>)->result<bool,string> effects {alloc,fs.read} {
+fn load(file:str,qwen:ref<parameters.QwenImageRequest>,krea:ref<parameters.KreaRequest>,h3_state:ref<parameters.H3Parameters>,h3_active:ref<bool>,flux:ref<parameters.Flux1Request>,flux_active:ref<bool>)->result<bool,string> effects {alloc,fs.read} {
   let source=match files.read_text(file){ok(value)=>value,err(problem)=>{return result.err(string.copy(problem.message))},}
-  load_text(source,qwen,krea,h3_state,h3_active)
+  load_text(source,qwen,krea,h3_state,h3_active,flux,flux_active)
 }
-fn load_text(source:str,qwen:ref<parameters.QwenImageRequest>,krea:ref<parameters.KreaRequest>,h3_state:ref<parameters.H3Parameters>,h3_active:ref<bool>)->result<bool,string> effects {alloc} {
+fn load_text(source:str,qwen:ref<parameters.QwenImageRequest>,krea:ref<parameters.KreaRequest>,h3_state:ref<parameters.H3Parameters>,h3_active:ref<bool>,flux:ref<parameters.Flux1Request>,flux_active:ref<bool>)->result<bool,string> effects {alloc} {
+  if parameters.is_flux1(source) {
+    let decoded=try parameters.decode_flux1(source)
+    let _=ref.swap(flux,decoded)
+    let _=ref.swap(flux_active,true)
+    let _=ref.swap(h3_active,false)
+    return result.ok(false)
+  }
   if parameters.is_h3(source){
     let decoded=try parameters.decode_h3(source)
+    let _=ref.swap(flux_active,false)
     let old=ref.swap(h3_state,decoded)
     let prior=ref.swap(h3_active,true)
     return result.ok(false)
   }
   if parameters.is_krea(source){
     let decoded=try parameters.decode_krea(source)
+    let _=ref.swap(flux_active,false)
     let old=ref.swap(krea,decoded)
     let previous=ref.swap(h3_active,false)
     return result.ok(true)
   }
   let decoded=try parameters.decode_qwen_image(source)
+  let _=ref.swap(flux_active,false)
   let old=ref.swap(qwen,decoded)
   let previous=ref.swap(h3_active,false)
   result.ok(false)
 }
-fn save(ui:ref<w.Ui>,prior:ref<parameters.QwenImageRequest>,krea_prior:ref<parameters.KreaRequest>,krea:bool,file:str,h3_state:ref<parameters.H3Parameters>,h3_active:bool)->result<unit,string> effects {alloc,fs.write} {
-  let encoded=if h3_active{
+fn save(ui:ref<w.Ui>,prior:ref<parameters.QwenImageRequest>,krea_prior:ref<parameters.KreaRequest>,krea:bool,file:str,h3_state:ref<parameters.H3Parameters>,h3_active:bool,flux_active:bool)->result<unit,string> effects {alloc,fs.write} {
+  let encoded=if flux_active {
+    var value=try flux_form.read(ui,1200)
+    try parameters.encode_flux1(value)
+  }else{if h3_active{
     var value=try h3_form.request(ui,700)
     try parameters.encode_h3(value,struct.borrow(h3_state,field=loras))
   }else{if krea{
@@ -79,18 +94,38 @@ fn save(ui:ref<w.Ui>,prior:ref<parameters.QwenImageRequest>,krea_prior:ref<param
   }else{
     var request=try presenter.qwen_request(ui,prior)
     try parameters.encode_qwen_image(request)
-  }}
+  }}}
   let temporary=text.concat(file,".tmp")
   match files.write_atomic(file,temporary,encoded){ok(_)=>result.ok(()),err(problem)=>result.err(string.copy(problem.message)),}
 }
+fn layout(ui:ref<w.Ui>,request:ref<parameters.QwenImageRequest>,krea_request:ref<parameters.KreaRequest>,krea:bool,krea_page:u64,
+    history:ref<array<library.Item>>,h3_state:ref<parameters.H3Parameters>,h3_active:bool,flux:ref<parameters.Flux1Request>,flux_active:bool)
+    -> unit effects {alloc} {
+  presenter.layout(ui,request,krea_request,krea,krea_page,history,h3_state,h3_active)
+  flux_form.restore(ui,1200,flux)
+  if flux_active {presenter.select_flux1(ui)}
+}
 pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write,gpu,io.write,net,process,random,thread,time,ui} {
  task.scope {
+  // H3 resolutions, profiles and generation policy (MM_AIR_H3_APP_PRESET).
+  var h3_presets:h3.Presets=match generation.app_presets(){ok(value)=>value,
+    err(problem)=>{io.ewrite(problem)
+      io.ewrite("\n")
+      return 2},}
   var request=parameters.QwenImageRequest{prompt:"",seed:42,width:2048,height:2048,
-    steps:40,scheduler:0,sampler:0,source:"",references:[],output:"result.png",enhance:false}
+    steps:40,scheduler:0,sampler:0,source:"",references:[],output:"result.png",enhance:false,loras:[]}
   var krea_request=parameters.KreaRequest{prompt:"",seed:42,width:1024,height:1024,
     output:"krea-result.png",loras:[]}
-  var h3_state=parameters.H3Parameters{request:h3.request("",0,0,3,1,2,4,42,6,[],"movie.mp4"),loras:[]}
+  var h3_state=parameters.H3Parameters{request:h3.request("",0,0,3,1,2,3,42,6,[],"movie.mp4"),loras:[]}
+  match h3.use_preset_geometry(h3_presets,struct.borrow(h3_state,field=request)){ok(_)=>{},
+    err(problem)=>{var held:h3.Problem=problem
+      io.ewrite(h3.describe(held))
+      io.ewrite("\n")
+      return 2},}
   var h3_active=true
+  var flux_request:parameters.Flux1Request=parameters.flux1_defaults()
+  var flux_active=false
+  var generate_flux=false
   var krea=false
   var generate_h3=true
   var generate_krea=false
@@ -106,7 +141,7 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write
       return 2}
     let value=view.get(args,index+1)
     if option=="--parameters"{
-      krea=match load(value,request,krea_request,h3_state,h3_active){ok(loaded)=>loaded,err(problem)=>{io.ewrite(problem)
+      krea=match load(value,request,krea_request,h3_state,h3_active,flux_request,flux_active){ok(loaded)=>loaded,err(problem)=>{io.ewrite(problem)
         return 2},}
     }else{if option=="--render"{render=string.copy(value)}else{
       if option=="--save"{saved=string.copy(value)}else{
@@ -126,18 +161,21 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write
   var app=match if render!=""{shell.offscreen("MM-Air · MiniMax H3 Studio",1600,1000)}else{shell.open("MM-Air · MiniMax H3 Studio",1600,1000,"")}{
     ok(value)=>value,err(problem)=>{io.ewrite(problem)
       return 1},}
-  presenter.layout(ui,request,krea_request,krea,krea_page,history,h3_state,h3_active)
-  if not krea and not h3_active{restore(ui,request)}
+  layout(ui,request,krea_request,krea,krea_page,history,h3_state,h3_active,flux_request,flux_active)
+  if not krea and not h3_active and not flux_active{restore(ui,request)}
   if preview!=""{match preview_file(ui,preview){ok(_)=>{},err(problem)=>{
     io.ewrite(problem)
     shell.close(app)
     return 6},}}
   var outcome:i32=0
-  if saved!=""{match save(ui,request,krea_request,krea,saved,h3_state,h3_active){ok(_)=>{},err(problem)=>{io.ewrite(problem)
+  if saved!=""{match save(ui,request,krea_request,krea,saved,h3_state,h3_active,flux_active){ok(_)=>{},err(problem)=>{io.ewrite(problem)
     shell.close(app)
     return 3},}}
   var closed=false
   var jobs:array<task<generation.Outcome>> = []
+  var flux_jobs:array<task<flux_form.Completed>>=[]
+  var flux_runtime:flux_form.Runtime=flux_form.empty()
+  var flux_cancel=false
   var exports:array<task<movie_view.ExportOutcome>> = []
   var receivers:array<channel.Receiver> = []
   var running_parameters:string=""
@@ -145,7 +183,40 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write
   var running_movie_shot:u64=0
   var running_movie_seed:u64=0
   var cancellations:array<tasks.Cancel> = []
-  loop{if closed and array.len(jobs)==0 and array.len(exports)==0{break}
+  loop{if closed and array.len(jobs)==0 and array.len(exports)==0 and array.len(flux_jobs)==0{break}
+    if array.len(flux_jobs)!=0 {
+      match task.wait_any(flux_jobs,0) {some(_)=>{
+        var completed:flux_form.Completed=task.join(option.unwrap(array.pop(flux_jobs)))
+        flux_runtime=struct.replace(completed,flux_form.empty(),field=state)
+        if completed.problem!="" {
+          w.set_text(ui,w.find(ui,20),completed.problem)
+          w.enable(ui,w.find(ui,14),true)
+          w.enable(ui,w.find(ui,15),false)
+        }else{if completed.event.status==lifecycle.Status.Running {
+          w.set_text(ui,w.find(ui,20),text.concat("FLUX.1 DEV · ",text.concat(string.from_int(completed.event.completed_units),
+            text.concat(" / ",string.from_int(completed.event.total_units)))))
+          var work:flux_form.Work=flux_form.Work {state:ref.swap(flux_runtime,flux_form.empty()),
+            action:if closed or flux_cancel {flux_form.Action.Cancel}else{flux_form.Action.Advance}}
+          array.push(flux_jobs,task.spawn(work,fn=flux_form.execute))
+        }else{
+          w.enable(ui,w.find(ui,14),true)
+          w.enable(ui,w.find(ui,15),false)
+          w.set_text(ui,w.find(ui,20),if completed.event.status==lifecycle.Status.Complete {"FLUX.1 DEV PNG saved"}else{"FLUX.1 DEV cancelled"})
+          if completed.event.status==lifecycle.Status.Complete and not closed {
+            preview=string.copy(completed.event.output_path)
+            match library.prep_output(preview,running_parameters) {ok(entry)=>{
+              array.push(history,entry)
+              presenter.history_rows(ui,history)
+              if history_error=="" {let _=library.save_history(history)}
+            },err(problem)=>w.set_text(ui,w.find(ui,20),problem),}
+            match preview_file(ui,preview) {ok(_)=>{},err(problem)=>w.set_text(ui,w.find(ui,20),problem),}
+            // Preserve the sampler's .png.json numerical/telemetry receipt.
+            let sidecar=text.concat(preview,".parameters.json")
+            let _=files.write_atomic(sidecar,text.concat(sidecar,".tmp"),running_parameters)
+          }
+        }}
+      },none=>{},}
+    }
     if array.len(exports)!=0{
       match task.wait_any(exports,0){some(_)=>{
         var completed=task.join(option.unwrap(array.pop(exports)))
@@ -217,7 +288,7 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write
     // GPU resources. Do not block in task.join while its channel needs draining.
     if closed{time.sleep_ms(20)
       continue}
-    if movie_view.active(ui) and not running_movie{
+    if movie_view.active(ui) and not running_movie and array.len(flux_jobs)==0{
       let row=w.selected_of(ui,w.find(ui,9012))
       if row!=0 and row<=array.len(struct.borrow(movie_state,field=shots)) and row!=movie_state.selected_shot+1{
         match movie_view.commit(ui,movie_state){
@@ -229,7 +300,7 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write
       }
     }
     let selected=w.selected_of(ui,w.find(ui,41))
-    if selected!=history_selected{
+    if selected!=history_selected and array.len(flux_jobs)==0{
       history_selected=selected
       if selected!=0 and selected<=array.len(history){
         let entry=array.borrow(history,selected-1)
@@ -265,6 +336,14 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write
       let command=array.borrow(commands,command_index)
       command_index=command_index+1
       if closed{break}
+      // Keep model compute's process-read observation window quiet. History,
+      // source/file dialogs and parameter I/O resume after the terminal event.
+      if array.len(flux_jobs)!=0 {
+        if command.key==15 {flux_cancel=true
+          w.enable(ui,w.find(ui,15),false)
+          w.set_text(ui,w.find(ui,20),"Cancelling FLUX.1 DEV at the next Euler boundary")}
+        continue
+      }
       if running_movie and command.key>=9002 and command.key<=9059{
         w.set_text(ui,w.find(ui,20),"Wait for the current H3 take to finish")
         continue}
@@ -406,7 +485,7 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write
         movie_view.generating(ui,true)
         w.enable(ui,w.find(ui,14),false)
         w.enable(ui,w.find(ui,15),false)
-        w.set_text(ui,w.find(ui,20),"Generating Movie take with H3 · CK INT8")
+        w.set_text(ui,w.find(ui,20),"Generating Movie take with H3 · Dense INT8")
         continue
       }
       if command.key==43{
@@ -423,12 +502,13 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write
         let selected=w.selected_of(ui,w.find(ui,41))
         if selected==0 or selected>array.len(history){continue}
         let entry=array.borrow(history,selected-1)
-        krea=match load_text(struct.borrow(entry,field=parameters),request,krea_request,h3_state,h3_active){
+        krea=match load_text(struct.borrow(entry,field=parameters),request,krea_request,h3_state,h3_active,flux_request,flux_active){
           ok(value)=>value,err(problem)=>{w.set_text(ui,w.find(ui,20),problem)
             continue},}
         krea_page=0
-        presenter.layout(ui,request,krea_request,krea,krea_page,history,h3_state,h3_active)
-        if h3_active{h3_form.restore(ui,700,struct.borrow(h3_state,field=request))}else{if krea{krea_form.restore(ui,300,krea_request)}else{restore(ui,request)}}
+        layout(ui,request,krea_request,krea,krea_page,history,h3_state,h3_active,flux_request,flux_active)
+        if flux_active{flux_form.restore(ui,1200,flux_request)
+          presenter.select_flux1(ui)}else{if h3_active{h3_form.restore(ui,700,struct.borrow(h3_state,field=request))}else{if krea{krea_form.restore(ui,300,krea_request)}else{restore(ui,request)}}}
         w.enable(ui,w.find(ui,14),array.len(jobs)==0)
         w.enable(ui,w.find(ui,15),array.len(cancellations)!=0)
         if preview!=""{let _=preview_file(ui,preview)}
@@ -440,24 +520,28 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write
           continue},}}
         if command.key==62{
           if not presenter.image_edit(ui){generate_h3=h3_active
-            generate_krea=krea}
+            generate_krea=krea
+            generate_flux=flux_active}
           h3_active=false
           krea=false
+          flux_active=false
           presenter.select_image_edit(ui)
         }else{
           if presenter.image_edit(ui){h3_active=generate_h3
-            krea=generate_krea}
-          presenter.select_model(ui,krea,h3_active)
+            krea=generate_krea
+            flux_active=generate_flux}
+          if flux_active {presenter.select_flux1(ui)}else{presenter.select_model(ui,krea,h3_active)}
         }
         w.enable(ui,w.find(ui,14),array.len(jobs)==0)
         continue
       }
-      if command.key==16 or command.key==17 or command.key==18{
+      if command.key==16 or command.key==17 or command.key==18 or command.key==19{
         h3_active=command.key==18
         krea=command.key==17
-        presenter.select_model(ui,krea,h3_active)
+        flux_active=command.key==19
+        if flux_active {presenter.select_flux1(ui)}else{presenter.select_model(ui,krea,h3_active)}
         w.enable(ui,w.find(ui,14),array.len(jobs)==0)
-        w.set_text(ui,w.find(ui,20),if h3_active{"H3 video and audio generation"}else{""})
+        w.set_text(ui,w.find(ui,20),if h3_active{"H3 video and audio generation"}else{if flux_active{"FLUX.1 DEV image generation"}else{""}})
         continue
       }
       if h3_active and (command.key==717 or command.key==719){
@@ -513,7 +597,7 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write
           if count==0{krea_page=0}else{if krea_page*3>=count{krea_page=(count-1)/3}}
         }
         krea_request=edited
-        presenter.layout(ui,request,krea_request,krea,krea_page,history,h3_state,h3_active)
+        layout(ui,request,krea_request,krea,krea_page,history,h3_state,h3_active,flux_request,flux_active)
         krea_form.restore(ui,300,krea_request)
         w.enable(ui,w.find(ui,14),array.len(jobs)==0)
         w.enable(ui,w.find(ui,15),array.len(cancellations)!=0)
@@ -522,13 +606,14 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write
       }
       if command.key==10{
         match dialogs.open("","Load MM-Air parameters","JSON\t*.json"){
-          ok(selection)=>match selection{some(file)=>match load(file,request,krea_request,h3_state,h3_active){
+          ok(selection)=>match selection{some(file)=>match load(file,request,krea_request,h3_state,h3_active,flux_request,flux_active){
             ok(loaded)=>{krea=loaded
               krea_page=0
-              presenter.layout(ui,request,krea_request,krea,krea_page,history,h3_state,h3_active)
+              layout(ui,request,krea_request,krea,krea_page,history,h3_state,h3_active,flux_request,flux_active)
               w.enable(ui,w.find(ui,14),array.len(jobs)==0)
               w.enable(ui,w.find(ui,15),array.len(cancellations)!=0)
-              if h3_active{h3_form.restore(ui,700,struct.borrow(h3_state,field=request))}else{if krea{krea_form.restore(ui,300,krea_request)}else{restore(ui,request)}}
+              if flux_active{flux_form.restore(ui,1200,flux_request)
+          presenter.select_flux1(ui)}else{if h3_active{h3_form.restore(ui,700,struct.borrow(h3_state,field=request))}else{if krea{krea_form.restore(ui,300,krea_request)}else{restore(ui,request)}}}
               if preview!=""{let _=preview_file(ui,preview)}
               w.set_text(ui,w.find(ui,20),"Parameters loaded")},
             err(problem)=>w.set_text(ui,w.find(ui,20),problem),},none=>{},},
@@ -536,7 +621,7 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write
       }
       if command.key==11{
         match dialogs.save("","parameters.json","Save MM-Air parameters","JSON\t*.json","json"){
-          ok(selection)=>match selection{some(file)=>match save(ui,request,krea_request,krea,file,h3_state,h3_active){
+          ok(selection)=>match selection{some(file)=>match save(ui,request,krea_request,krea,file,h3_state,h3_active,flux_active){
             ok(_)=>w.set_text(ui,w.find(ui,20),"Parameters saved"),
             err(problem)=>w.set_text(ui,w.find(ui,20),problem),},none=>{},},
           err(problem)=>w.set_text(ui,w.find(ui,20),dialogs.message(problem)),}
@@ -548,10 +633,28 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write
       }
       if command.key==13{
         match dialogs.save("",if h3_active{"movie.mp4"}else{"result.png"},"Save generated media",if h3_active{"MP4\t*.mp4"}else{"PNG\t*.png"},if h3_active{"mp4"}else{"png"}){
-          ok(selection)=>match selection{some(file)=>w.set_text(ui,w.find(ui,if h3_active{715}else{if krea{306}else{115}}),file),none=>{},},
+          ok(selection)=>match selection{some(file)=>w.set_text(ui,w.find(ui,if h3_active{715}else{if krea{306}else{if flux_active{1213}else{115}}}),file),none=>{},},
           err(problem)=>w.set_text(ui,w.find(ui,20),dialogs.message(problem)),}
       }
       if command.key==14 and array.len(jobs)==0{
+        if flux_active {
+          if array.len(exports)!=0 {w.set_text(ui,w.find(ui,20),"Wait for the current export before generation")
+            continue}
+          var proposed:parameters.Flux1Request=match flux_form.read(ui,1200) {ok(value)=>value,err(problem)=>{
+            w.set_text(ui,w.find(ui,20),problem)
+            continue},}
+          running_parameters=match parameters.encode_flux1(proposed) {ok(value)=>value,err(problem)=>{
+            w.set_text(ui,w.find(ui,20),problem)
+            continue},}
+          flux_request=parameters.copy_flux1(proposed)
+          flux_cancel=false
+          var work:flux_form.Work=flux_form.Work {state:ref.swap(flux_runtime,flux_form.empty()),action:flux_form.Action.Begin(proposed)}
+          array.push(flux_jobs,task.spawn(work,fn=flux_form.execute))
+          w.enable(ui,w.find(ui,14),false)
+          w.enable(ui,w.find(ui,15),true)
+          w.set_text(ui,w.find(ui,20),"Starting FLUX.1 DEV")
+          continue
+        }
         if h3_active{
           var proposed=match h3_form.request(ui,700){ok(value)=>value,err(problem)=>{
             w.set_text(ui,w.find(ui,20),problem)
@@ -609,10 +712,10 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write
             cancel_path:cancel_path}
           array.push(receivers,receiver)
           array.push(cancellations,cancellation)
-          array.push(jobs,task.spawn(work,fn=generation.run_krea_ck_cancelable))
+          array.push(jobs,task.spawn(work,fn=generation.run_krea_cancelable))
           w.enable(ui,w.find(ui,14),false)
           w.enable(ui,w.find(ui,15),true)
-          w.set_text(ui,w.find(ui,20),"Starting Krea 2 Turbo with CK INT8")
+          w.set_text(ui,w.find(ui,20),"Starting Krea 2 Turbo")
           continue
         }
         var proposed=match presenter.qwen_request(ui,request){
@@ -634,10 +737,10 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write
           cancel_path:cancel_path}
         array.push(receivers,receiver)
         array.push(cancellations,cancellation)
-        array.push(jobs,task.spawn(work,fn=generation.run_qwen_image_ck_cancelable))
+        array.push(jobs,task.spawn(work,fn=generation.run_qwen_image_cancelable))
         w.enable(ui,w.find(ui,14),false)
         w.enable(ui,w.find(ui,15),true)
-        w.set_text(ui,w.find(ui,20),"Starting Qwen-Image-2.1 with CK INT8")
+        w.set_text(ui,w.find(ui,20),"Starting Qwen-Image-2.1")
       }
       if command.key==15 and array.len(cancellations)!=0{
         if tasks.request(array.borrow(cancellations,0)){

@@ -3,6 +3,7 @@
 // H3 geometry mapping and final compositing remain AIR-owned.
 module app.mm_air.masked_runtime
 
+import "mask_gpu.ai" as mask_gpu
 import std.files as files
 import std.media as media
 import std.media_input as input
@@ -142,7 +143,7 @@ fn decode_source(source:str,output:str,width:u64,height:u64,frames:u64,video:boo
   result.ok(decoded)
 }
 
-fn decoded_mask(source:str,output:str,width:u64,height:u64,frames:u64)
+pub fn decoded_mask(source:str,output:str,width:u64,height:u64,frames:u64)
     -> result<edit.Mask,string> effects {alloc,fs.meta,fs.read,fs.write,process} {
   let expected:u64=width*height*frames
   let kind=input.classify_path(source)
@@ -204,7 +205,14 @@ fn encode_crop(raw:str,output:str,width:u64,height:u64,frames:u64)
 
 pub fn prepare(source:str,final_output:str,scratch_root:str,frames:u64,
                settings:ref<Settings>) -> result<Prepared,string>
-    effects {alloc,fs.meta,fs.read,fs.write,process,time} {
+    effects {alloc,fs.meta,fs.read,fs.write,gpu,process,time} {
+  prepare_bounded(source,final_output,scratch_root,frames,settings,0)
+}
+
+// `max_pixels`: the H3 working crop is scaled down to at most this many pixels (the requested size).
+pub fn prepare_bounded(source:str,final_output:str,scratch_root:str,frames:u64,
+               settings:ref<Settings>,max_pixels:u64) -> result<Prepared,string>
+    effects {alloc,fs.meta,fs.read,fs.write,gpu,process,time} {
   if not settings.preserve_outside {
     return result.err("Masked Character Swap requires Preserve Outside Mask; use ordinary Character Swap for full-frame generation")
   }
@@ -253,12 +261,15 @@ pub fn prepare(source:str,final_output:str,scratch_root:str,frames:u64,
     try decoded_mask(struct.borrow(settings,field=mask_path),str.view(mask_raw),
       source_width,source_height,frames)
   }
-  var cleaned=edit.cleanup(authored,settings.cleanup,settings.feather,settings.expand)
+  var cleaned=if mask_gpu.supported(settings.cleanup) {
+      try mask_gpu.cleanup(authored,settings.feather,settings.expand)
+    } else {edit.cleanup(authored,settings.cleanup,settings.feather,settings.expand)}
   // Removal must cover the complete old silhouette before the reconstructed
   // background is inserted. The replacement receives its own tighter SAM 3
   // matte after generation, so this expansion cannot enlarge the new subject.
-  var removal=edit.cleanup(authored,settings.cleanup,4,12)
-  var track=try edit.crop_track(removal,settings.crop_strategy,settings.padding,256,32)
+  var removal=if mask_gpu.supported(settings.cleanup) {try mask_gpu.cleanup(authored,4,12)}
+    else {edit.cleanup(authored,settings.cleanup,4,12)}
+  var track=edit.cap_working(try edit.crop_track(removal,settings.crop_strategy,settings.padding,256,32),max_pixels,32)
   var crop_pixels=try edit.extract_rgb(bytes.view(source_pixels),frames,source_width,
     source_height,track)
   match files.write_bytes(str.view(cropped_raw),array.view(crop_pixels)) {
@@ -304,6 +315,15 @@ pub fn description(value:ref<Prepared>) -> string effects {alloc} {
   string.append(out," frames")
   string.append(out," · token-group 2×2")
   out
+}
+
+// Composite against another video than the H3 edit source (Video Swap: H3 sees a greyed edit
+// source, but the result is blended over the original part). Same geometry and frame count.
+pub fn use_composite_source(value:ref<Prepared>,video:str) -> result<unit,string>
+    effects {alloc,fs.meta,fs.read,fs.write,process} {
+  var _pixels=try decode_source(video,str.view(struct.borrow(value,field=source_raw)),
+    value.source_width,value.source_height,value.frames,true)
+  result.ok(())
 }
 
 pub fn finish(value:ref<Prepared>) -> result<unit,string>

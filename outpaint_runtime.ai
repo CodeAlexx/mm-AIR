@@ -144,7 +144,7 @@ fn padded(source:str,output:str,value:ref<outpaint.Geometry>,frames:u64,
 
 pub fn prepare(source:str,final_output:str,scratch_root:str,frames:u64,
                settings:ref<Settings>)->result<Prepared,string>
-    effects{alloc,fs.meta,fs.read,fs.write,process,time}{
+    effects{alloc,fs.meta,fs.read,fs.write,gpu,process,time}{
   var source_info=try inspect(source,scratch_root)
   var geometry=try outpaint.geometry(source_info.width,source_info.height,
     settings.target_width,settings.target_height,settings.direction,settings.anchor)

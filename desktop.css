@@ -372,3 +372,9 @@ gridview child:selected { background: alpha(@accent, .30); }
 popover listview > row, popover listview > row label { color: @ink; }
 popover listview > row:selected, popover listview > row:hover { background: alpha(@accent, .30); color: @ink; }
 popover > contents { background: @panel; border: 1px solid @rule; border-radius: 4px; box-shadow: none; }
+
+/* LoRA library list (and other list boxes): dark like the other lists */
+list, list > row { background: @carbon; color: @ink; }
+list > row label { color: @ink; }
+list > row:hover { background: alpha(@accent, .18); }
+list > row:selected { background: alpha(@accent, .30); color: @ink; }

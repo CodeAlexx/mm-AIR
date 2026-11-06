@@ -20,7 +20,7 @@ pub fn maximum_character_pictures() -> u64 effects {} { 7 }
 // identity pictures, and a prompt. Mode 3 is its explicit-mask counterpart.
 pub fn edit_character_replace(value:u32)->bool effects{}{value==2}
 pub fn edit_requires_identity(value:u32)->bool effects{}{
-  value==2 or value==3
+  value==2 or value==3 or value==8
 }
 pub fn edit_requires_mask(value:u32)->bool effects{}{
   value==0 or value==1 or value==3 or value==4

@@ -580,6 +580,22 @@ var height=current.height
     working_height:working_height,crops:crops})
 }
 
+// Bound the H3 working size to `max_pixels` (0: no bound), keeping the crop's aspect; crops are
+// resampled to the working size, so a 1080x1920 source runs at the requested H3 size.
+pub fn cap_working(track:Track own,max_pixels:u64,alignment:u64) -> Track effects {alloc} {
+  var held=track
+  let area:u64=held.working_width*held.working_height
+  if max_pixels==0 or area<=max_pixels or alignment==0 {return held}
+  let scale:f64=math.sqrt(cast.float(max_pixels)/cast.float(area))
+  var w:u64=cast.sat(math.floor(cast.float(held.working_width)*scale/cast.float(alignment)))*alignment
+  var h:u64=cast.sat(math.floor(cast.float(held.working_height)*scale/cast.float(alignment)))*alignment
+  if w<alignment{w=alignment}
+  if h<alignment{h=alignment}
+  struct.set(held,w,field=working_width)
+  struct.set(held,h,field=working_height)
+  held
+}
+
 pub fn h3_geometry(frames:u64,width:u64,height:u64)
     -> result<H3MaskGeometry,string> effects {alloc} {
   if frames < 4 or width  ==  0 or height  ==  0 or rem(width,32)  !=  0 or

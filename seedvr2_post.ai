@@ -11,7 +11,7 @@ import std.files as files
 import std.text as text
 
 pub type Settings=struct {variant:u32,size_mode:u32,custom_width:u64,custom_height:u64,
-  preserve_audio:bool,seed:u64,quality:u32,memory:u32}
+  preserve_audio:bool,seed:u64,quality:u32,memory:u32,fast:bool}
 
 pub type Completed=struct {metadata:string,source_output:string,final_output:string,
   runtime_ms:u64,peak_vram_bytes:u64}
@@ -20,7 +20,16 @@ pub fn settings(variant:u32,size_mode:u32,custom_width:u64,custom_height:u64,
     preserve_audio:bool,seed:u64,quality:u32,memory:u32)->Settings effects {} {
   Settings {variant:variant,size_mode:size_mode,custom_width:custom_width,
     custom_height:custom_height,preserve_audio:preserve_audio,seed:seed,
-    quality:quality,memory:memory}
+    quality:quality,memory:memory,fast:false}
+}
+
+// Opt-in SeedVR2 fast mode (tensor-core VAE convolutions plus the stream-ordered
+// buffer pool): about twice as fast, output pixels differ slightly from the default.
+pub fn with_fast(value:Settings,fast:bool)->Settings effects {} {
+  Settings {variant:value.variant,size_mode:value.size_mode,
+    custom_width:value.custom_width,custom_height:value.custom_height,
+    preserve_audio:value.preserve_audio,seed:value.seed,quality:value.quality,
+    memory:value.memory,fast:fast}
 }
 
 fn required(name:str)->result<string,string> effects {alloc,env,fs.read,fs.meta} {
@@ -50,7 +59,8 @@ fn request(info:seed_media.SourceInfo,value:Settings)->config.Request effects {}
     seed:value.seed,preserve_audio:value.preserve_audio,
     memory:if value.memory==1{config.MemoryMode.LowVram}
       else if value.memory==2{config.MemoryMode.Performance}else{config.MemoryMode.Auto},
-    quality:if value.quality==1{config.Quality.EightStep}else{config.Quality.OneStep}}
+    quality:if value.quality==1{config.Quality.EightStep}else{config.Quality.OneStep},
+    fast_convolution:value.fast}
 }
 
 fn memory_name(value:u32)->string effects {alloc} {
@@ -92,6 +102,7 @@ fn metadata(report:ref<seed_media.Report>,sources:ref<seed_session.Sources>,
   codec.field_u64(writer,"temporal_chunks",report.chunks)
   codec.field_u64(writer,"max_chunk_frames",report.max_chunk_frames)
   codec.field_u64(writer,"overlap_frames",report.overlap_frames)
+  if value.fast{codec.field_bool(writer,"fast_convolution",true)}
   codec.end_object(writer)
   match codec.finish(writer){ok(found)=>result.ok(found),
     err(problem)=>result.err(codec.describe(problem))}

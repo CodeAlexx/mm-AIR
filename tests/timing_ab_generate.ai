@@ -2,6 +2,7 @@
 // sequentially and records each exact-spliced MP4 plus repair sidecar.
 module app.mm_air.tests.timing_ab_generate
 
+import std.inference.h3.policy as h3_policy
 import "../generate.ai" as generation
 import "../repair_runtime.ai" as repair_runtime
 import std.inference.h3.media as media
@@ -64,7 +65,7 @@ pub fn main(args:view<str>)->i32
       session.Model.Reference,session.Task.Ref2VA,geometry,references,[],
       str.view(output),0,"",202609131337,7,session.Projection.ExactBF16,
       session.Projection.RowScaledI8,session.Attention.DenseInt8,
-      channel.ticket(receiver),session.Schedule.Exponential)
+      channel.ticket(receiver),session.Schedule.Exponential,h3_policy.Sampler.ResMultistep)
     let first:u64=if facts.frames>36{12}else{0}
     let ending:u64=if facts.frames>36{36}else{facts.frames}
     generation.enable_repair(job,repair_runtime.settings(first,ending,5,5,2.0,

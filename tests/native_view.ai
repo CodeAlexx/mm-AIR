@@ -1,4 +1,5 @@
 module app.mm_air.tests.native_view
+import "h3_presets_fixture.ai" as fixture
 import "../native_view.ai" as presenter
 import "../native_h3.ai" as h3_form
 import "../parameters.ai" as parameters
@@ -6,7 +7,7 @@ import "../library.ai" as library
 import "../native_movie.ai" as movie_view
 import "../movie_project.ai" as movie
 import std.inference.h3.request as h3
-import "../../../AIR/toolkits/portable/fonts.ai" as fonts
+import "../../AIR/toolkits/portable/fonts.ai" as fonts
 import std.widgets as w
 import std.shell as shell
 import std.image as image
@@ -24,7 +25,9 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write
   var qwen=parameters.QwenImageRequest{prompt:"Change the daylight to sunset, preserving the subject.",
     seed:42,width:2048,height:2048,steps:40,scheduler:0,sampler:0,source:"",references:[],output:"edit.png"}
   var krea=parameters.KreaRequest{prompt:"",seed:42,width:1024,height:1024,output:"krea.png",loras:[]}
-  var state=parameters.H3Parameters{request:h3.request("A cinematic landscape with natural motion and synchronized environmental audio.",0,0,3,1,2,4,42,6,[],"movie.mp4"),loras:[]}
+  var state=parameters.H3Parameters{request:h3.request("A cinematic landscape with natural motion and synchronized environmental audio.",0,0,3,1,2,3,42,6,[],"movie.mp4"),loras:[]}
+  var presets:h3.Presets=fixture.presets()
+  fixture.with_preset_geometry(presets,struct.borrow(state,field=request))
   var history:array<library.Item> = []
   var ui=w.new(1600,1000)
   presenter.configure(ui)
@@ -39,9 +42,9 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write
   let output=w.bounds_of(ui,w.find(ui,715))
   if output.y+cast.sat(output.height)>editor.y+cast.sat(editor.height){return 3}
   if w.enabled_of(ui,w.find(ui,61)) or not w.enabled_of(ui,w.find(ui,63)) or w.enabled_of(ui,w.find(ui,64)) or w.enabled_of(ui,w.find(ui,65)){return 4}
-  // The rightmost CK choice must be fully visible in the parameter panel.
-  let ck=w.bounds_of(ui,w.find(ui,778))
-  if ck.x+cast.sat(ck.width)>editor.x+cast.sat(editor.width) or ck.width<95{return 5}
+  // The rightmost attention choice must be fully visible in the parameter panel.
+  let rightmost=w.bounds_of(ui,w.find(ui,777))
+  if rightmost.x+cast.sat(rightmost.width)>editor.x+cast.sat(editor.width) or rightmost.width<95{return 5}
   if view.len(args)>1{if not render(ui,view.get(args,1)){return 6}}
   w.set_text(ui,w.find(ui,701),"Unsaved H3 prompt")
   let _=h3_form.select(ui,700,753)

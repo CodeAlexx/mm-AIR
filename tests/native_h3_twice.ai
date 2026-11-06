@@ -1,0 +1,59 @@
+// Two H3 generations in one process through the UI's worker (second-Generate regression).
+// Usage: native-h3-twice PARAMETERS.json; outputs get -1/-2 before the extension.
+module app.mm_air.tests.native_h3_twice
+import "../generate.ai" as generation
+import "../parameters.ai" as parameters
+import std.channel as channel
+import std.files as files
+import std.text as text
+
+fn run_once(config:ref<generation.Configuration>,state:ref<parameters.H3Parameters>,round:u64)->i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
+  var receiver=match channel.open(128,1024){ok(v)=>v,err(_)=>{return 3},}
+  var job=match generation.h3_job(config,struct.borrow(state,field=request),struct.borrow(state,field=loras),channel.ticket(receiver)){
+    ok(v)=>v,err(p)=>{io.ewrite(p)
+      let _=channel.close(receiver)
+      return 2},}
+  var code:i32=1
+  task.scope {
+    var jobs:array<task<generation.Outcome>> = [task.spawn(job,fn=generation.run)]
+    loop{
+      match channel.recv_now(receiver,time.monotonic_ns()){
+        ok(value)=>match value{some(message)=>{var update=message
+          match channel.text_of(update){some(note)=>{io.write(note)
+            io.write("\n")},none=>{},}},none=>{},},err(_)=>{},
+      }
+      match task.wait_any(jobs,0){some(_)=>{
+        var finished=task.join(option.unwrap(array.pop(jobs)))
+        io.write(text.concat("round ",string.from_int(cast.sat(round))))
+        io.write(": ")
+        io.write(finished.message)
+        io.write("\n")
+        if finished.succeeded{code=0}
+        break
+      },none=>{time.sleep_ms(10)},}
+    }
+  }
+  let _=channel.close(receiver)
+  code
+}
+
+pub fn main(args:view<str>)->i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
+  if view.len(args)!=3{io.ewrite("Usage: native-h3-twice FIRST.json SECOND.json\n")
+    return 2}
+  var config=match generation.configuration(){ok(v)=>v,err(p)=>{io.ewrite(p)
+    return 2},}
+  var round:u64=1
+  loop{
+    if round>2{break}
+    let source=match files.read_text(view.get(args,round)){ok(v)=>v,err(p)=>{io.ewrite(p.message)
+      return 2},}
+    var state=match parameters.decode_h3(source){ok(v)=>v,err(p)=>{io.ewrite(p)
+      return 2},}
+    let code=run_once(config,state,round)
+    if code!=0{return code}
+    round=round+1
+  }
+  0
+}

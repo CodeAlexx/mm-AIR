@@ -2,14 +2,14 @@
 module app.mm_air.tests.native_clipboard
 import std.widgets as w
 import "../native_commands.ai" as commands
-import "../../../AIR/toolkits/portable/clipboard.ai" as clipboard
+import "../../AIR/toolkits/portable/clipboard.ai" as clipboard
 
 fn shortcut(ui:ref<w.Ui>,code:u32)->unit effects{alloc}{
   let _=w.dispatch(ui,w.Input.Key(w.KeyPress{code:code,shift:false,control:true}))
   ()
 }
 
-pub fn main(args:view<str>)->i32 effects{alloc,env,ffi,fs.read,fs.meta,fs.write,process}{
+pub fn main(args:view<str>)->i32 effects {alloc, env, ffi, fs.meta, fs.read, fs.write, process, time}{
   var ui=w.new(720,500)
   w.begin(ui)
   let root=w.panel(ui,1,0,true,0,1,4,4)

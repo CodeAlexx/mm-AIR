@@ -2,7 +2,7 @@
 // revision 13c095e84c6d651d49ddcbdb672779cc66a7d44d (2026-09-10).
 // The source workflow generates one continuous Ref2VA orbit, selects fixed
 // frame indices, and stitches them with six-pixel black gutters. MM-Air keeps
-// that behavior in AIR; it does not execute the ComfyUI graph.
+// that behavior natively in AIR; it does not execute the source workflow graph.
 module app.mm_air.character_sheet
 
 import std.draw as draw

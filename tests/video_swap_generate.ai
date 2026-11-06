@@ -1,0 +1,90 @@
+// Video Swap runner: the source clip is the masked edit authority (Video 1), the grey-mannequin
+// clip of the tracked person is the motion reference (Video 2), and Picture 1 is the character.
+// H3 regenerates only the edit mask; the source soundtrack is reused.
+module app.mm_air.tests.video_swap_generate
+
+import std.inference.h3.policy as h3_policy
+import "../generate.ai" as generation
+import "../masked_runtime.ai" as masked
+import std.inference.h3.media as media
+import std.inference.h3.session as session
+import std.channel as channel
+import std.text as text
+
+fn failure(message:str)->i32 effects {io.write} {
+  io.ewrite(message)
+  io.ewrite("\n")
+  1
+}
+
+fn number(value:str, name:str)->result<u64,string> effects {alloc} {
+  match text.parse_u64(value) {
+    some(v)=>result.ok(v),
+    none=>result.err(text.concat(name," must be a whole number")),
+  }
+}
+
+pub fn prompt_for(character:str, role:str)->string effects {alloc} {
+  var out:string = text.copy("subject_definitions:\n<Subject 1> is ")
+  string.append(out, role)
+  string.append(out, ", whose appearance comes from <Picture 1> and whose motion, pose and placement come from the grey figure in <Video 2>.\n<Video 1> is the source video for the target video edit.\n\nsummary:\n[video editing + reference generation + audio reuse] The target video is an edited version of <Video 1>. Replace only the masked person in <Video 1> with ")
+  string.append(out, character)
+  string.append(out, " from <Picture 1>, following the exact motion, pose and timing of the grey figure in <Video 2>.\n\nretention_analysis:\n<Video 1>: partially_preserved; everything outside the edit area is kept: camera, framing, background, lighting, other people and timing.\n<Picture 1>: fully_preserved; face, hair, body, clothing and colours of the character are kept.\n<Video 2>: reference; only the motion, pose and placement of the grey figure are used; its outline shows the old clothing, which is not kept: the clothing and body shape come only from <Picture 1>.\n\ndetailed_description:\n[Shot 1] <Subject 1> stands exactly where the grey figure of <Video 2> stands and repeats its every movement frame by frame. One coherent character in every frame, no grey figure, no ghost or double outline, no extra people. The rest of <Video 1> is unchanged.\n\noverall_soundscape:\nReuse the soundtrack of <Video 1> unchanged.\n\nnon_diegetic_music:\nKeep the source music; add none.")
+  out
+}
+
+pub fn main(args:view<str>)->i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
+  if view.len(args)<11 or view.len(args)>13{
+    io.ewrite("usage: video-swap-generate SOURCE EDIT_MASK MANNEQUIN CHARACTER_IMAGE OUTPUT_MP4 FRAMES WIDTH HEIGHT EVALUATIONS SEED [CHARACTER_DESCRIPTION [COMPOSITE_SOURCE]]\n")
+    return 2
+  }
+  let frames=match number(view.get(args,6),"FRAMES"){ok(v)=>v,err(p)=>{return failure(str.view(p))},}
+  let width=match number(view.get(args,7),"WIDTH"){ok(v)=>v,err(p)=>{return failure(str.view(p))},}
+  let height=match number(view.get(args,8),"HEIGHT"){ok(v)=>v,err(p)=>{return failure(str.view(p))},}
+  let evaluations=match number(view.get(args,9),"EVALUATIONS"){ok(v)=>v,err(p)=>{return failure(str.view(p))},}
+  let seed=match number(view.get(args,10),"SEED"){ok(v)=>v,err(p)=>{return failure(str.view(p))},}
+  var configuration=match generation.configuration(){ok(value)=>value,
+    err(problem)=>{return failure(str.view(problem))},}
+  let geometry=match media.geometry(frames,width,height){ok(value)=>value,
+    err(problem)=>{var held=problem
+      return failure(str.view(media.error_message(held)))},}
+  var receiver=match channel.open(128,1024){ok(value)=>value,
+    err(problem)=>{var held=problem
+      return failure(str.view(channel.message(held)))},}
+  let character:string=if view.len(args)>=12{text.copy(view.get(args,11))}else{text.copy("the character")}
+  let prompt=prompt_for(str.view(character),"the person in the source video")
+  var references:array<string> = [string.copy(view.get(args,1)),
+    string.copy(view.get(args,3)),string.copy(view.get(args,4))]
+  var audio:array<string> = []
+  var job=generation.job(configuration,str.view(prompt),session.Model.Reference,
+    session.Task.Ref2VA,geometry,references,audio,view.get(args,5),0,"",seed,evaluations,
+    session.Projection.ConvRotI8,session.Projection.ConvRotI8,
+    session.Attention.DenseInt8,channel.ticket(receiver),session.Schedule.Exponential,h3_policy.Sampler.Euler)
+  // The mask arrives already grown and feathered; no further expansion here.
+  generation.enable_masked(job,masked.settings(view.get(args,2),false,0.0,0.0,
+    0.0,0.0,0,0,0,0,96,true))
+  if view.len(args)==13 {generation.set_masked_composite_source(job,view.get(args,12))}
+  var completed=generation.Outcome {succeeded:false,output:string.new(),
+    message:string.copy("video swap worker did not complete"),runtime_ms:0,
+    peak_vram_bytes:0}
+  task.scope {
+    var jobs:array<task<generation.Outcome>> = [task.spawn(job,fn=generation.run)]
+    loop {
+      match channel.recv_now(receiver,time.monotonic_ns()) {
+        ok(value)=>match value {some(item)=>{var update=item
+          match channel.text_of(update) {some(message)=>{io.write(str.view(message))
+            io.write("\n")},none=>{}}},none=>{}},err(_)=>{},
+      }
+      match task.wait_any(jobs,0) {some(_)=>{
+        completed=task.join(option.unwrap(array.pop(jobs)))
+        break},none=>{time.sleep_ms(50)},}
+    }
+  }
+  let _=channel.close(receiver)
+  io.write(text.concat("result=",text.concat(if completed.succeeded{"success"}
+    else{"failure"},"\n")))
+  io.write(text.concat("output=",text.concat(struct.borrow(completed,field=output),"\n")))
+  io.write(text.concat("message=",text.concat(struct.borrow(completed,field=message),"\n")))
+  if completed.succeeded{0}else{1}
+}

@@ -1,7 +1,7 @@
 // Native Generate control round-trip. Run with helper, ui, css paths.
 module app.mm_air.tests.ui_layout
 import std.process as proc
-import "../../../AIR/toolkits/desktop/ui.ai" as desk
+import "../../AIR/toolkits/desktop/ui.ai" as desk
 import std.json as json
 import std.codec as codec
 

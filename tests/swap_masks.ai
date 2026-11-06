@@ -1,0 +1,419 @@
+// Exact-pixel unit gate for the video-swap mask side: headroom, pose hold, grow,
+// blur, mannequin, check-mask tint, part-to-use planning, audio cut points,
+// track-index parsing, preset/manifest codecs and the lossless gray mask video
+// that masked_runtime.decoded_mask reads back unchanged.
+module app.mm_air.tests.swap_masks
+
+import std.files as files
+import std.path as path
+import std.text as text
+import "../swap_masks.ai" as swap
+import "../masked_edit.ai" as edit
+import "../masked_runtime.ai" as runtime
+import "../.air/deps/sam3/tracks.ai" as sam_tracks
+
+fn expect(value:bool,message:str)->unit effects {io.write}{if not value{io.ewrite(message)
+io.ewrite("\n")
+panic "swap masks test"}}
+fn b(value:u64)->byte effects{}{let lane:u8=cast.wrap(value)
+cast.bits(lane)}
+fn u(value:byte)->u64 effects{}{let lane:u8=cast.bits(value)
+cast.wrap(lane)}
+
+fn from_values(values:ref<array<u64>>)->array<byte> effects{alloc}{
+  var out:array<byte> = array.new()
+  var i:u64=0
+  loop{if i>=array.len(values){break}
+    array.push(out,b(array.get(values,i)))
+    i=i+1}
+  out
+}
+
+fn same(actual:ref<array<byte>>,expected:ref<array<u64>>,message:str)->unit
+    effects{alloc,io.write}{
+  expect(array.len(actual)==array.len(expected),message)
+  var i:u64=0
+  loop{if i>=array.len(actual){break}
+    if u(array.get(actual,i))!=array.get(expected,i){
+      io.ewrite(text.concat("index ",text.concat(str.view(string.from_int(i)),
+        text.concat(" got ",text.concat(str.view(string.from_int(u(array.get(actual,i)))),
+        text.concat(" want ",str.view(string.from_int(array.get(expected,i)))))))))
+      io.ewrite("\n")
+      expect(false,message)}
+    i=i+1}
+}
+
+fn set_pixel(values:ref<array<u64>>,width:u64,x:u64,y:u64,value:u64)->unit effects{}{
+  array.set(values,y*width+x,value)
+}
+
+fn filled(count:u64,value:u64)->array<u64> effects{alloc}{
+  var out:array<u64> = array.new()
+  var i:u64=0
+  loop{if i>=count{break}
+    array.push(out,value)
+    i=i+1}
+  out
+}
+
+// A hand-made external tracker (the SAM 3.1 contract): id 0, a later id 3,
+// and the -10000 row official SAM 3.1 writes when hot start removes an object.
+fn fake_backend(request:ref<swap.TrackRequest>)->result<unit,string>
+    effects{alloc,fs.meta,fs.read,fs.write,gpu}{
+  if request.frames!=3 or request.width!=8 or request.height!=1 {
+    return result.err("unexpected request geometry")}
+  var zero:array<u64> = [255,255,255,255,0,0,0,0, 255,255,255,255,0,0,0,0,
+    255,255,255,255,0,0,0,0]
+  var three:array<u64> = [0,0,0,0,0,0,0,0, 0,0,0,0,0,0,255,255,
+    0,0,0,0,0,0,255,255]
+  var zero_bytes=from_values(zero)
+  var three_bytes=from_values(three)
+  let root=struct.borrow(request,field=output_dir)
+  match files.write_bytes(str.view(path.join(root,"track-0.gray")),array.view(zero_bytes)){
+    ok(_)=>{},err(_)=>{return result.err("write track 0")}}
+  match files.write_bytes(str.view(path.join(root,"track-3.gray")),array.view(three_bytes)){
+    ok(_)=>{},err(_)=>{return result.err("write track 3")}}
+  match files.write_text(str.view(path.join(root,"tracks.tsv")),
+      "frame\tid\tscore\tarea\tx0\ty0\tx1\ty1\n0\t0\t0.91\t4\t0\t0\t3\t0\n1\t0\t0.91\t4\t0\t0\t3\t0\n1\t3\t0.80\t2\t6\t0\t7\t0\n2\t0\t-10000\t4\t0\t0\t3\t0\n2\t3\t0.80\t2\t6\t0\t7\t0\n"){
+    ok(_)=>{},err(_)=>{return result.err("write index")}}
+  result.ok(())
+}
+
+pub fn main(args:view<str>)->i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,process,time}{
+  // ---- headroom: union bbox rows 5..9 (height 5), fraction 0.4 -> 2 rows up.
+  var mask=filled(50,0)
+  var y:u64=5
+  loop{if y>=10{break}
+    set_pixel(mask,5,2,y,255)
+    y=y+1}
+  set_pixel(mask,5,4,8,255)
+  set_pixel(mask,5,4,9,255)
+  var input=from_values(mask)
+  var raised=swap.headroom(array.view(input),1,5,10,0.4)
+  var want=filled(50,0)
+  y=3
+  loop{if y>=10{break}
+    set_pixel(want,5,2,y,255)
+    y=y+1}
+  y=6
+  loop{if y>=10{break}
+    set_pixel(want,5,4,y,255)
+    y=y+1}
+  same(raised,want,"headroom extends each column 10% of the mask height upward")
+  var none_raised=swap.headroom(array.view(input),1,5,10,0.0)
+  same(none_raised,mask,"zero headroom is the identity on a binary mask")
+
+  // ---- hold: trailing 2-frame max.
+  var frames_in:array<u64> = [255,0, 0,0, 0,255]
+  var held_in=from_values(frames_in)
+  var held=swap.hold(array.view(held_in),3,2,2)
+  var held_want:array<u64> = [255,0, 255,0, 0,255]
+  same(held,held_want,"hold keeps each pose for 2 frames")
+  var held_one=swap.hold(array.view(held_in),3,2,1)
+  same(held_one,frames_in,"window 1 is the identity")
+
+  // ---- grow: Euclidean disk radius 2 around (3,3) in 7x7 = 13 pixels.
+  var dot=filled(49,0)
+  set_pixel(dot,7,3,3,255)
+  var dot_in=from_values(dot)
+  var grown=swap.grow(array.view(dot_in),1,7,7,2)
+  var grow_want=filled(49,0)
+  y=0
+  loop{if y>=7{break}
+    var x:u64=0
+    loop{if x>=7{break}
+      let dx:u64=if x>3{x-3}else{3-x}
+      let dy:u64=if y>3{y-3}else{3-y}
+      if dx*dx+dy*dy<=4{set_pixel(grow_want,7,x,y,255)}
+      x=x+1}
+    y=y+1}
+  same(grown,grow_want,"grow is a Euclidean disk of the radius")
+  var count:u64=0
+  var i:u64=0
+  loop{if i>=49{break}
+    if array.get(grow_want,i)==255{count=count+1}
+    i=i+1}
+  expect(count==13,"radius-2 disk has 13 pixels")
+  var grown_zero=swap.grow(array.view(dot_in),1,7,7,0)
+  same(grown_zero,dot,"radius 0 grow is the identity")
+  // Corner pixel with radius 1 on a 3x2 canvas, two frames (second empty).
+  var corner:array<u64> = [255,0,0, 0,0,0, 0,0,0, 0,0,0]
+  var corner_in=from_values(corner)
+  var corner_grown=swap.grow(array.view(corner_in),2,3,2,1)
+  var corner_want:array<u64> = [255,255,0, 255,0,0, 0,0,0, 0,0,0]
+  same(corner_grown,corner_want,"grow clips at the border and keeps frames apart")
+
+  // ---- blur: three clamp-to-edge box passes, radius 1, half-up rounding.
+  var line_values:array<u64> = [0,0,255,0,0]
+  var line_in=from_values(line_values)
+  var blurred=swap.blur(array.view(line_in),1,5,1,1)
+  var blur_want:array<u64> = [38,57,66,57,38]
+  same(blurred,blur_want,"three box passes of radius 1")
+  var blur_zero=swap.blur(array.view(line_in),1,5,1,0)
+  same(blur_zero,line_values,"radius 0 blur is the identity")
+  var flat_values=filled(12,255)
+  var flat_in=from_values(flat_values)
+  var flat=swap.blur(array.view(flat_in),1,4,3,2)
+  same(flat,flat_values,"blur keeps a constant mask constant")
+
+  // ---- full edit mask order: headroom, hold, grow, blur(0) on a 1x1 subject.
+  var subject=filled(2*25,0)
+  set_pixel(subject,5,2,2,255)
+  var subject_in=from_values(subject)
+  var edited=swap.edit_mask(array.view(subject_in),2,5,5,
+    swap.EditSettings{headroom:1.0,hold_frames:2,grow_px:1,blur_px:0})
+  var edited_want=filled(50,0)
+  // frame 0: headroom covers (2,1),(2,2); grow 1 adds the 4-neighbours.
+  set_pixel(edited_want,5,2,0,255)
+  set_pixel(edited_want,5,2,1,255)
+  set_pixel(edited_want,5,2,2,255)
+  set_pixel(edited_want,5,2,3,255)
+  set_pixel(edited_want,5,1,1,255)
+  set_pixel(edited_want,5,3,1,255)
+  set_pixel(edited_want,5,1,2,255)
+  set_pixel(edited_want,5,3,2,255)
+  // frame 1 is empty in the input, held from frame 0.
+  i=0
+  loop{if i>=25{break}
+    array.set(edited_want,25+i,array.get(edited_want,i))
+    i=i+1}
+  same(edited,edited_want,"edit mask = headroom, hold, grow, blur")
+
+  // ---- mannequin: hard grey where mask >= 128, source elsewhere.
+  var rgb_values:array<u64> = [10,20,30, 40,50,60, 70,80,90]
+  var rgb=from_values(rgb_values)
+  var figure_mask_values:array<u64> = [255,127,128]
+  var figure_mask=from_values(figure_mask_values)
+  var figure:array<byte> = array.new()
+  match swap.mannequin(figure,array.view(rgb),array.view(figure_mask),3,128){
+    ok(_)=>{},err(_)=>{expect(false,"mannequin geometry")}}
+  var figure_want:array<u64> = [128,128,128, 40,50,60, 128,128,128]
+  same(figure,figure_want,"mannequin replaces exactly the mask pixels with grey")
+
+  // ---- edit sources: silhouette is the mannequin rule above (people pixels
+  // -> grey); blank blends toward grey by the soft edit-mask weight.
+  var blank_rgb_values:array<u64> = [10,20,30, 200,100,0, 50,50,50]
+  var blank_rgb=from_values(blank_rgb_values)
+  var blank_mask_values:array<u64> = [0,255,128]
+  var blank_mask=from_values(blank_mask_values)
+  var blanked:array<byte> = array.new()
+  match swap.blank(blanked,array.view(blank_rgb),array.view(blank_mask),3,128){
+    ok(_)=>{},err(_)=>{expect(false,"blank geometry")}}
+  // m=128: (50*127 + 128*128 + 127) / 255 = 89
+  var blank_want:array<u64> = [10,20,30, 128,128,128, 89,89,89]
+  same(blanked,blank_want,"blank edit source blends toward grey by mask/255")
+  var silhouette:array<byte> = array.new()
+  match swap.mannequin(silhouette,array.view(blank_rgb),array.view(blank_mask),3,128){
+    ok(_)=>{},err(_)=>{expect(false,"silhouette geometry")}}
+  var silhouette_want:array<u64> = [10,20,30, 128,128,128, 128,128,128]
+  same(silhouette,silhouette_want,"silhouette edit source greys exactly the people pixels")
+
+  // ---- check frame: cyan by edit weight, then orange on the person, then figure.
+  var one_rgb_values:array<u64> = [100,100,100]
+  var one_rgb=from_values(one_rgb_values)
+  var full:array<u64> = [255]
+  var full_mask=from_values(full)
+  var grey_values:array<u64> = [128,128,128]
+  var grey=from_values(grey_values)
+  var cyan:array<u64> = [0,255,255]
+  var orange:array<u64> = [255,140,0]
+  var checked:array<byte> = array.new()
+  match swap.check_frame(checked,array.view(one_rgb),array.view(full_mask),
+      array.view(full_mask),array.view(grey),1,1,0.5,cyan,orange){
+    ok(_)=>{},err(_)=>{expect(false,"check geometry")}}
+  var checked_want:array<u64> = [178,120,50, 128,128,128]
+  same(checked,checked_want,"check-mask tint is orange on the person, mannequin on the right")
+  var empty:array<u64> = [0]
+  var empty_mask=from_values(empty)
+  var cyan_only:array<byte> = array.new()
+  match swap.check_frame(cyan_only,array.view(one_rgb),array.view(full_mask),
+      array.view(empty_mask),array.view(grey),1,1,0.5,cyan,orange){
+    ok(_)=>{},err(_)=>{expect(false,"check geometry")}}
+  var cyan_want:array<u64> = [50,178,178, 128,128,128]
+  same(cyan_only,cyan_want,"edit area outside the person is tinted cyan")
+  var plain:array<byte> = array.new()
+  match swap.check_frame(plain,array.view(one_rgb),array.view(empty_mask),
+      array.view(empty_mask),array.view(grey),1,1,0.5,cyan,orange){
+    ok(_)=>{},err(_)=>{expect(false,"check geometry")}}
+  var plain_want:array<u64> = [100,100,100, 128,128,128]
+  same(plain,plain_want,"outside both masks the source is untouched")
+
+  // ---- nearest resample keeps a binary mask binary.
+  var small:array<u64> = [0,255, 255,0]
+  var small_in=from_values(small)
+  var big=swap.resample_nearest(array.view(small_in),1,2,2,4,4)
+  var big_want:array<u64> = [0,0,255,255, 0,0,255,255, 255,255,0,0, 255,255,0,0]
+  same(big,big_want,"nearest resample")
+
+  // ---- part to use: 17n+5 frames, placement, clamping.
+  expect(swap.h3_frames_down(156)==141,"156 -> 141")
+  expect(swap.h3_frames_down(22)==22 and swap.h3_frames_down(21)==5,"17n+5 boundaries")
+  match swap.plan_part("whole",156,0,0,22){
+    ok(part)=>{expect(part.first_frame==0 and part.frames==141,"whole part")},
+    err(_)=>{expect(false,"whole part plans")}}
+  match swap.plan_part("middle",156,48,10,22){
+    ok(part)=>{expect(part.frames==39 and part.first_frame==68,"middle + offset")},
+    err(_)=>{expect(false,"middle part plans")}}
+  match swap.plan_part("end",156,48,-200,22){
+    ok(part)=>{expect(part.frames==39 and part.first_frame==0,"end clamps at 0")},
+    err(_)=>{expect(false,"end part plans")}}
+  match swap.plan_part("start",156,48,500,22){
+    ok(part)=>{expect(part.first_frame==117,"start clamps at the last window")},
+    err(_)=>{expect(false,"start part plans")}}
+  match swap.plan_part("start",156,10,0,22){
+    ok(_)=>{expect(false,"too-short part must fail")},err(_)=>{}}
+  match swap.plan_part("sideways",156,48,0,22){
+    ok(_)=>{expect(false,"unknown mode must fail")},err(_)=>{}}
+  expect(swap.audio_sample_at(1,24,44100)==1838,"ceil sample of frame 1 at 44.1k")
+  expect(swap.audio_sample_at(24,24,48000)==48000,"one second at 48k")
+  expect(swap.scaled_px(40,736,640,360)==20,"40 px at 736 -> 20 px at 360")
+
+  // ---- probe parsing.
+  match swap.parse_probe("codec_type=video\nwidth=640\nheight=360\ncodec_type=audio\nsample_rate=44100\nduration=6.506000\n"){
+    ok(found)=>{expect(found.width==640 and found.height==360 and found.has_audio and
+      found.sample_rate==44100 and found.duration>6.5,"probe fields")},
+    err(_)=>{expect(false,"probe parses")}}
+  match swap.parse_probe("codec_type=video\nwidth=64\nheight=48\nduration=1.0\n"){
+    ok(found)=>{expect(not found.has_audio,"silent probe")},err(_)=>{expect(false,"silent probe parses")}}
+
+  // ---- native track index parsing: ids ascending, rows per id in frame order.
+  let index="frame\tid\tscore\tarea\tx0\ty0\tx1\ty1\n0\t3\t0.9\t10\t1\t2\t3\t4\n0\t1\t0.8\t5\t0\t0\t1\t1\n1\t3\t0.7\t12\t1\t2\t4\t4\n"
+  match sam_tracks.parse_index(index,"/tracks",2){
+    ok(found)=>{var tracks=found
+      expect(array.len(tracks)==2,"two ids")
+      expect(array.borrow(tracks,0).id==1 and array.borrow(tracks,1).id==3,"ids ascending")
+      expect(array.len(struct.borrow(array.borrow(tracks,1),field=appearances))==2,"id 3 rows")
+      expect(struct.borrow(array.borrow(tracks,1),field=raw)=="/tracks/track-3.gray","raw path")
+      expect(swap.track_area_sum(array.borrow(tracks,1))==22,"area sum")
+      match swap.largest_track(tracks){some(at)=>{expect(at==1,"largest is id 3")},
+        none=>{expect(false,"largest exists")}}
+      var info=swap.track_info(array.borrow(tracks,1),10,10,2)
+      expect(info.first_frame==0 and info.last_frame==1 and info.frames_present==2,"track info span")
+      expect(info.mean_area_fraction==0.11 and info.max_area_fraction==0.12,"track info areas")},
+    err(message)=>{expect(false,message)}}
+  match sam_tracks.parse_index("frame\tid\n",".",2){ok(_)=>{expect(false,"bad header must fail")},err(_)=>{}}
+  match sam_tracks.parse_index("frame\tid\tscore\tarea\tx0\ty0\tx1\ty1\n5\t0\t0.9\t1\t0\t0\t0\t0\n",".",2){
+    ok(_)=>{expect(false,"row past the stream must fail")},err(_)=>{}}
+
+  // ---- preset decode from the shipped file.
+  let preset_path=if view.len(args)>1{string.copy(view.get(args,1))}else{
+    string.copy("presets/swap-masks.json")}
+  match swap.load_preset(str.view(preset_path)){
+    ok(found)=>{var preset=found
+      match swap.margin(preset,"normal"){ok(m)=>{expect(m.grow_px==40,"normal = 40 px")},
+        err(_)=>{expect(false,"normal margin")}}
+      expect(preset.headroom==0.1 and preset.hold_frames==2,"preset headroom/hold")
+      expect(preset.motion_reference_default==512,"default motion reference 512")
+      expect(preset.edit_source_mode=="blank","default edit source is blank")},
+    err(message)=>{expect(false,message)}}
+  match swap.decode_preset("{\"schema\":\"other\"}"){ok(_)=>{expect(false,"bad preset must fail")},err(_)=>{}}
+
+  // ---- the gray mask video decodes back unchanged through masked_runtime.
+  let work=match files.cwd(){ok(value)=>path.join(str.view(value),text.concat(
+    ".swap-masks-test-",str.view(string.from_int(time.monotonic_ns())))),
+    err(_)=>{expect(false,"cwd")
+      return 1}}
+  match files.mkdirs(str.view(work)){ok(_)=>{},err(_)=>{expect(false,"work dir")}}
+  var pattern:array<u64> = array.new()
+  i=0
+  loop{if i>=4*8*6{break}
+    array.push(pattern,if rem(i,7)==0{0}else if rem(i,5)==0{255}else{rem(i*37,256)})
+    i=i+1}
+  var pattern_bytes=from_values(pattern)
+  let raw=path.join(str.view(work),"mask.gray")
+  let video=path.join(str.view(work),"mask.mp4")
+  let back=path.join(str.view(work),"back.gray")
+  match files.write_bytes(str.view(raw),array.view(pattern_bytes)){ok(_)=>{},
+    err(_)=>{expect(false,"write raw")}}
+  match swap.encode_gray(str.view(raw),str.view(video),8,6,4,24){ok(_)=>{},
+    err(message)=>{expect(false,message)}}
+  match runtime.decoded_mask(str.view(video),str.view(back),8,6,4){
+    ok(found)=>{var decoded=found
+      match edit.from_gray(4,8,6,array.view(pattern_bytes)){
+        ok(expected_mask)=>{var reference=expected_mask
+          var k:u64=0
+          loop{if k>=4*8*6{break}
+            expect(array.get(struct.borrow(decoded,field=weights),k)==
+              array.get(struct.borrow(reference,field=weights),k),
+              "masked_runtime reads the gray mask video unchanged")
+            k=k+1}},
+        err(_)=>{expect(false,"reference mask")}}},
+    err(message)=>{expect(false,message)}}
+  let _=files.remove(str.view(raw))
+  let _=files.remove(str.view(video))
+  let _=files.remove(str.view(back))
+
+  // ---- per-frame People Mask selection with continuity (8x1, 4 frames).
+  // f0: only A (id 1, 3 px) -> A. f1: B (id 2, 4 px) is larger but A keeps
+  // IoU 1 and 3*2 >= 4 -> A. f2: A shrinks to 1 px, B grows to 5 px; 1*2 < 5
+  // -> clear area win, switch to B. f3: nothing -> -1 and an empty plane.
+  var track_a:array<u64> = [255,255,255,0,0,0,0,0, 255,255,255,0,0,0,0,0,
+    255,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0]
+  var track_b:array<u64> = [0,0,0,0,0,0,0,0, 0,0,0,255,255,255,255,0,
+    0,0,0,255,255,255,255,255, 0,0,0,0,0,0,0,0]
+  var a_bytes=from_values(track_a)
+  var b_bytes=from_values(track_b)
+  match files.write_bytes(str.view(path.join(str.view(work),"track-1.gray")),array.view(a_bytes)){
+    ok(_)=>{},err(_)=>{expect(false,"write track 1")}}
+  match files.write_bytes(str.view(path.join(str.view(work),"track-2.gray")),array.view(b_bytes)){
+    ok(_)=>{},err(_)=>{expect(false,"write track 2")}}
+  let selection_index="frame\tid\tscore\tarea\tx0\ty0\tx1\ty1\n0\t1\t0.9\t3\t0\t0\t2\t0\n1\t1\t0.9\t3\t0\t0\t2\t0\n1\t2\t0.9\t4\t3\t0\t6\t0\n2\t1\t0.9\t1\t0\t0\t0\t0\n2\t2\t0.9\t5\t3\t0\t7\t0\n"
+  match sam_tracks.parse_index(selection_index,str.view(work),4){
+    ok(found)=>{var tracks=found
+      match swap.select_per_frame(tracks,4,8,1,2.0,0.1){
+        ok(value)=>{var chosen=value
+          expect(array.len(struct.borrow(chosen,field=entries))==4,"one entry per frame")
+          expect(array.get(struct.borrow(chosen,field=entries),0).track_id==1,"f0 A")
+          expect(array.get(struct.borrow(chosen,field=entries),1).track_id==1,"f1 keeps A")
+          expect(array.get(struct.borrow(chosen,field=entries),2).track_id==2,"f2 switches to B")
+          expect(array.get(struct.borrow(chosen,field=entries),3).track_id==-1,"f3 none")
+          expect(chosen.dominant==1,"dominant id is A")
+          var people_want:array<u64> = [255,255,255,0,0,0,0,0, 255,255,255,0,0,0,0,0,
+            0,0,0,255,255,255,255,255, 0,0,0,0,0,0,0,0]
+          same(struct.borrow(chosen,field=people),people_want,"people mask follows the choices")
+          // Without continuity (factor 1) frame 1 takes the larger B.
+          match swap.select_per_frame(tracks,4,8,1,1.0,0.1){
+            ok(other)=>{var plain=other
+              expect(array.get(struct.borrow(plain,field=entries),1).track_id==2,"factor 1 -> largest")},
+            err(message)=>{expect(false,message)}}},
+        err(message)=>{expect(false,message)}}},
+    err(message)=>{expect(false,message)}}
+  // ---- external tracker backend (SAM 3.1 contract) through track_external.
+  var backend_preset=match swap.load_preset(str.view(preset_path)){ok(v)=>v,
+    err(message)=>{expect(false,message)
+      return 1}}
+  var backend_job=swap.Job{plugin:string.new(),model:string.copy("/models/sam3.1.safetensors"),
+    preset:backend_preset,source:string.copy("/unused.mp4"),output_dir:string.copy(str.view(work)),
+    prompt:string.copy("person"),margin:string.copy("normal"),part_mode:string.copy("whole"),
+    part_seconds:0.0,offset_seconds:0.0,motion_short_edge:512}
+  var prepared=swap.PartFiles{root:string.copy(str.view(work)),width:8,height:1,
+    has_audio:false,sample_rate:0,part:swap.Part{mode:string.copy("whole"),offset_frames:0,
+    first_frame:0,frames:3,source_frames:3},part_rgb:string.copy("/unused.rgb"),
+    part_video:string.new(),part_audio:string.new(),audio_samples:0}
+  match swap.track_external(backend_job,prepared,fake_backend){
+    ok(found)=>{var tracks=found
+      expect(array.len(tracks)==2,"two external tracks")
+      expect(array.borrow(tracks,0).id==0,"id 0 is valid and first")
+      expect(array.len(struct.borrow(array.borrow(tracks,0),field=appearances))==2,
+        "the -10000 hot-start removal row is not an appearance")
+      match swap.select_per_frame(tracks,3,8,1,2.0,0.1){
+        ok(value)=>{var chosen=value
+          expect(array.get(struct.borrow(chosen,field=entries),0).track_id==0,"ext f0 id 0")
+          expect(array.get(struct.borrow(chosen,field=entries),1).track_id==0,"ext f1 id 0")
+          expect(array.get(struct.borrow(chosen,field=entries),2).track_id==3,"ext f2 id 3 after removal")
+          expect(chosen.dominant==0,"dominant id 0")},
+        err(message)=>{expect(false,message)}}},
+    err(message)=>{expect(false,message)}}
+  let tracks_dir=path.join(str.view(work),"tracks")
+  let _=files.remove(str.view(path.join(str.view(tracks_dir),"track-0.gray")))
+  let _=files.remove(str.view(path.join(str.view(tracks_dir),"track-3.gray")))
+  let _=files.remove(str.view(path.join(str.view(tracks_dir),"tracks.tsv")))
+  let _=files.remove(str.view(tracks_dir))
+  let _=files.remove(str.view(path.join(str.view(work),"track-1.gray")))
+  let _=files.remove(str.view(path.join(str.view(work),"track-2.gray")))
+  let _=files.remove(str.view(work))
+
+  io.write("MM-Air swap masks PASS\n")
+  0
+}

@@ -3,6 +3,8 @@
 // final output, and refuses PNG character-sheet jobs.
 module app.mm_air.tests.seedvr2_postprocess
 
+import "h3_presets_fixture.ai" as fixture
+import std.inference.h3.policy as h3_policy
 import "../generate.ai" as generation
 import "../seedvr2_post.ai" as seedvr2
 import "../character_sheet.ai" as sheet
@@ -19,10 +21,12 @@ fn require(value:bool,message:str)->unit effects {io.write} {
 
 fn make_job(receiver:ref<channel.Receiver>,mode:u32,output:str,
             transformer:session.Projection)
-    ->generation.Job effects {alloc} {
+    ->generation.Job effects {alloc,env,fs.read,io.write} {
   var configuration=generation.Configuration {checkpoint_root:string.copy("/h3"),
     reference_checkpoint_root:string.copy("/h3-ref"),donor_root:string.copy("/donor"),
-    manifest_root:string.copy("/manifests"),scratch_root:string.copy("/tmp")}
+    manifest_root:string.copy("/manifests"),
+    deployment_file:string.copy("/h3_deployment.json"),presets:fixture.presets(),
+    scratch_root:string.copy("/tmp")}
   var references:array<string> = []
   var audio:array<string> = []
   var geometry=match media.geometry(22,256,256){ok(value)=>value,err(_)=>{
@@ -30,10 +34,10 @@ fn make_job(receiver:ref<channel.Receiver>,mode:u32,output:str,
   generation.job(configuration,"restore this",session.Model.Base,session.Task.T2VA,
     geometry,references,audio,output,mode,"/tmp/sheet.png",42,7,
     session.Projection.ExactBF16,transformer,
-    session.Attention.Exact,channel.ticket(receiver),session.Schedule.Simple)
+    session.Attention.Exact,channel.ticket(receiver),session.Schedule.Simple,h3_policy.Sampler.ResMultistep)
 }
 
-pub fn main(args:view<str>)->i32 effects {alloc,io.write,net,time} {
+pub fn main(args:view<str>)->i32 effects {alloc,env,fs.read,io.write,net,time} {
   var receiver=match channel.open(4,64){ok(value)=>value,err(_)=>{return 1},}
   var job=make_job(receiver,0,"/tmp/final.mp4",session.Projection.ConvRotI8)
   require(job.transformer_projection==session.Projection.ConvRotI8Streaming,
