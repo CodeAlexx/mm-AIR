@@ -46,13 +46,16 @@ pub fn restore(session:ref<desk.Session>)->unit effects{alloc,env,fs.read,fs.met
     // History (the right split's kept side) never comes back wider than 600 px, so the
     // preview always keeps most of the window.
     let history:bool=id=="gen_right_split"
+    // The prompt dock (the stage split's kept side) holds the Generate button: restored at
+    // most 360 px tall so the button stays on screen in a 1000 px window.
+    let prompt:bool=id=="gen_stage_split"
     match text.parse_u64(str.view(size)){
       some(value)=>{
-        let kept:u64=if history and value>600{600}else{value}
+        let kept:u64=if history and value>600{600}else if prompt and value>360{360}else{value}
         let _=desk.set_number(session,id,"kept",cast.float(kept))},
       none=>{
-        // Nothing saved: the owner's own Generate layout (11-01 saved widths).
-        let fallback:f64=if history{600.0}else if id=="gen_left_split"{469.0}else{571.0}
+        // Nothing saved: the owner's own Generate widths (11-01), prompt dock 300 px tall.
+        let fallback:f64=if history{600.0}else if id=="gen_left_split"{469.0}else{300.0}
         let _=desk.set_number(session,id,"kept",fallback)},}
     let folded=stored(str.view(text.concat(str.view(key(id)),"_COLLAPSED")))
     if folded!=""{let _=desk.set_bool(session,id,"collapsed",folded=="1")}
