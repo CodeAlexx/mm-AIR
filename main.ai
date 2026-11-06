@@ -162,6 +162,17 @@ fn side_by_side_source(output: str) -> option<string> effects {alloc,fs.meta,fs.
 // Source on the left, result on the right, one MP4 that plays both in sync. The
 // source is resampled to 24 FPS (the H3 output clock) and scaled to the result's
 // height; the result's soundtrack is kept.
+// A still Edit through the masked runtime keeps its PNG as the final file while H3 renders
+// into the runtime's own scratch MP4; the request is checked as that MP4.
+fn validate_h3_still(request: ref<h3.Request>, png_final: bool) -> result<unit,h3.Problem> effects {alloc} {
+  if not png_final { return h3.validate(request) }
+  let final_output: string = string.copy(str.view(struct.borrow(request,field=output)))
+  let _ = ref.swap(struct.borrow(request,field=output),text.concat(str.view(final_output),".mp4"))
+  let checked = h3.validate(request)
+  let _ = ref.swap(struct.borrow(request,field=output),final_output)
+  checked
+}
+
 fn make_side_by_side(output: string own) -> result<string, string>
     effects {alloc,env,fs.meta,fs.read,fs.write,process} {
   let owned: string = output
@@ -6830,7 +6841,7 @@ pub fn main(args: view<str>) -> i32
                 }
                 continue
               }
-              match h3.validate(request) {
+              match validate_h3_still(request,id=="edit_run" and not edit_source_video and masked) {
                 err(found) => {
                   var problem: h3.Problem = found
                   generation_status(session,h3.describe(problem))
