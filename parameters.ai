@@ -84,12 +84,23 @@ pub type LoraEntry = struct {path:string,strength:f64,enabled:bool} derive codec
 // MOSS-Image Base or SFT text-to-image. Creator defaults (models/moss_image/scheduler.ai,
 // OpenMOSS README): 50 steps, CFG 3, shift 5, empty negative prompt, block-22 negative skip.
 // `fast` runs the INT8 projections (about twice as fast; fine detail differs).
+// Image prompt: up to 4 pictures the text encoder reads beside the prompt, each with its own strength
+// (0 leaves the picture out; stored in hundredths, 5 = 0.05), a text strength and the vision size
+// (models/moss_image/image_prompt.ai).
 pub type MossRequest = struct {
+  model:string,prompt:string,negative:string,output:string,
+  width:u64,height:u64,steps:u64,cfg:f64,shift:f64,seed:u64,fast:bool,
+  loras:array<LoraEntry>,
+  prompt_images:array<string>,prompt_strength_percent:array<u64>,text_strength:f64,vision_size:u64
+} derive codec(strict)
+type MossFile=struct {schema:string,request:MossRequest} derive codec(strict)
+// Parameter files saved before the image prompt existed (same schema name, no picture fields).
+type MossRequestV1 = struct {
   model:string,prompt:string,negative:string,output:string,
   width:u64,height:u64,steps:u64,cfg:f64,shift:f64,seed:u64,fast:bool,
   loras:array<LoraEntry>
 } derive codec(strict)
-type MossFile=struct {schema:string,request:MossRequest} derive codec(strict)
+type MossFileV1=struct {schema:string,request:MossRequestV1} derive codec(strict)
 // Fibo 2.0: Dev text-to-image on Generate, Edit Turbo on Image Edit. Creator defaults
 // (models/fibo2/defaults.ai): Dev 50 steps, guidance 5; Edit Turbo 4 steps, guidance 1.
 // `images` (Edit Turbo only): the picture to change first, then up to four references.
@@ -193,7 +204,39 @@ pub fn moss_label(model:u32) -> str effects {} {
 }
 pub fn moss_defaults(model:u32) -> MossRequest effects {alloc} {
   MossRequest {model:string.copy(moss_model_name(model)),prompt:"",negative:"",output:"",
-    width:1024,height:1024,steps:50,cfg:3.0,shift:5.0,seed:42,fast:false,loras:[]}
+    width:1024,height:1024,steps:50,cfg:3.0,shift:5.0,seed:42,fast:false,loras:[],
+    prompt_images:[],prompt_strength_percent:[],text_strength:1.0,vision_size:384}
+}
+pub fn moss_max_pictures() -> u64 effects {} { 4 }
+pub fn moss_default_picture_percent() -> u64 effects {} { 5 }
+// Add one picture (PNG or JPEG, absolute path) at the default strength.
+pub fn moss_add_picture(request:ref<MossRequest>,file:str) -> result<unit,string> effects {alloc} {
+  if array.len(struct.borrow(request,field=prompt_images))>=moss_max_pictures() {
+    return result.err("An image prompt takes at most 4 pictures")}
+  let extension=text.lower_ascii(path.extension(file))
+  if extension!=".png" and extension!=".jpg" and extension!=".jpeg" {
+    return result.err("Choose PNG or JPEG pictures")}
+  if not path.is_absolute(file) {return result.err("Picture paths must be absolute")}
+  array.push(struct.borrow(request,field=prompt_images),string.copy(file))
+  array.push(struct.borrow(request,field=prompt_strength_percent),moss_default_picture_percent())
+  result.ok(())
+}
+pub fn moss_remove_picture(request:ref<MossRequest>,index:u64) -> unit effects {alloc} {
+  let count=array.len(struct.borrow(request,field=prompt_images))
+  if index>=count {return}
+  var images:array<string>=[]
+  var strengths:array<u64>=[]
+  var i:u64=0
+  loop{
+    if i>=count{break}
+    if i!=index {
+      array.push(images,string.copy(array.borrow(struct.borrow(request,field=prompt_images),i)))
+      array.push(strengths,array.get(struct.borrow(request,field=prompt_strength_percent),i))
+    }
+    i=i+1
+  }
+  let _=ref.swap(struct.borrow(request,field=prompt_images),images)
+  let _=ref.swap(struct.borrow(request,field=prompt_strength_percent),strengths)
 }
 pub fn validate_moss(request:ref<MossRequest>) -> result<unit,string> effects {alloc} {
   match moss_model_index_of(str.view(struct.borrow(request,field=model))) {
@@ -214,13 +257,52 @@ pub fn validate_moss(request:ref<MossRequest>) -> result<unit,string> effects {a
       text.lower_ascii(path.extension(struct.borrow(request,field=output)))!=".png" {
     return result.err("MOSS-Image output must be an absolute PNG path")
   }
+  let pictures=array.len(struct.borrow(request,field=prompt_images))
+  if pictures>moss_max_pictures() {return result.err("An image prompt takes at most 4 pictures")}
+  if array.len(struct.borrow(request,field=prompt_strength_percent))!=pictures {
+    return result.err("Every picture needs a strength")}
+  var picture:u64=0
+  loop{
+    if picture>=pictures {break}
+    if array.get(struct.borrow(request,field=prompt_strength_percent),picture)>100 {
+      return result.err("Picture strength must be 0 to 1")}
+    if not path.is_absolute(array.borrow(struct.borrow(request,field=prompt_images),picture)) {
+      return result.err("Picture paths must be absolute")}
+    picture=picture+1
+  }
+  if not math.is_finite(request.text_strength) or request.text_strength<0.0 or request.text_strength>10.0 {
+    return result.err("Text strength must be 0 to 10")}
+  if request.vision_size<256 or request.vision_size>1024 {return result.err("Vision size must be 256 to 1024")}
   validate_loras(struct.borrow(request,field=loras))
 }
 pub fn copy_moss(request:ref<MossRequest>) -> MossRequest effects {alloc} {
   MossRequest {model:string.copy(struct.borrow(request,field=model)),prompt:string.copy(struct.borrow(request,field=prompt)),
     negative:string.copy(struct.borrow(request,field=negative)),output:string.copy(struct.borrow(request,field=output)),
     width:request.width,height:request.height,steps:request.steps,cfg:request.cfg,shift:request.shift,
-    seed:request.seed,fast:request.fast,loras:clone_loras(struct.borrow(request,field=loras))}
+    seed:request.seed,fast:request.fast,loras:clone_loras(struct.borrow(request,field=loras)),
+    prompt_images:copy_strings(struct.borrow(request,field=prompt_images)),
+    prompt_strength_percent:copy_numbers(struct.borrow(request,field=prompt_strength_percent)),
+    text_strength:request.text_strength,vision_size:request.vision_size}
+}
+fn copy_strings(values:ref<array<string>>) -> array<string> effects {alloc} {
+  var out:array<string>=[]
+  var index:u64=0
+  loop{
+    if index>=array.len(values){break}
+    array.push(out,string.copy(array.borrow(values,index)))
+    index=index+1
+  }
+  out
+}
+fn copy_numbers(values:ref<array<u64>>) -> array<u64> effects {alloc} {
+  var out:array<u64>=[]
+  var index:u64=0
+  loop{
+    if index>=array.len(values){break}
+    array.push(out,array.get(values,index))
+    index=index+1
+  }
+  out
 }
 pub fn encode_moss(request:ref<MossRequest>) -> result<string,string> effects {alloc} {
   let _=try validate_moss(request)
@@ -233,7 +315,25 @@ pub fn is_moss(source:str) -> bool effects {alloc} {
 }
 pub fn decode_moss(source:str) -> result<MossRequest,string> effects {alloc} {
   var file:MossFile=match MossFile_decode(source) {ok(value)=>value,
-    err(_)=>{return result.err("MOSS-Image parameters do not match the saved format")},}
+    err(_)=>{
+      // saved before the image prompt: the same fields, no pictures
+      match MossFileV1_decode(source) {
+        ok(old)=>{
+          if old.schema!=moss_schema() {return result.err("Unsupported MOSS-Image parameter file")}
+          let before=struct.borrow(old,field=request)
+          let upgraded=MossRequest {model:string.copy(struct.borrow(before,field=model)),
+            prompt:string.copy(struct.borrow(before,field=prompt)),
+            negative:string.copy(struct.borrow(before,field=negative)),
+            output:string.copy(struct.borrow(before,field=output)),
+            width:before.width,height:before.height,steps:before.steps,cfg:before.cfg,shift:before.shift,
+            seed:before.seed,fast:before.fast,loras:clone_loras(struct.borrow(before,field=loras)),
+            prompt_images:[],prompt_strength_percent:[],text_strength:1.0,vision_size:384}
+          let _=try validate_moss(upgraded)
+          return result.ok(upgraded)
+        },
+        err(_)=>{return result.err("MOSS-Image parameters do not match the saved format")},
+      }
+    },}
   if file.schema!=moss_schema() {return result.err("Unsupported MOSS-Image parameter file")}
   let _=try validate_moss(struct.borrow(file,field=request))
   result.ok(struct.replace(file,moss_defaults(moss_base_model_index()),field=request))

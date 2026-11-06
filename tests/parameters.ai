@@ -298,6 +298,42 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.read,io.write} {
   struct.set(moss,1344,field=width)
   let _=ref.swap(struct.borrow(moss,field=model),string.copy("moss-image-edit"))
   match parameters.validate_moss(moss){ok(_)=>{return 1},err(_)=>{},}
+  // MOSS image prompt: add / remove pictures, strengths in hundredths, round trip, refusals, old files.
+  var prompted=parameters.copy_moss(moss_back)
+  if array.len(struct.borrow(prompted,field=prompt_images))!=0 or prompted.text_strength!=1.0 or prompted.vision_size!=384 { return 1 }
+  match parameters.moss_add_picture(prompted,"/tmp/a.png"){ok(_)=>{},err(_)=>{return 1},}
+  match parameters.moss_add_picture(prompted,"/tmp/b.JPG"){ok(_)=>{},err(_)=>{return 1},}
+  match parameters.moss_add_picture(prompted,"/tmp/c.gif"){ok(_)=>{return 1},err(_)=>{},}
+  match parameters.moss_add_picture(prompted,"rel.png"){ok(_)=>{return 1},err(_)=>{},}
+  if array.get(struct.borrow(prompted,field=prompt_strength_percent),0)!=5 { return 1 }
+  array.set(struct.borrow(prompted,field=prompt_strength_percent),1,20)
+  struct.set(prompted,0.5,field=text_strength)
+  struct.set(prompted,512,field=vision_size)
+  let prompted_json=match parameters.encode_moss(prompted){ok(value)=>value,err(_)=>{return 1},}
+  var prompted_back=match parameters.decode_moss(prompted_json){ok(value)=>value,err(_)=>{return 1},}
+  if array.len(struct.borrow(prompted_back,field=prompt_images))!=2 or
+     array.borrow(struct.borrow(prompted_back,field=prompt_images),1)!="/tmp/b.JPG" or
+     array.get(struct.borrow(prompted_back,field=prompt_strength_percent),1)!=20 or
+     prompted_back.text_strength!=0.5 or prompted_back.vision_size!=512 { return 1 }
+  parameters.moss_remove_picture(prompted_back,0)
+  if array.len(struct.borrow(prompted_back,field=prompt_images))!=1 or
+     array.borrow(struct.borrow(prompted_back,field=prompt_images),0)!="/tmp/b.JPG" or
+     array.get(struct.borrow(prompted_back,field=prompt_strength_percent),0)!=20 { return 1 }
+  var five=parameters.copy_moss(prompted)
+  array.push(struct.borrow(five,field=prompt_images),string.copy("/tmp/c.png"))
+  array.push(struct.borrow(five,field=prompt_strength_percent),5)
+  array.push(struct.borrow(five,field=prompt_images),string.copy("/tmp/d.png"))
+  array.push(struct.borrow(five,field=prompt_strength_percent),5)
+  array.push(struct.borrow(five,field=prompt_images),string.copy("/tmp/e.png"))
+  array.push(struct.borrow(five,field=prompt_strength_percent),5)
+  match parameters.validate_moss(five){ok(_)=>{return 1},err(_)=>{},}
+  struct.set(prompted,2048,field=vision_size)
+  match parameters.validate_moss(prompted){ok(_)=>{return 1},err(_)=>{},}
+  // a file saved before the image prompt existed still decodes, with no pictures
+  let old_json="{\"schema\":\"mm-air.moss-image.parameters.v1\",\"request\":{\"model\":\"moss-image-sft\",\"prompt\":\"a lighthouse\",\"negative\":\"\",\"output\":\"/tmp/moss.png\",\"width\":1024,\"height\":1024,\"steps\":50,\"cfg\":3.0,\"shift\":5.0,\"seed\":42,\"fast\":false,\"loras\":[]}}"
+  var old_back=match parameters.decode_moss(old_json){ok(value)=>value,err(_)=>{return 1},}
+  if array.len(struct.borrow(old_back,field=prompt_images))!=0 or old_back.text_strength!=1.0 or
+     old_back.vision_size!=384 or old_back.prompt!="a lighthouse" { return 1 }
   // Fibo 2.0: Dev on Generate (index 6), Edit Turbo on Image Edit; defaults, round trip, refusals.
   if parameters.fibo_dev_model_index()!=6 or not parameters.image_model(6) or parameters.image_model(7) { return 1 }
   var fibo=parameters.fibo_defaults_for(false)

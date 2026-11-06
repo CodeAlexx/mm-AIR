@@ -53,6 +53,7 @@ import ".air/deps/qwenimage21/adapters.ai" as qwen_image_adapters
 import ".air/deps/qwenimage21/prompt_enhancer.ai" as qwen_prompt_enhancer
 import ".air/deps/moss_image/generate.ai" as moss_generate
 import ".air/deps/moss_image/lora.ai" as moss_lora
+import ".air/deps/moss_image/image_prompt.ai" as moss_prompt
 import ".air/deps/moss_image/scheduler.ai" as moss_scheduler
 import std.trainers.core.lycoris.algorithms as lycoris_algorithms
 import ".air/deps/fibo2/generate.ai" as fibo_generate
@@ -156,7 +157,20 @@ fn run_moss_inner(request:ref<parameters.MossRequest>,sender:ref<option<channel.
     skip_uncond:skip,max_tokens:4096,output:string.copy(output),scratch:string.copy(str.view(scratch)),
     fast:if request.fast{string.copy(moss_generate.fast_modes())}else{string.new()}}
   report(sender,str.view(text.concat("Loading ",label)))
-  let result=moss_generate.run_adapted(options,loras,sender)
+  // Image prompt: pictures read by the text encoder beside the prompt (strength 0 leaves one out).
+  var prompting=moss_prompt.none()
+  var picture:u64=0
+  loop{
+    if picture>=array.len(struct.borrow(request,field=prompt_images)){break}
+    array.push(prompting.images,string.copy(array.borrow(struct.borrow(request,field=prompt_images),picture)))
+    let percent:f64=cast.float(array.get(struct.borrow(request,field=prompt_strength_percent),picture))
+    let strength:f32=cast.float(percent/100.0)
+    array.push(prompting.strengths,strength)
+    picture=picture+1
+  }
+  prompting.text_strength=cast.float(request.text_strength)
+  prompting.vision_size=request.vision_size
+  let result=moss_generate.run_prompted(options,loras,prompting,sender)
   match result{
     ok(_)=>outcome_metrics(true,output,str.view(text.concat(label,
       str.view(text.concat(" PNG completed in ",str.view(text.concat(
