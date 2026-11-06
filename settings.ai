@@ -123,7 +123,7 @@ pub fn apply(session:ref<desk.Session>,state:ref<State>)->result<unit,string>
   string.append(css,";\n@define-color accent ")
   string.append(css,if state.accent==""{themes.css_color(palette.accent)}else{string.copy(state.accent)})
   string.append(css,";\n@define-color amber @accent;\n@define-color amber_dark @accent;\n@define-color violet @accent;\n@define-color cyan @accent;\n")
-  string.append(css,".mm-air-window * { color: @ink; }\n.mm-air-window headerbar, .mm-air-window .mode-rail, .mm-air-window .status-bar { background: @panel; }\n.mm-air-window .mode-button:checked, .mm-air-window .primary-action, .mm-air-window .movie-primary { background: @accent; color: @carbon; }\n")
+  string.append(css,".mm-air-window * { color: @ink; }\n.mm-air-window headerbar, .mm-air-window .mode-rail, .mm-air-window .status-bar { background: @panel; }\n.mm-air-window .mode-button:checked, .mm-air-window .primary-action, .mm-air-window .movie-primary, .mm-air-window .movie-primary-small, .mm-air-window .control-primary { background: @accent; color: @carbon; }\n")
   // Text on accent-colored buttons uses the theme's accent ink; the "* { color: @ink }" rule
   // above otherwise paints their labels white (unreadable on Moonlight's yellow).
   string.append(css,".mm-air-window .mode-button:checked *, .mm-air-window .primary-action *, .mm-air-window .movie-primary *, .mm-air-window .control-primary *, .mm-air-window .movie-primary-small * { color: ")
@@ -141,7 +141,9 @@ pub fn apply(session:ref<desk.Session>,state:ref<State>)->result<unit,string>
     let _=try desk.set_bool(session,id,"hexpand",false)
     // Image Edit's controls (model, swap, LoRA strength, two source slots) need ~460 px;
     // at the general side-panel width they were cut off and the panel slid sideways.
-    let width:u64=if id=="qwen_edit_panel" and state.panel_width<460{460}else{state.panel_width}
+    // Edit's left column (brush row, Erase/Clear) needs ~340 px.
+    let width:u64=if id=="qwen_edit_panel" and state.panel_width<460{460}
+      else if id=="edit_left_panel" and state.panel_width<340{340}else{state.panel_width}
     let _=try desk.set_number(session,id,"width-request",cast.float(width))
     index=index+1}
   let _=try desk.set_number(session,"gen_parameter_scroll","min-content-width",cast.float(state.panel_width))
