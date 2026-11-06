@@ -21,7 +21,8 @@ pub type Job = struct {
   prompt:string,
   raw_output:string,
   preview_output:string,
-  frames:u64
+  frames:u64,
+  still:bool
 }
 
 fn failed(message:str)->auto_mask.Outcome effects{alloc}{
@@ -39,6 +40,13 @@ fn check(arguments:array<string> own,message:str)->result<unit,string>
           proc.exit_code(status))))}
       result.err(text.concat(message,text.concat(": ",str.view(detail))))},
   }
+}
+
+fn still_frames()->u64 effects{}{6}
+
+fn clean(directory:str)->unit effects{alloc,fs.meta,fs.read,fs.write,process}{
+  let _=proc.check(["rm","-rf",string.copy(directory)])
+  ()
 }
 
 fn read_plane(file:ref<File>,frame:u64,plane:u64)->result<bytes,string>
@@ -72,8 +80,9 @@ fn present_frames(track:ref<sam_tracks.Track>,frames:u64)->array<bool> effects{a
 }
 
 // Union of every track on every tracked frame, streamed to `sink` one plane per frame.
-// `repeat` writes each tracked plane that many times (a still is tracked once).
-fn merge_tracks(tracks:ref<array<sam_tracks.Track>>,frames:u64,plane:u64,repeat:u64,
+// A still is tracked on a few repeated frames; only the last tracked plane is kept and
+// written `repeat` times.
+fn merge_tracks(tracks:ref<array<sam_tracks.Track>>,first:u64,frames:u64,plane:u64,repeat:u64,
     raw_output:str)->result<unit,string> effects{alloc,fs.meta,fs.read,fs.write}{
   var files_open:array<File> = array.new()
   var present:array<array<bool>> = array.new()
@@ -95,7 +104,7 @@ fn merge_tracks(tracks:ref<array<sam_tracks.Track>>,frames:u64,plane:u64,repeat:
   var sink:files.Sink=match files.sink_create(raw_output,
       str.view(text.concat(raw_output,".partial"))){ok(value)=>value,
     err(_)=>{return result.err("Cannot write the SAM 3.1 mask")}}
-  var frame:u64=0
+  var frame:u64=first
   loop{if frame>=frames{break}
     var active:array<u64> = array.new()
     var t:u64=0
@@ -175,19 +184,24 @@ pub fn run(job:Job own)->auto_mask.Outcome
   var info=match media.probe("/nonexistent/air-image-provider",
       struct.borrow(owned,field=source),str.view(probe_root)){
     ok(value)=>value,err(message)=>{return failed(str.view(message))}}
-  let _=files.remove(str.view(probe_root))
+  clean(str.view(probe_root))
   let width:u64=cast.sat(info.width)
   let height:u64=cast.sat(info.height)
   if width==0 or height==0{return failed("SAM 3.1 source has invalid geometry")}
   let plane:u64=width*height
 
-  // A still is tracked as one frame and its mask repeated for every output frame.
-  let tracked:u64=if info.video{owned.frames}else{1}
+  // A still is tracked on a few repeated frames (the tracker confirms an object after
+  // several), its last mask repeated for every output frame.
+  let still=owned.still
+  let tracked:u64=if still{still_frames()}else{owned.frames}
   let rgb=text.concat(struct.borrow(owned,field=raw_output),".rgb")
   let work=text.concat(struct.borrow(owned,field=raw_output),".sam31")
-  var decode:array<string> = ["ffmpeg","-nostdin","-v","error","-y","-i",
-    string.copy(struct.borrow(owned,field=source))]
-  if info.video{array.push(decode,"-vf")
+  var decode:array<string> = ["ffmpeg","-nostdin","-v","error","-y"]
+  if still{array.push(decode,"-loop")
+    array.push(decode,"1")}
+  array.push(decode,"-i")
+  array.push(decode,string.copy(struct.borrow(owned,field=source)))
+  if not still{array.push(decode,"-vf")
     array.push(decode,"fps=24")}
   array.push(decode,"-frames:v")
   array.push(decode,string.from_int(tracked))
@@ -204,21 +218,21 @@ pub fn run(job:Job own)->auto_mask.Outcome
     output_dir:string.copy(str.view(work)),frames:tracked,width:width,height:height}
   let tracking=sam31.track(request)
   let _=files.remove(str.view(rgb))
-  match tracking{ok(_)=>{},err(message)=>{let _=files.remove(str.view(work))
+  match tracking{ok(_)=>{},err(message)=>{let _=clean(str.view(work))
     return failed(str.view(message))}}
 
   let index=match files.read_text(str.view(path.join(str.view(work),"tracks.tsv"))){
-    ok(value)=>value,err(_)=>{let _=files.remove(str.view(work))
+    ok(value)=>value,err(_)=>{let _=clean(str.view(work))
       return failed("SAM 3.1 wrote no track index")}}
   var found=match sam_tracks.parse_index(str.view(index),str.view(work),tracked){
-    ok(value)=>value,err(message)=>{let _=files.remove(str.view(work))
+    ok(value)=>value,err(message)=>{let _=clean(str.view(work))
       return failed(str.view(message))}}
   if array.len(found)==0{
-    let _=files.remove(str.view(work))
+    let _=clean(str.view(work))
     return failed("SAM 3.1 found no match")}
-  let merged=merge_tracks(found,tracked,plane,if info.video{1}else{owned.frames},
+  let merged=merge_tracks(found,if still{tracked-1}else{0},tracked,plane,if still{owned.frames}else{1},
     str.view(struct.borrow(owned,field=raw_output)))
-  let _=files.remove(str.view(work))
+  let _=clean(str.view(work))
   match merged{ok(_)=>{},err(message)=>{return failed(str.view(message))}}
 
   let size=text.concat(str.view(string.from_int(width)),text.concat("x",
@@ -226,7 +240,7 @@ pub fn run(job:Job own)->auto_mask.Outcome
   match check(["ffmpeg","-nostdin","-v","error","-y","-f","rawvideo",
       "-pixel_format","gray","-video_size",size,"-framerate","24","-i",
       string.copy(struct.borrow(owned,field=raw_output)),"-frames:v",
-      string.from_int(owned.frames),"-an","-c:v","libx264","-preset","fast",
+      string.from_int(owned.frames),"-vf","pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0","-an","-c:v","libx264","-preset","fast",
       "-crf","0","-pix_fmt","yuv420p",
       string.copy(struct.borrow(owned,field=preview_output))],
       "Could not encode the automatic-mask preview"){

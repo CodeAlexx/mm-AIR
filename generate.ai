@@ -2317,7 +2317,7 @@ fn track_repair_target(job:ref<Job>,prepared:ref<repair_runtime.Prepared>)
     source:repair_runtime.h3_output(prepared),prompt:string.copy("person"),
     raw_output:repair_runtime.target_mask_raw(prepared),
     preview_output:repair_runtime.target_mask_preview(prepared),
-    frames:repair_runtime.generated_frames(prepared)}
+    frames:repair_runtime.generated_frames(prepared),still:false}
   var tracked=sam31_mask.run(target_job)
   if not tracked.succeeded{return result.err(text.concat(
     "Generated repair subject mask failed: ",
@@ -2964,7 +2964,7 @@ pub fn run(source: Job own) -> Outcome
           prompt:string.copy("person"),
           raw_output:string.copy(struct.borrow(held,field=target_mask_raw)),
           preview_output:string.copy(struct.borrow(held,field=target_mask_preview)),
-          frames:held.frames}
+          frames:held.frames,still:false}
         var target=sam31_mask.run(target_job)
         if not target.succeeded {
           finished=outcome(false,struct.borrow(held,field=final_output),

@@ -4947,7 +4947,8 @@ pub fn main(args: view<str>) -> i32
                 sam31_model:string.copy(str.view(sam31_model)),
                 source:string.copy(str.view(edit_source)),
                 prompt:string.copy(text.trim(str.view(edit_auto_mask_prompt))),
-                raw_output:raw,preview_output:preview,frames:mask_frames}
+                raw_output:raw,preview_output:preview,frames:mask_frames,
+                still:not edit_source_video}
               edit_auto_mask_started=time.monotonic_ns()
               array.push(auto_mask_jobs,task.spawn(work,fn=sam31_mask.run))
               let _=desk.set_bool(session,"edit_auto_mask","sensitive",false)
