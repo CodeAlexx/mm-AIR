@@ -542,6 +542,34 @@ fn show_qwen_recipe(session:ref<desk.Session>,scheduler:u32,sampler:u32)
   ()
 }
 
+fn pp_id(prefix:str,index:u64)->string effects{alloc}{
+  text.concat(prefix,str.view(string.from_int(cast.sat(index+1))))
+}
+
+// MOSS Image prompt: one row per picture (name, strength, Remove), the text strength and the vision size.
+fn show_prompt_pictures(session:ref<desk.Session>,moss:ref<parameters.MossRequest>)->unit effects{alloc,net,time}{
+  let count=array.len(struct.borrow(moss,field=prompt_images))
+  var i:u64=0
+  loop{
+    if i>=parameters.moss_max_pictures(){break}
+    let _=desk.set_bool(session,str.view(pp_id("gen_pp_row",i)),"visible",i<count)
+    if i<count{
+      let name=path.basename(array.borrow(struct.borrow(moss,field=prompt_images),i))
+      var label=string.from_int(cast.sat(i+1))
+      string.append(label," · ")
+      string.append(label,str.view(name))
+      let _=desk.set_text(session,str.view(pp_id("gen_pp_name",i)),str.view(label))
+      let percent:f64=cast.float(array.get(struct.borrow(moss,field=prompt_strength_percent),i))
+      let _=desk.set_number(session,str.view(pp_id("gen_pp_strength",i)),"value",percent/100.0)
+    }
+    i=i+1
+  }
+  let _=desk.set_bool(session,"gen_pp_add","sensitive",count<parameters.moss_max_pictures())
+  let _=desk.set_number(session,"gen_pp_text","value",moss.text_strength)
+  let _=desk.set_number(session,"gen_pp_vision","value",cast.float(moss.vision_size))
+  ()
+}
+
 // Generate's Sampling panel shows the selected MOSS model's remembered values.
 fn show_image_sampling(session:ref<desk.Session>,model:u32,moss:ref<parameters.MossRequest>,
     fibo:ref<parameters.FiboRequest>)->unit effects{alloc,net,time}{
@@ -556,6 +584,7 @@ fn show_image_sampling(session:ref<desk.Session>,model:u32,moss:ref<parameters.M
     let _=desk.set_number(session,"gen_image_shift","value",moss.shift)
     let _=desk.set_number(session,"gen_image_speed","selected",if moss.fast{1.0}else{0.0})
     let _=desk.set_text(session,"gen_image_negative",struct.borrow(moss,field=negative))
+    show_prompt_pictures(session,moss)
   }
   ()
 }
@@ -624,6 +653,8 @@ fn filter_parameters(session:ref<desk.Session>,query:str,model:u32,swap_mode:u32
     (wanted == "" or text.contains("krea h3 moss fibo lora overlay strength",wanted)))
   let _=desk.set_bool(session,"gen_image_sampling","visible",(moss or fibo) and
     (wanted=="" or text.contains("sampling steps cfg guidance shift speed fast negative prompt",wanted)))
+  let _=desk.set_bool(session,"gen_prompt_images","visible",moss and
+    (wanted=="" or text.contains("image prompt picture pictures reference strength vision text",wanted)))
   let _=desk.set_bool(session,"gen_image_shift_row","visible",moss)
   let _=desk.set_bool(session,"gen_image_speed_row","visible",moss)
   let _=desk.set_bool(session,"gen_enhance_group","visible",qwen_image and
@@ -2700,6 +2731,20 @@ pub fn main(args: view<str>) -> i32
                 }
                 continue
               }
+              if id == "gen_pp_add" {
+                var chosen = desk.dialog_paths(event)
+                var choice: u64 = 0
+                loop {
+                  if choice >= array.len(chosen) { break }
+                  match parameters.moss_add_picture(moss_settings,str.view(array.borrow(chosen,choice))) {
+                    ok(_) => {},
+                    err(message) => { let _ = desk.set_text(session,"status",message) },
+                  }
+                  choice = choice + 1
+                }
+                show_prompt_pictures(session,moss_settings)
+                continue
+              }
               if id == "gen_add_lora" {
                 var chosen = desk.dialog_paths(event)
                 var choice: u64 = 0
@@ -4233,6 +4278,23 @@ pub fn main(args: view<str>) -> i32
               qwen_image_sampler=cast.sat(desk.number(event,"value"))
               show_qwen_recipe(session,qwen_image_scheduler,qwen_image_sampler)
             }
+            if id=="gen_pp_text" or id=="gen_pp_vision" or id=="gen_pp_strength1" or id=="gen_pp_strength2" or
+               id=="gen_pp_strength3" or id=="gen_pp_strength4"{
+              if parameters.is_moss_model(model_index){
+                if id=="gen_pp_text"{struct.set(moss_settings,desk.number(event,"value"),field=text_strength)}
+                if id=="gen_pp_vision"{struct.set(moss_settings,cast.sat(desk.number(event,"value")),field=vision_size)}
+                var which: u64 = 0
+                loop {
+                  if which >= array.len(struct.borrow(moss_settings,field=prompt_images)) { break }
+                  if id == str.view(pp_id("gen_pp_strength",which)) {
+                    let percent:u64=cast.sat(math.round(desk.number(event,"value")*100.0))
+                    array.set(struct.borrow(moss_settings,field=prompt_strength_percent),which,percent)
+                  }
+                  which = which + 1
+                }
+              }
+              continue
+            }
             if id=="gen_image_steps" or id=="gen_image_cfg" or id=="gen_image_shift" or
                id=="gen_image_speed" or id=="gen_image_negative"{
               if parameters.is_moss_model(model_index){
@@ -5606,6 +5668,22 @@ pub fn main(args: view<str>) -> i32
               let _ = desk.set_text(session,"prompt_metrics","Checking VRAM and loading one AIR model")
               let _ = desk.set_text(session,"status",text.concat("Starting ",
                 str.view(prompt_types.model_name(selected_model))))
+              continue
+            }
+            if id == "gen_pp_add" {
+              let _ = desk.dialog_multiple(session,id,"Add pictures","")
+              continue
+            }
+            if id == "gen_pp_remove1" or id == "gen_pp_remove2" or id == "gen_pp_remove3" or id == "gen_pp_remove4" {
+              var which: u64 = 0
+              loop {
+                if which >= parameters.moss_max_pictures() { break }
+                if id == str.view(pp_id("gen_pp_remove",which)) {
+                  parameters.moss_remove_picture(moss_settings,which)
+                }
+                which = which + 1
+              }
+              show_prompt_pictures(session,moss_settings)
               continue
             }
             if id == "gen_add_lora" {
