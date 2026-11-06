@@ -39,7 +39,7 @@ import std.inference.h3.timeline as timeline
 import std.inference.h3.timing as h3_timing
 import ".air/deps/h3_repair/plan.ai" as repair_plan
 import std.inference.h3.vae as vae
-import ".air/deps/sam3/mask.ai" as auto_mask
+import "sam31_mask.ai" as sam31_mask
 import std.inference.krea2.session as krea_session
 import std.inference.krea2.config as krea_config
 import std.inference.krea2.attention as krea_attention
@@ -542,6 +542,7 @@ pub type Job = struct {
   two_matte:bool,
   sam3_plugin:string,
   sam3_model:string,
+  sam31_model:string,
   outpaint: bool,
   outpaint_settings: outpaint_runtime.Settings,
   repair:bool,
@@ -806,7 +807,7 @@ pub fn job_loras(configuration: ref<Configuration>, prompt: str,
     output: text.copy(output),loras:owned_loras,masked:false,masked_denoise:false,masked_composite_source:string.new(),
     masked_settings:masked_runtime.settings("",false,0.0,0.0,0.0,0.0,
       0,0,0,0,0,true), masked_token_weights: [], two_matte:false,
-    sam3_plugin:string.new(),sam3_model:string.new(),outpaint:false,
+    sam3_plugin:string.new(),sam3_model:string.new(),sam31_model:string.new(),outpaint:false,
     outpaint_settings:outpaint_runtime.settings(32,32,outpaint.right(),
       outpaint.anchor_center(),outpaint.exact(),0,22,0,false),
     repair:false,repair_settings:repair_runtime.settings(0,1,0,0,1.0,
@@ -946,6 +947,12 @@ pub fn enable_masked_composite(job:ref<Job>,settings:masked_runtime.Settings own
   struct.set(job,true,field=masked)
   struct.set(job,false,field=masked_denoise)
   let _=ref.swap(struct.borrow(job,field=masked_settings),owned)
+  ()
+}
+
+// The native SAM 3.1 weights for generated-subject masks (the SAM 3 plugin is the fallback).
+pub fn set_sam31_model(job:ref<Job>,model:str) -> unit effects {alloc} {
+  let _=ref.swap(struct.borrow(job,field=sam31_model),string.copy(model))
   ()
 }
 
@@ -2317,14 +2324,15 @@ fn track_repair_target(job:ref<Job>,prepared:ref<repair_runtime.Prepared>)
     ->result<unit,string>
     effects{alloc,fs.meta,fs.read,fs.write,gpu,process,time}{
   if not job.two_matte{return result.ok(())}
-  var target_job=auto_mask.Job{
+  var target_job=sam31_mask.Job{
     plugin:string.copy(struct.borrow(job,field=sam3_plugin)),
     model:string.copy(struct.borrow(job,field=sam3_model)),
+    sam31_model:string.copy(struct.borrow(job,field=sam31_model)),
     source:repair_runtime.h3_output(prepared),prompt:string.copy("person"),
     raw_output:repair_runtime.target_mask_raw(prepared),
     preview_output:repair_runtime.target_mask_preview(prepared),
-    frames:repair_runtime.generated_frames(prepared)}
-  var tracked=auto_mask.run(target_job)
+    frames:repair_runtime.generated_frames(prepared),still:false}
+  var tracked=sam31_mask.run(target_job)
   if not tracked.succeeded{return result.err(text.concat(
     "Generated repair subject mask failed: ",
     struct.borrow(tracked,field=message)))}
@@ -2961,19 +2969,20 @@ pub fn run(source: Job own) -> Outcome
     some(value)=>{
       var held=value
       if finished.succeeded and job.two_matte {
-        report(sender,"Tracking the generated replacement with SAM 3")
-        var target_job=auto_mask.Job{
+        report(sender,"Tracking the generated replacement with SAM 3.1")
+        var target_job=sam31_mask.Job{
           plugin:string.copy(struct.borrow(job,field=sam3_plugin)),
           model:string.copy(struct.borrow(job,field=sam3_model)),
+          sam31_model:string.copy(struct.borrow(job,field=sam31_model)),
           source:string.copy(struct.borrow(held,field=h3_output)),
           prompt:string.copy("person"),
           raw_output:string.copy(struct.borrow(held,field=target_mask_raw)),
           preview_output:string.copy(struct.borrow(held,field=target_mask_preview)),
-          frames:held.frames}
-        var target=auto_mask.run(target_job)
+          frames:held.frames,still:false}
+        var target=sam31_mask.run(target_job)
         if not target.succeeded {
           finished=outcome(false,struct.borrow(held,field=final_output),
-            text.concat("Generated-subject SAM 3 mask failed: ",
+            text.concat("Generated-subject mask failed: ",
               struct.borrow(target,field=message)))
         } else {
           report(sender,"Generating the clean background behind the old silhouette")

@@ -918,7 +918,7 @@
                       <child><object class="GtkDropDown" id="edit_swap_motion"><property name="model">edit_swap_motion_list</property><property name="selected">0</property><property name="tooltip-text">Short edge of the grey-mannequin motion reference (H3 uses at most 768x1344)</property></object></child>
                       <child><object class="GtkDropDown" id="edit_swap_source"><property name="model">edit_swap_source_list</property><property name="selected">0</property><property name="tooltip-text">What H3 sees as Video 1: the part with the whole edit area greyed, or only the person</property></object></child>
                     </object></child>
-                    <child><object class="GtkButton" id="edit_auto_mask"><property name="label">Auto Mask with SAM 3</property><property name="tooltip-text">Find the prompted subject and track its mask through every frame on the local GPU</property><style><class name="primary-action"/></style></object></child>
+                    <child><object class="GtkButton" id="edit_auto_mask"><property name="label">Auto Mask with SAM 3.1</property><style><class name="primary-action"/></style></object></child>
                     <child><object class="GtkLabel"><property name="visible">false</property><property name="label">Text-prompted local detection + video tracking. You can paint corrections afterward.</property><property name="wrap">true</property><property name="xalign">0</property><style><class name="capability-note"/></style></object></child>
                   </object></child></object></child>
                   <child><object class="GtkButton" id="edit_choose_mask"><property name="label">＋ Imported mask image or video</property><style><class name="dashed-button"/></style></object></child>
