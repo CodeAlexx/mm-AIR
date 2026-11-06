@@ -1495,6 +1495,8 @@ pub fn main(args: view<str>) -> i32
   var edit_strategy: u32 = 0
   var edit_padding: u64 = 96
   var edit_result: string = string.new()
+  // A still Edit without a mask renders H3 to <still>.mp4; its first frame becomes the PNG.
+  var edit_still_target: string = string.new()
   var edit_outpaint_width:u64=1344
   var edit_outpaint_height:u64=768
   var edit_outpaint_direction:u32=outpaint.right()
@@ -2368,6 +2370,14 @@ pub fn main(args: view<str>) -> i32
                   }
                   if character_swap.is_masked(generation_mode) or edit_generation_active {
                     edit_result=string.copy(struct.borrow(completed,field=output))
+                    if str.len(str.view(edit_still_target))!=0 and
+                        str.view(edit_result)==str.view(text.concat(str.view(edit_still_target),".mp4")) {
+                      match masked_runtime.preview_frame(str.view(edit_result),str.view(edit_still_target),0.0) {
+                        ok(_)=>{edit_result=string.copy(str.view(edit_still_target))},
+                        err(message)=>{let _=desk.set_text(session,"status",message)},
+                      }
+                      edit_still_target=string.new()
+                    }
                     if str.len(str.view(edit_source))!=0 and edit_source==swap_source_video {
                       edit_showing_result=true
                       if edit_source_video {
@@ -6778,10 +6788,14 @@ pub fn main(args: view<str>) -> i32
                     continue },
                 }
               }
+              let still_edit: bool = id=="edit_run" and not edit_source_video and not masked
+              edit_still_target = if still_edit {string.copy(str.view(output_media))} else {string.new()}
+              let h3_output: string = if still_edit {text.concat(str.view(output_media),".mp4")}
+                else {string.copy(str.view(output_media))}
               var request: h3.Request = h3.request(str.view(request_prompt), model_index, task_index,
                 profile_index, conditioner_projection_index,
                 transformer_projection_index, attention_index, seed,
-                resolution_index, request_references, str.view(output_media))
+                resolution_index, request_references, str.view(h3_output))
               if swap {
                 var swap_pictures = item_paths(swap_character_references)
                 // A guide-video adapter takes the source clip as a guide, not as <Video 1>.
