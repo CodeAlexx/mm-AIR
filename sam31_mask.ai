@@ -1,0 +1,241 @@
+// Edit "Auto Mask" on the native AIR SAM 3.1 tracker: one text prompt, every matching
+// track merged into one 8-bit mask per frame, written as raw gray + the lossless preview.
+// Same Job -> Outcome contract as the SAM 3 runner; that runner stays the fallback when
+// the SAM 3.1 weights file is absent.
+module app.mm_air.sam31_mask
+
+import ".air/deps/sam3/mask.ai" as auto_mask
+import ".air/deps/sam3/tracks.ai" as sam_tracks
+import ".air/deps/sam31/video.ai" as sam31
+import std.files as files
+import std.media as media
+import std.path as path
+import std.process as proc
+import std.text as text
+
+pub type Job = struct {
+  plugin:string,
+  model:string,
+  sam31_model:string,
+  source:string,
+  prompt:string,
+  raw_output:string,
+  preview_output:string,
+  frames:u64
+}
+
+fn failed(message:str)->auto_mask.Outcome effects{alloc}{
+  auto_mask.Outcome{succeeded:false,mask_path:string.new(),message:string.copy(message),
+    width:0,height:0,frames:0}
+}
+
+fn check(arguments:array<string> own,message:str)->result<unit,string>
+    effects{alloc,fs.meta,fs.read,fs.write,process}{
+  match proc.check(arguments){
+    ok(_)=>result.ok(()),
+    err(problem)=>{var held=problem
+      let detail=match held{Launch(error)=>string.copy(error.message),
+        Exit(status)=>text.concat("exit status ",str.view(string.from_int(
+          proc.exit_code(status))))}
+      result.err(text.concat(message,text.concat(": ",str.view(detail))))},
+  }
+}
+
+fn read_plane(file:ref<File>,frame:u64,plane:u64)->result<bytes,string>
+    effects{alloc,fs.read}{
+  match fs.seek(file,cast.sat(frame*plane),whence=start){ok(_)=>{},
+    err(_)=>{return result.err("SAM 3.1 mask track seek failed")}}
+  var raw:bytes=bytes.copy(b"")
+  loop{
+    let have:u64=view.len(bytes.view(raw))
+    if have==plane{break}
+    let part:bytes=match fs.read(file,plane-have){ok(value)=>value,
+      err(_)=>{return result.err("SAM 3.1 mask track read failed")}}
+    if view.len(bytes.view(part))==0{return result.err("SAM 3.1 mask track is short")}
+    bytes.append(raw,bytes.view(part))
+  }
+  result.ok(raw)
+}
+
+fn present_frames(track:ref<sam_tracks.Track>,frames:u64)->array<bool> effects{alloc}{
+  var present:array<bool> = array.new()
+  var frame:u64=0
+  loop{if frame>=frames{break}
+    array.push(present,false)
+    frame=frame+1}
+  var at:u64=0
+  loop{if at>=array.len(track.appearances){break}
+    let seen=array.borrow(track.appearances,at).frame
+    if seen<frames{array.set(present,seen,true)}
+    at=at+1}
+  present
+}
+
+// Union of every track on every tracked frame, streamed to `sink` one plane per frame.
+// `repeat` writes each tracked plane that many times (a still is tracked once).
+fn merge_tracks(tracks:ref<array<sam_tracks.Track>>,frames:u64,plane:u64,repeat:u64,
+    raw_output:str)->result<unit,string> effects{alloc,fs.meta,fs.read,fs.write}{
+  var files_open:array<File> = array.new()
+  var present:array<array<bool>> = array.new()
+  var at:u64=0
+  loop{if at>=array.len(tracks){break}
+    let track=array.borrow(tracks,at)
+    var file:File=match fs.open(str.view(track.raw),mode=read){ok(value)=>value,
+      err(_)=>{return result.err("SAM 3.1 mask track could not be opened")}}
+    array.push(files_open,file)
+    array.push(present,present_frames(track,frames))
+    at=at+1}
+  var zero_cells:array<byte> = array.new()
+  var cell:u64=0
+  loop{if cell>=plane{break}
+    let nothing:u8=0
+    array.push(zero_cells,cast.bits(nothing))
+    cell=cell+1}
+  let zero:bytes=bytes.from_array(zero_cells)
+  var sink:files.Sink=match files.sink_create(raw_output,
+      str.view(text.concat(raw_output,".partial"))){ok(value)=>value,
+    err(_)=>{return result.err("Cannot write the SAM 3.1 mask")}}
+  var frame:u64=0
+  loop{if frame>=frames{break}
+    var active:array<u64> = array.new()
+    var t:u64=0
+    loop{if t>=array.len(files_open){break}
+      if array.get(array.borrow(present,t),frame){array.push(active,t)}
+      t=t+1}
+    var out:bytes=bytes.copy(bytes.view(zero))
+    if array.len(active)==1{
+      out=match read_plane(array.borrow(files_open,array.get(active,0)),frame,plane){
+        ok(value)=>value,err(message)=>{let _=files.sink_discard(sink)
+          return result.err(message)}}
+    }
+    if array.len(active)>1{
+      var merged:array<byte> = array.new()
+      var first:bool=true
+      var k:u64=0
+      loop{if k>=array.len(active){break}
+        let item=match read_plane(array.borrow(files_open,array.get(active,k)),frame,plane){
+          ok(value)=>value,err(message)=>{let _=files.sink_discard(sink)
+            return result.err(message)}}
+        let view_item=bytes.view(item)
+        var pixel:u64=0
+        if first{
+          loop{if pixel>=plane{break}
+            array.push(merged,view.get(view_item,pixel))
+            pixel=pixel+1}
+          first=false
+        }else{
+          loop{if pixel>=plane{break}
+            let value:u8=cast.bits(view.get(view_item,pixel))
+            if value!=0{array.set(merged,pixel,view.get(view_item,pixel))}
+            pixel=pixel+1}
+        }
+        k=k+1}
+      out=bytes.from_array(merged)
+    }
+    var again:u64=0
+    loop{if again>=repeat{break}
+      match files.sink_write(sink,bytes.view(out)){ok(_)=>{},
+        err(_)=>{let _=files.sink_discard(sink)
+          return result.err("Cannot write the SAM 3.1 mask")}}
+      again=again+1}
+    frame=frame+1}
+  match files.sink_publish(sink,true){ok(_)=>{},
+    err(_)=>{return result.err("Cannot write the SAM 3.1 mask")}}
+  result.ok(())
+}
+
+fn fallback(job:Job own)->auto_mask.Outcome
+    effects{alloc,fs.meta,fs.read,fs.write,gpu,process,time}{
+  var owned=job
+  var old=auto_mask.Job{plugin:string.copy(struct.borrow(owned,field=plugin)),
+    model:string.copy(struct.borrow(owned,field=model)),
+    source:string.copy(struct.borrow(owned,field=source)),
+    prompt:string.copy(struct.borrow(owned,field=prompt)),
+    raw_output:string.copy(struct.borrow(owned,field=raw_output)),
+    preview_output:string.copy(struct.borrow(owned,field=preview_output)),
+    frames:owned.frames}
+  var outcome=auto_mask.run(old)
+  if outcome.succeeded{
+    struct.set(outcome,text.concat("SAM 3 mask ready · ",text.concat(
+      str.view(string.from_int(owned.frames))," frames")),field=message)}
+  outcome
+}
+
+pub fn run(job:Job own)->auto_mask.Outcome
+    effects{alloc,fs.meta,fs.read,fs.write,gpu,process,time}{
+  var owned=job
+  if owned.frames==0{return failed("Automatic masking needs at least one frame")}
+  match files.exists(struct.borrow(owned,field=sam31_model)){
+    ok(present)=>{if not present{return fallback(owned)}},
+    err(_)=>{return fallback(owned)}}
+  let started=time.monotonic_ns()
+
+  let token=str.view(string.from_int(time.monotonic_ns()))
+  let probe_root=path.join("/tmp",text.concat("air-sam31-mask-probe-",token))
+  var info=match media.probe("/nonexistent/air-image-provider",
+      struct.borrow(owned,field=source),str.view(probe_root)){
+    ok(value)=>value,err(message)=>{return failed(str.view(message))}}
+  let _=files.remove(str.view(probe_root))
+  let width:u64=cast.sat(info.width)
+  let height:u64=cast.sat(info.height)
+  if width==0 or height==0{return failed("SAM 3.1 source has invalid geometry")}
+  let plane:u64=width*height
+
+  // A still is tracked as one frame and its mask repeated for every output frame.
+  let tracked:u64=if info.video{owned.frames}else{1}
+  let rgb=text.concat(struct.borrow(owned,field=raw_output),".rgb")
+  let work=text.concat(struct.borrow(owned,field=raw_output),".sam31")
+  var decode:array<string> = ["ffmpeg","-nostdin","-v","error","-y","-i",
+    string.copy(struct.borrow(owned,field=source))]
+  if info.video{array.push(decode,"-vf")
+    array.push(decode,"fps=24")}
+  array.push(decode,"-frames:v")
+  array.push(decode,string.from_int(tracked))
+  array.push(decode,"-f")
+  array.push(decode,"rawvideo")
+  array.push(decode,"-pix_fmt")
+  array.push(decode,"rgb24")
+  array.push(decode,string.copy(str.view(rgb)))
+  match check(decode,"Could not decode source for SAM 3.1"){
+    ok(_)=>{},err(message)=>{return failed(str.view(message))}}
+
+  var request=sam31.Job{model:string.copy(struct.borrow(owned,field=sam31_model)),
+    source_rgb:string.copy(str.view(rgb)),prompt:string.copy(struct.borrow(owned,field=prompt)),
+    output_dir:string.copy(str.view(work)),frames:tracked,width:width,height:height}
+  let tracking=sam31.track(request)
+  let _=files.remove(str.view(rgb))
+  match tracking{ok(_)=>{},err(message)=>{let _=files.remove(str.view(work))
+    return failed(str.view(message))}}
+
+  let index=match files.read_text(str.view(path.join(str.view(work),"tracks.tsv"))){
+    ok(value)=>value,err(_)=>{let _=files.remove(str.view(work))
+      return failed("SAM 3.1 wrote no track index")}}
+  var found=match sam_tracks.parse_index(str.view(index),str.view(work),tracked){
+    ok(value)=>value,err(message)=>{let _=files.remove(str.view(work))
+      return failed(str.view(message))}}
+  if array.len(found)==0{
+    let _=files.remove(str.view(work))
+    return failed("SAM 3.1 found no match")}
+  let merged=merge_tracks(found,tracked,plane,if info.video{1}else{owned.frames},
+    str.view(struct.borrow(owned,field=raw_output)))
+  let _=files.remove(str.view(work))
+  match merged{ok(_)=>{},err(message)=>{return failed(str.view(message))}}
+
+  let size=text.concat(str.view(string.from_int(width)),text.concat("x",
+    str.view(string.from_int(height))))
+  match check(["ffmpeg","-nostdin","-v","error","-y","-f","rawvideo",
+      "-pixel_format","gray","-video_size",size,"-framerate","24","-i",
+      string.copy(struct.borrow(owned,field=raw_output)),"-frames:v",
+      string.from_int(owned.frames),"-an","-c:v","libx264","-preset","fast",
+      "-crf","0","-pix_fmt","yuv420p",
+      string.copy(struct.borrow(owned,field=preview_output))],
+      "Could not encode the automatic-mask preview"){
+    err(message)=>{return failed(str.view(message))},ok(_)=>{}}
+  let seconds=(time.monotonic_ns()-started)/1000000000
+  auto_mask.Outcome{succeeded:true,
+    mask_path:string.copy(struct.borrow(owned,field=preview_output)),
+    message:text.concat("SAM 3.1 mask ready · ",text.concat(
+      str.view(string.from_int(owned.frames)),text.concat(" frames · ",
+      text.concat(str.view(string.from_int(seconds))," s")))),
+    width:width,height:height,frames:owned.frames}
+}

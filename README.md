@@ -476,7 +476,7 @@ picture alone but remain explicit-mask modes.
 
 #### Automatic SAM 3 subject masks
 
-Edit now has **Auto Mask with SAM 3** directly below Source. Enter a text concept
+Edit now has **Auto Mask with SAM 3.1** directly below Source. Enter a text concept
 such as `person`, `blue robot`, or `car`, then press the button. The native CUDA
 model detects that concept and tracks it over the complete 24 FPS edit timeline;
 the generated mask is loaded into the synchronized mask-video overlay and is

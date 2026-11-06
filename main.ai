@@ -29,6 +29,7 @@ import "character_sheet.ai" as character_sheet
 import "character_swap.ai" as character_swap
 import "masked_runtime.ai" as masked_runtime
 import ".air/deps/sam3/mask.ai" as auto_mask
+import "sam31_mask.ai" as sam31_mask
 import "masked_edit.ai" as masked_edit
 import "video_swap.ai" as video_swap
 import "outpaint.ai" as outpaint
@@ -2192,7 +2193,7 @@ pub fn main(args: view<str>) -> i32
           if array.len(auto_mask_jobs)!=0{
             let elapsed=(time.monotonic_ns()-edit_auto_mask_started)/1000000000
             let _=desk.set_text(session,"edit_status",text.concat(
-              "SAM 3 tracking mask · ",text.concat(str.view(string.from_int(elapsed))," s")))
+              "Tracking mask · ",text.concat(str.view(string.from_int(elapsed))," s")))
             match task.wait_any(auto_mask_jobs,0){
               some(_)=>{
                 var completed=task.join(option.unwrap(array.pop(auto_mask_jobs)))
@@ -2209,7 +2210,9 @@ pub fn main(args: view<str>) -> i32
                   let _=desk.play_muted(session,"edit_mask_video",str.view(edit_mask_path))
                   let _=desk.seek(session,"edit_mask_video",edit_position)
                   let _=desk.set_text(session,"edit_mask_name",text.concat(
-                    "SAM 3 · ",text.concat(str.view(edit_auto_mask_prompt)," · tracked mask")))
+                    if text.contains(struct.borrow(completed,field=message),"SAM 3.1"){
+                      "SAM 3.1 · "}else{"SAM 3 · "},
+                    text.concat(str.view(edit_auto_mask_prompt)," · tracked mask")))
                   generation_notification("MM-Air automatic mask ready",
                     str.view(edit_mask_path))
                 }else{generation_notification("MM-Air automatic mask failed",
@@ -3729,7 +3732,7 @@ pub fn main(args: view<str>) -> i32
                   if str.len(str.view(edit_mask_path))!=0{
                     "Spatial subject mask will preserve the background during repair"
                   }else{
-                    "Optional: Auto Mask with SAM 3 to preserve the background"})
+                    "Optional: Auto Mask with SAM 3.1 to preserve the background"})
                 let _=desk.set_text(session,"edit_status",
                   "Enter the bad frame range, preview the exact plan, then run")
               }
@@ -4924,7 +4927,7 @@ pub fn main(args: view<str>) -> i32
             }
             if id=="edit_auto_mask"{
               if array.len(auto_mask_jobs)!=0{
-                let _=desk.set_text(session,"edit_status","SAM 3 is already tracking a mask")
+                let _=desk.set_text(session,"edit_status","Auto Mask is already running")
                 continue
               }
               if str.len(str.view(edit_source))==0 or
@@ -4939,14 +4942,16 @@ pub fn main(args: view<str>) -> i32
               let preview=path.join(system.temp_directory(),text.concat("mm-air-sam3-",
                 text.concat(token,".mp4")))
               let mask_frames:u64=if edit_source_video{edit_source_frames}else{22}
-              var work=auto_mask.Job{plugin:string.copy(str.view(sam3_plugin)),
-                model:string.copy(str.view(sam3_model)),source:string.copy(str.view(edit_source)),
+              var work=sam31_mask.Job{plugin:string.copy(str.view(sam3_plugin)),
+                model:string.copy(str.view(sam3_model)),
+                sam31_model:string.copy(str.view(sam31_model)),
+                source:string.copy(str.view(edit_source)),
                 prompt:string.copy(text.trim(str.view(edit_auto_mask_prompt))),
                 raw_output:raw,preview_output:preview,frames:mask_frames}
               edit_auto_mask_started=time.monotonic_ns()
-              array.push(auto_mask_jobs,task.spawn(work,fn=auto_mask.run))
+              array.push(auto_mask_jobs,task.spawn(work,fn=sam31_mask.run))
               let _=desk.set_bool(session,"edit_auto_mask","sensitive",false)
-              let _=desk.set_text(session,"edit_status","Loading local SAM 3 and finding the prompted subject")
+              let _=desk.set_text(session,"edit_status","SAM 3.1 · finding the subject")
               continue
             }
             if id == "edit_clear" {
@@ -7029,6 +7034,7 @@ pub fn main(args: view<str>) -> i32
                       swap_mask_expand,swap_mask_strategy,swap_mask_padding,
                       swap_mask_preserve)}
                     generation.enable_masked_composite(job,mask_settings)
+                    generation.set_sam31_model(job,str.view(sam31_model))
                     match generation.enable_two_matte(job,str.view(sam3_plugin),
                         str.view(sam3_model)) {
                       ok(_)=>{},err(message)=>{generation_status(session,
@@ -7103,6 +7109,7 @@ pub fn main(args: view<str>) -> i32
                           str.view(message))
                           continue},
                       }
+                      generation.set_sam31_model(job,str.view(sam31_model))
                       match generation.enable_two_matte(job,str.view(sam3_plugin),
                           str.view(sam3_model)){
                         ok(_)=>{},err(message)=>{generation_status(session,
