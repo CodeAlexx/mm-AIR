@@ -185,6 +185,12 @@ Settings: `MM_AIR_MOSS_BASE_ROOT` and `MM_AIR_MOSS_SFT_ROOT` (the published fold
 `MM_AIR_LORA_DIR`, the folder **Add LoRA** opens for every model. One generation through the
 app's worker: `build/release/bin/image-generate MODEL OUT.png PROMPT SEED [STEPS]`.
 
+MOSS also takes an **Image prompt** (Generate, MOSS selected): up to four pictures the text encoder
+reads beside the prompt, each with its own strength (0-1, default 0.05; 0 leaves it out), a
+**Text strength** (default 1) and a **Vision size** (default 384). With no picture and text
+strength 1 the result is the ordinary MOSS image. The values save with the other MOSS parameters
+(`prompt_images`, `prompt_strength_percent`, `text_strength`, `vision_size`); older files still load.
+
 ### Fibo 2.0 Dev in Generate, Fibo 2.0 Edit Turbo in Image Edit (2026-11-05)
 
 **Fibo 2.0** (model 6 on Generate) is Bria's Fibo-2.0-dev text-to-image, run in the MM-Air
