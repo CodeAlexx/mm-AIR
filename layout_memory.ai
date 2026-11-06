@@ -43,14 +43,17 @@ pub fn restore(session:ref<desk.Session>)->unit effects{alloc,env,fs.read,fs.met
   loop{if i>=array.len(split_ids){break}
     let id=array.borrow(split_ids,i)
     let size=stored(str.view(key(id)))
-    // History (the right split's kept side) opens at 330 px when nothing is saved and
-    // never comes back wider than 600 px, so the preview always keeps most of the window.
+    // History (the right split's kept side) never comes back wider than 600 px, so the
+    // preview always keeps most of the window.
     let history:bool=id=="gen_right_split"
     match text.parse_u64(str.view(size)){
       some(value)=>{
         let kept:u64=if history and value>600{600}else{value}
         let _=desk.set_number(session,id,"kept",cast.float(kept))},
-      none=>{if history{let _=desk.set_number(session,id,"kept",330.0)}},}
+      none=>{
+        // Nothing saved: the owner's own Generate layout (11-01 saved widths).
+        let fallback:f64=if history{600.0}else if id=="gen_left_split"{469.0}else{571.0}
+        let _=desk.set_number(session,id,"kept",fallback)},}
     let folded=stored(str.view(text.concat(str.view(key(id)),"_COLLAPSED")))
     if folded!=""{let _=desk.set_bool(session,id,"collapsed",folded=="1")}
     i=i+1}
