@@ -139,7 +139,10 @@ pub fn apply(session:ref<desk.Session>,state:ref<State>)->result<unit,string>
   loop{if index>=array.len(panels){break}
     let id=array.borrow(panels,index)
     let _=try desk.set_bool(session,id,"hexpand",false)
-    let _=try desk.set_number(session,id,"width-request",cast.float(state.panel_width))
+    // Image Edit's controls (model, swap, LoRA strength, two source slots) need ~460 px;
+    // at the general side-panel width they were cut off and the panel slid sideways.
+    let width:u64=if id=="qwen_edit_panel" and state.panel_width<460{460}else{state.panel_width}
+    let _=try desk.set_number(session,id,"width-request",cast.float(width))
     index=index+1}
   let _=try desk.set_number(session,"gen_parameter_scroll","min-content-width",cast.float(state.panel_width))
   let _=try desk.set_number(session,"gen_parameter_scroll","max-content-width",cast.float(state.panel_width))
