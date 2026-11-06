@@ -3562,7 +3562,17 @@ pub fn main(args: view<str>) -> i32
               if id=="movie_shot_title"{movie.set_shot_text(movie_state,movie_state.selected_shot,0,desk.field(event,"value"))}
               if id=="movie_brief_buffer"{movie.set_shot_text(movie_state,movie_state.selected_shot,1,desk.field(event,"value"))}
               if id=="movie_plan_buffer"{movie.set_shot_text(movie_state,movie_state.selected_shot,2,desk.field(event,"value"))}
-              if id=="movie_prompt_buffer"{movie.set_shot_text(movie_state,movie_state.selected_shot,3,desk.field(event,"value"))}
+              if id=="movie_prompt_buffer"{
+                // The tab shows the prompt built from brief/plan; only text that differs from
+                // it is the user's own H3 prompt. A control snapshot (startup, restore) reports
+                // the shown text back and must not freeze it as an override.
+                let typed=desk.field(event,"value")
+                movie.set_shot_text(movie_state,movie_state.selected_shot,3,"")
+                var current=movie.snapshot_shot(movie_state,movie_state.selected_shot)
+                let built=movie.compile_prompt(current)
+                if text.trim(str.view(typed))!=text.trim(str.view(built)){
+                  movie.set_shot_text(movie_state,movie_state.selected_shot,3,str.view(typed))}
+              }
               if id=="movie_soundscape_buffer"{movie.set_shot_text(movie_state,movie_state.selected_shot,4,desk.field(event,"value"))}
               if id=="movie_music_buffer"{movie.set_shot_text(movie_state,movie_state.selected_shot,5,desk.field(event,"value"))}
               if id=="movie_duration"{movie.set_duration(movie_state,movie_state.selected_shot,desk.number(event,"value"))}
