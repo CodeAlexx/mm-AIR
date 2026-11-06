@@ -619,9 +619,10 @@ fn filter_parameters(session:ref<desk.Session>,query:str,model:u32,swap_mode:u32
   let _ = desk.set_bool(session,"gen_swap_group","visible",not image_model and
     (wanted == "" or text.contains(
       "h3 mode character swap source video replacement target identity qwen prompt",wanted)))
-  // LoRAs apply to Krea 2 and to H3 runs; Character Swap adds its Settings LoRA files.
-  let _ = desk.set_bool(session,"gen_lora_group","visible",(krea or moss or fibo or not image_model) and
-    (wanted == "" or text.contains("krea h3 moss fibo lora overlay strength",wanted)))
+  // LoRAs apply to Krea 2, MOSS, Fibo, Qwen-Image-2.1 and H3 runs; Character Swap adds its
+  // Settings LoRA files.
+  let _ = desk.set_bool(session,"gen_lora_group","visible",(krea or moss or fibo or qwen_image or not image_model) and
+    (wanted == "" or text.contains("krea h3 moss fibo qwen lora overlay strength",wanted)))
   let _=desk.set_bool(session,"gen_image_sampling","visible",(moss or fibo) and
     (wanted=="" or text.contains("sampling steps cfg guidance shift speed fast negative prompt",wanted)))
   let _=desk.set_bool(session,"gen_image_shift_row","visible",moss)
@@ -6679,7 +6680,8 @@ pub fn main(args: view<str>) -> i32
                     qwen_image_contract.turbo_steps()}else{qwen_image_steps},
                   seed:if seed<0{time.monotonic_ns()}else{cast.wrap(seed)},
                   scheduler:qwen_effective_scheduler(qwen_turbo,qwen_image_scheduler),
-                  sampler:qwen_image_sampler,enhance:enhance_prompt,loras:array.new()}
+                  sampler:qwen_image_sampler,enhance:enhance_prompt,
+                  loras:parameters.clone_loras(generate_loras)}
                 if id=="gen_save_parameters"{
                   match parameters.encode_qwen_image(request){
                     ok(value)=>{save_parameter_snapshot(session,output_directory,value)},

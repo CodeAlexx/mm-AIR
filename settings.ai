@@ -148,7 +148,9 @@ pub fn apply(session:ref<desk.Session>,state:ref<State>)->result<unit,string>
     // at the general side-panel width they were cut off and the panel slid sideways.
     // Edit's left column (brush row, Erase/Clear) needs ~340 px.
     let width:u64=if id=="qwen_edit_panel" and state.panel_width<460{460}
-      else if id=="edit_left_panel" and state.panel_width<340{340}else{state.panel_width}
+      else if id=="edit_left_panel" and state.panel_width<340{340}
+      // Movie's Shot tab (frame choosers, width/height boxes) needs ~400 px.
+      else if id=="movie_right_panel" and state.panel_width<400{400}else{state.panel_width}
     let _=try desk.set_number(session,id,"width-request",cast.float(width))
     index=index+1}
   let _=try desk.set_number(session,"gen_parameter_scroll","min-content-width",cast.float(state.panel_width))
