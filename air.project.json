@@ -19,6 +19,14 @@
         "entry": "tests/runtime_config.ai"
       },
       {
+        "name": "krea-pose-generate",
+        "entry": "tests/native_krea_pose.ai"
+      },
+      {
+        "name": "image-generate",
+        "entry": "tests/native_image_generate.ai"
+      },
+      {
         "name": "mm-air-native-view-test",
         "entry": "tests/native_view.ai"
       },
@@ -53,6 +61,10 @@
       {
         "name": "character-swap-4b-smoke",
         "entry": "tests/character_swap_4b_smoke.ai"
+      },
+      {
+        "name": "guide-swap-generate",
+        "entry": "tests/guide_swap_generate.ai"
       },
       {
         "name": "character-replace-generate",
@@ -108,36 +120,41 @@
       }
     ],
     "test": [
-        {
-          "name": "native-generate",
-          "entry": "tests/native_generate.ai"
+      {"name": "mm-air-flux1-contract", "entry": "tests/flux1_contract.ai"},
+      {
+        "name": "native-generate",
+        "entry": "tests/native_generate.ai"
+      },
+      {
+        "name": "native-krea",
+        "entry": "tests/native_krea.ai"
+      },
+      {
+        "name": "native-h3",
+        "entry": "tests/native_h3.ai"
+      },
+      {
+        "name": "native-h3-job",
+        "entry": "tests/native_h3_job.ai"
+      },
+      {
+        "name": "native-worker-cancel",
+        "entry": "tests/native_worker_cancel.ai",
+        "requires": {
+          "gpu": true
         },
-        {
-          "name": "native-krea",
-          "entry": "tests/native_krea.ai"
+        "missing": "skip",
+        "timeout": "1m"
+      },
+      {
+        "name": "native-krea-cancel",
+        "entry": "tests/native_krea_cancel.ai",
+        "requires": {
+          "gpu": true
         },
-        {
-          "name": "native-h3",
-          "entry": "tests/native_h3.ai"
-        },
-        {
-          "name": "native-h3-job",
-          "entry": "tests/native_h3_job.ai"
-        },
-        {
-          "name": "native-worker-cancel",
-          "entry": "tests/native_worker_cancel.ai",
-          "requires": {"gpu": true},
-          "missing": "skip",
-          "timeout": "1m"
-        },
-        {
-          "name": "native-krea-cancel",
-          "entry": "tests/native_krea_cancel.ai",
-          "requires": {"gpu": true},
-          "missing": "skip",
-          "timeout": "1m"
-        },
+        "missing": "skip",
+        "timeout": "1m"
+      },
       {
         "name": "h3-library-import",
         "entry": "tests/h3_library_import.ai"
@@ -214,22 +231,44 @@
     "native_generate.ai",
     "native_movie.ai",
     "native_krea.ai",
+    "native_flux1.ai",
     "native_h3.ai",
     "native_seed.ai",
     "native_view.ai",
     "tests"
   ],
   "requires": {
-    "os": ["linux"],
-    "arch": ["x86_64"],
+    "os": [
+      "linux"
+    ],
+    "arch": [
+      "x86_64"
+    ],
     "airc": ">=0.1.0"
   },
   "dependencies": {
-    "prompt": {"path":"../../AIR/toolkits/prompt","version":">=0.1.0"},
-    "sam3": {"path":"../../AIR/toolkits/sam3","version":">=0.1.0"},
-    "seedvr2": {"path":"../../AIR/toolkits/seedvr2","version":">=0.1.0"},
-    "qwenimage21": {"path":"../../AIR/models/qwenimage21","version":">=0.1.0"},
-    "h3_repair": {"path":"../../AIR/toolkits/h3-repair","version":">=0.1.0"},
-    "flux3": {"path":"../../AIR/models/flux3","version":">=0.1.0"}
+    "flux1": {"path": "../AIR/models/flux1", "version": ">=0.1.0"},
+    "moss_image": {"path": "../AIR/models/moss_image", "version": ">=0.1.0"},
+    "fibo2": {"path": "../AIR/models/fibo2", "version": ">=0.1.0"},
+    "prompt": {
+      "path": "../AIR/toolkits/prompt",
+      "version": ">=0.1.0"
+    },
+    "sam3": {
+      "path": "../AIR/toolkits/sam3",
+      "version": ">=0.1.0"
+    },
+    "seedvr2": {
+      "path": "../AIR/toolkits/seedvr2",
+      "version": ">=0.1.0"
+    },
+    "qwenimage21": {
+      "path": "../AIR/models/qwenimage21",
+      "version": ">=0.1.0"
+    },
+    "h3_repair": {
+      "path": "../AIR/toolkits/h3-repair",
+      "version": ">=0.1.0"
+    }
   }
 }

@@ -1,4 +1,4 @@
-// Exercise the same CK worker used by the Windows presenter, with real weights.
+// Exercise the same worker used by the Windows presenter, with real weights.
 // Usage: native-krea-generate PARAMETERS.json
 module app.mm_air.tests.native_krea_generate
 import "../generate.ai" as generation
@@ -24,7 +24,7 @@ pub fn main(args:view<str>)->i32
   var work=generation.KreaJob{sources:sources,request:request,progress:channel.ticket(receiver)}
   var code:i32=1
   task.scope {
-    var jobs:array<task<generation.Outcome>> = [task.spawn(work,fn=generation.run_krea_ck)]
+    var jobs:array<task<generation.Outcome>> = [task.spawn(work,fn=generation.run_krea)]
     loop{
       match channel.recv_now(receiver,time.monotonic_ns()){
         ok(value)=>match value{some(message)=>{var update=message

@@ -2,6 +2,7 @@
 // from the exact same base video/context and differ only by Drift Control.
 module app.mm_air.tests.movie_drift_ab_generate
 
+import std.inference.h3.policy as h3_policy
 import "../generate.ai" as generation
 import "../movie_project.ai" as movie
 import std.inference.h3.media as media
@@ -37,7 +38,7 @@ fn continuation(configuration:ref<generation.Configuration>,context_path:str,
     session.Model.Base,session.Task.T2VA,geometry,references,audio,output,0,"",
     424242,19,session.Projection.ExactBF16,session.Projection.ConvRotI8,
     session.Attention.HybridExact3DenseInt8,channel.ticket(receiver),
-    session.Schedule.Exponential)
+    session.Schedule.Exponential,h3_policy.Sampler.Euler)
   match generation.enable_motion_context(job,context_path,22,120){
     ok(_)=>{},err(message)=>{let _=channel.close(receiver)
       return generation.Outcome{succeeded:false,output:string.copy(output),

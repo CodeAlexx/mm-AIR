@@ -44,6 +44,8 @@ pub fn restore(ui:ref<w.Ui>,base:u64,request:ref<parameters.KreaRequest>)->unit 
   w.set_text(ui,w.find(ui,base+1),struct.borrow(request,field=prompt))
   w.set_text(ui,w.find(ui,base+3),string.from_int(request.seed))
   w.set_text(ui,w.find(ui,base+6),struct.borrow(request,field=output))
+  w.set_text(ui,w.find(ui,base+14),struct.borrow(request,field=pose))
+  w.set_text(ui,w.find(ui,base+16),string.from_float(request.pose_scale))
   var index:u64=0
   loop{if index>=array.len(struct.borrow(request,field=loras)){break}
     let entry=array.borrow(struct.borrow(request,field=loras),index)
@@ -68,6 +70,10 @@ pub fn fields_page(ui:ref<w.Ui>,parent:u64,base:u64,request:ref<parameters.KreaR
   let _=w.label(ui,base+4,parent,24,"Krea 2 Turbo · 1024 × 1024 · 8 steps")
   let _=w.label(ui,base+5,parent,24,"Output PNG")
   let _=w.field(ui,base+6,parent,30,struct.borrow(request,field=output))
+  let _=w.label(ui,base+13,parent,24,"Pose control: skeleton .png (used as is) or keypoints .json (empty = off)")
+  let _=w.field(ui,base+14,parent,30,struct.borrow(request,field=pose))
+  let _=w.label(ui,base+15,parent,24,"Pose scale: 1.0 default, 1.25 to 1.5 stronger. Output takes the pose size. Keypoints are drawn at their own canvas, line 3 / joint 4 (assumption)")
+  let _=w.field(ui,base+16,parent,30,string.from_float(request.pose_scale))
   let _=w.label(ui,base+7,parent,24,"LoRAs: enabled, checkpoint path, strength")
   let controls=w.toolbar(ui,base+8,parent,30,8,0)
   let _=w.button(ui,base+9,controls,120,"Add LoRA")
@@ -118,7 +124,14 @@ pub fn snapshot(ui:ref<w.Ui>,base:u64,prior:ref<parameters.KreaRequest>)->result
       enabled:w.checked_of(ui,w.find(ui,key+1))})
     index=index+1
   }
+  var pose_scale=prior.pose_scale
+  if w.find(ui,base+16)!=0{
+    pose_scale=match text.parse_f64(w.text_of(ui,w.find(ui,base+16))){
+      some(value)=>value,none=>{return result.err("Pose scale must be a finite number")},}
+  }
+  let pose=if w.find(ui,base+14)!=0{w.text_of(ui,w.find(ui,base+14))}else{string.copy(struct.borrow(prior,field=pose))}
   var proposed=parameters.KreaRequest{prompt:w.text_of(ui,w.find(ui,base+1)),seed:seed,
-    width:prior.width,height:prior.height,output:w.text_of(ui,w.find(ui,base+6)),loras:entries}
+    width:prior.width,height:prior.height,output:w.text_of(ui,w.find(ui,base+6)),loras:entries,
+    pose:pose,pose_scale:pose_scale}
   result.ok(proposed)
 }

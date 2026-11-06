@@ -1,4 +1,5 @@
 module app.mm_air.tests.native_h3_worker
+import "h3_presets_fixture.ai" as fixture
 import "../generate.ai" as generation
 import "../parameters.ai" as parameters
 import std.inference.h3.request as h3
@@ -13,8 +14,11 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,fs.meta,fs.read,fs.write,gpu
   let root=view.get(args,1)
   let output=path.join(root,"must-not-exist.mp4")
   var config=generation.Configuration{checkpoint_root:path.join(root,"absent"),reference_checkpoint_root:"",
-    donor_root:path.join(root,"prepared"),manifest_root:path.join(root,"manifests"),scratch_root:string.copy(root)}
-  var request=h3.request("A robot walks, birds sing",0,0,3,1,2,4,42,6,[],output)
+    donor_root:path.join(root,"prepared"),manifest_root:path.join(root,"manifests"),
+    deployment_file:path.join(root,"h3_deployment.json"),presets:fixture.presets(),
+    scratch_root:string.copy(root)}
+  var request=h3.request("A robot walks, birds sing",0,0,3,1,2,3,42,6,[],output)
+  fixture.with_preset_geometry(struct.borrow(config,field=presets),request)
   var loras:array<parameters.LoraEntry> = []
   var receiver=match channel.open(128,1024){ok(v)=>v,err(_)=>{return 3},}
   var job=match generation.h3_job(config,request,loras,channel.ticket(receiver)){ok(v)=>v,err(_)=>{return 4},}

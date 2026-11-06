@@ -3,6 +3,7 @@
 // the authored brush mask is composited back into a lossless PNG.
 module app.mm_air.tests.masked_image_generate
 
+import std.inference.h3.policy as h3_policy
 import "../generate.ai" as generation
 import "../masked_edit.ai" as edit
 import "../masked_runtime.ai" as masked
@@ -40,7 +41,7 @@ pub fn main(args:view<str>)->i32
   var job=generation.job(configuration,prompt,session.Model.Reference,
     session.Task.Ref2VA,geometry,references,audio,view.get(args,2),0,"",424242,19,
     session.Projection.ExactBF16,session.Projection.RowScaledI8,
-    session.Attention.DenseInt8,channel.ticket(receiver),session.Schedule.Exponential)
+    session.Attention.DenseInt8,channel.ticket(receiver),session.Schedule.Exponential,h3_policy.Sampler.Euler)
   var points:array<edit.BrushPoint> = []
   array.push(points,edit.brush_point(0.510,0.125,0.072,false,true))
   array.push(points,edit.brush_point(0.545,0.175,0.055,false,false))

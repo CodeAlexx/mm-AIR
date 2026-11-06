@@ -2,6 +2,7 @@
 // exercises the same generation.Job worker used by the desktop Generate tab.
 module app.mm_air.tests.windowed_generate
 
+import std.inference.h3.policy as h3_policy
 import "../generate.ai" as generation
 import std.inference.h3.media as media
 import std.inference.h3.session as session
@@ -38,7 +39,7 @@ pub fn main(args:view<str>)->i32
   var job=generation.job(configuration,prompt,session.Model.Base,
     session.Task.T2VA,geometry,references,audio,view.get(args,1),0,"",424242,7,
     session.Projection.ExactBF16,session.Projection.ExactBF16,
-    session.Attention.Exact,channel.ticket(receiver),session.Schedule.Simple)
+    session.Attention.Exact,channel.ticket(receiver),session.Schedule.Simple,h3_policy.Sampler.ResMultistep)
   match generation.enable_windowed(job,39,22) {
     ok(_)=>{},err(message)=>{return failure(str.view(message))},
   }

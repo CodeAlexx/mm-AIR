@@ -4,6 +4,7 @@
 // target from planning alone.
 module app.mm_air.tests.rolling_repair_generate
 
+import std.inference.h3.policy as h3_policy
 import "../generate.ai" as generation
 import "../repair_runtime.ai" as repair_runtime
 import std.inference.h3.media as media
@@ -48,7 +49,7 @@ pub fn main(args:view<str>)->i32
     session.Model.Reference,session.Task.Ref2VA,geometry,references,[],output,
     0,"",202609131337,7,session.Projection.ConvRotI8,
     session.Projection.RowScaledI8,session.Attention.DenseInt8,
-    channel.ticket(receiver),session.Schedule.Exponential)
+    channel.ticket(receiver),session.Schedule.Exponential,h3_policy.Sampler.ResMultistep)
   var settings=repair_runtime.settings(12,48,5,5,1.0,
     repair_plan.MemoryMode.Rolling,39,22)
   match repair_runtime.set_spatial_mask(settings,source_mask,2,8,4){

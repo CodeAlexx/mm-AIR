@@ -3,7 +3,7 @@
 MM-Air is a native desktop application for AI media generation, written in AIR:
 MiniMax H3 video with audio (text, image, first/last-frame and reference
 conditioned, Character Swap with a turbo path), Krea 2 Turbo, Qwen-Image-2.1
-(and its Turbo) and FLUX 3 Image Klein images and edits with the models' own
+(and its Turbo) images and edits with the model's own
 prompt enhancers, a Qwen3-VL Prompt Lab, editing, and a Movie workspace.
 
 This repository publishes the **MM-Air application source only**. **AIR itself
@@ -20,7 +20,7 @@ Copies run on a native worker; originals/history stay intact and repeated copies
 receive non-overwriting numbered filenames. No save dialog is opened.
 
 MM-AIR is the native AIR desktop application for generation. Generate links
-MiniMax H3, Krea 2 Turbo, Qwen-Image-2.1 and FLUX 3 Image Klein AIR-language
+MiniMax H3, Krea 2 Turbo and Qwen-Image-2.1 AIR-language
 sessions directly.
 Its six main surfaces are:
 
@@ -28,7 +28,7 @@ Its six main surfaces are:
   MiniMax H3 model selected.
 - Edit, a localized source-preserving image/video workspace with authored masks,
   tracked crops, references, Qwen analysis, and H3 video execution.
-- Image Edit, a dedicated Qwen-Image-2.1 / FLUX 3 Image Klein source-image and
+- Image Edit, a dedicated Qwen-Image-2.1 source-image and
   edit-instruction workspace with side-by-side source/result previews.
 - Movie Maker, based on Mojo Serenity's H3 Studio project, shot, inspector and
   continuity-spine workspace.
@@ -103,7 +103,8 @@ one to ten ordered PNG sources and one natural-language edit instruction. The
 first source is the primary picture and later sources retain their displayed
 order as additional visual conditions. Both paths call the
 same linked `models.qwenimage21.session` package inside the MM-Air process;
-there is no Python runtime, HTTP model service, or helper model process.
+there is no Python runtime, HTTP model service, or helper model process
+boundary.
 
 Generate exposes the seven creator-published output geometries, an editable
 2–100 step count, seed, the creator dynamic Flow schedule or a native linear
@@ -159,18 +160,56 @@ the denoise loop. The 2026-09-20 bounded T2I and edit smokes both completed at
 the direct runtime and edit route, not the visual quality of the required
 40-step production recipe.
 
-### FLUX 3 Image Klein, Qwen-Image Turbo and prompt enhancers (2026-10-15)
+### FLUX 3 Image Klein removed (2026-11-05)
 
-**FLUX 3 Image Klein** is model 4 on Generate and an entry in Image Edit's
-**EDIT MODEL** dropdown. It runs the native AIR pipeline in `models/flux3`:
-- the 16-step flow-map sampler;
-- an INT8 DiT that stays resident on the GPU for every step;
-- any size from 64 to 4096 px in multiples of 16, sampled natively (tiled decode above 2 MP);
-- 1-10 ordered references for edits. "FLUX 3: match first source size" uses the
-  first prepared reference's size; untick it to use Width/Height.
+FLUX 3 Image Klein is no longer on Generate's model list or in Image Edit's
+**EDIT MODEL** dropdown (owner request). Its saved parameter files and history
+entries (schema `mm-air.flux3-klein.parameters`) are refused by name on Load or
+Reuse; they never restore as another model. Existing FLUX 3 PNGs stay in the
+gallery and output folders.
 
-A 1024² image takes about 15 s and a 1 MP edit about 22 s. Weights come from
-`FLUX3_KLEIN_ROOT` (the downloaded folder plus its `air-int8/` DiT).
+### MOSS-Image Base and SFT (2026-11-05)
+
+Generate's model list has **MOSS-Image Base** (model 4) and **MOSS-Image SFT** (model 5),
+text-to-image PNGs made in the MM-Air process by AIR's `models/moss_image` generator
+(`generate.run_adapted`): the text encoder is read once and freed, the DiT is read once and
+stays resident for every step, then the VAE decodes. The **Sampling** panel holds Steps
+(default 50), Guidance (CFG, default 3), Shift (default 5), Speed (Best quality, or Fast:
+the INT8 projections, about twice as fast with slightly different fine detail) and an optional
+negative prompt; size is any 256–2048 px in multiples of 16 (default 1024²). LoRA, LoHa, LoKr
+and the other LyCORIS/PEFT adapters from **Model LoRA** run beside the DiT at their strength and
+are never merged. Outputs go to `output/moss-image/generate` with the usual parameter sidecar
+(schema `mm-air.moss-image.parameters.v1`), History and Reuse.
+
+Settings: `MM_AIR_MOSS_BASE_ROOT` and `MM_AIR_MOSS_SFT_ROOT` (the published folders), and
+`MM_AIR_LORA_DIR`, the folder **Add LoRA** opens for every model. One generation through the
+app's worker: `build/release/bin/image-generate MODEL OUT.png PROMPT SEED [STEPS]`.
+
+### Fibo 2.0 Dev in Generate, Fibo 2.0 Edit Turbo in Image Edit (2026-11-05)
+
+**Fibo 2.0** (model 6 on Generate) is Bria's Fibo-2.0-dev text-to-image, run in the MM-Air
+process by AIR's `models/fibo2` (`generate.run`): the Qwen3-VL-4B encoder is read once and
+closed, the 8.1B transformer is read once and stays resident on the GPU for every step, then
+the FLUX.2 VAE decodes. The **Sampling** panel shows Steps (default 50), Guidance (default 5)
+and an optional negative prompt (empty uses the model's own); size 256–2048 px in multiples
+of 16 (default 1024²). LoRAs from **Model LoRA** run unmerged. Fibo reports no per-step
+progress; the elapsed timer runs until it finishes.
+
+**Fibo 2.0 Edit Turbo** is the second entry in Image Edit's **EDIT MODEL** dropdown. Image 1
+is the picture to change and up to four more images guide it (PNG or JPEG, five in all); the
+instruction box is the edit instruction. It runs the creator's 4 steps at guidance 1. **Keep
+the first image's size** (on by default) uses image 1's trained size; untick it to use Width
+and Height. The Qwen-only controls (Turbo, prompt enhancer, swaps, schedule, solver, steps)
+are hidden while it is selected. Outputs: `output/fibo2/generate` and `output/fibo2/edit`,
+schema `mm-air.fibo2.parameters.v1`; Reuse restores Dev runs on Generate and edits on
+Image Edit.
+
+Settings: `MM_AIR_FIBO_DEV_ROOT`, `MM_AIR_FIBO_EDIT_TURBO_ROOT` (the published folders) and
+`MM_AIR_FIBO_PIPELINE_PRESET` (AIR's `models/fibo2/presets/pipeline.json`). One generation
+through the app's worker: `image-generate fibo-2.0-dev OUT.png PROMPT SEED` or
+`image-generate fibo-2.0-edit-turbo OUT.png INSTRUCTION SEED 0 SOURCE.png [REF...]`.
+
+### Qwen-Image Turbo and prompt enhancers (2026-10-15)
 
 **Qwen-Image-2.1-Turbo** is the **Turbo (8 steps)** checkbox on Generate (Qwen
 Sampling) and Image Edit. It is on by default, keeps your last choice across restarts, and
@@ -196,11 +235,8 @@ collapsed sections are remembered in your preferences (`%LOCALAPPDATA%\mm-air\ru
 `MM_AIR_UI_*` keys), and so is the Turbo checkbox (`MM_AIR_QWEN_TURBO`). This needs the matching `MM-Air-UI.exe` (AIR
 `toolkits/desktop/windows/air_ui.cpp`).
 
-**Enhance prompt** checkboxes on Generate and Image Edit (both on by default) run
-the model's own 9B prompt rewriter first:
-- **FLUX 3:** BFL's prompt upsampler (`FLUX3_PUP_ROOT`), about 15 s. For edits it
-  looks at the references.
-- **Qwen-Image:** Qwen-Image-2.1-PE-T2I (`QWEN_IMAGE21_PE_T2I_ROOT`) or PE-I2I for
+**Enhance prompt** checkboxes on Generate and Image Edit (both on by default, Qwen-Image
+only) run the model's own 9B prompt rewriter first: Qwen-Image-2.1-PE-T2I (`QWEN_IMAGE21_PE_T2I_ROOT`) or PE-I2I for
   edits (`QWEN_IMAGE21_PE_I2I_ROOT`). These think before answering, so they take
   about 1-2 min. They also choose the aspect ratio (text-to-image) or which source's
   aspect to keep (edits), and the status line reports the size used.
@@ -221,7 +257,7 @@ is loading the model.
 The rewriter loads, runs and is freed before the image model loads. The
 rewritten prompt is saved next to the PNG as `<name>.png.prompt.txt`. Untick the
 box to send the prompt exactly as typed at the size you set. All of this runs
-natively in AIR (`models/qwen35`); see AIR's `docs/models/FLUX3_KLEIN.md`,
+natively in AIR (`models/qwen35`); see AIR's
 `docs/models/QWEN35.md` and `docs/models/QWEN_IMAGE_2_1.md` for parity evidence.
 
 ### SeedVR2 Generate post-processing
@@ -504,7 +540,7 @@ blend area remained source-identical.
 Generate includes a native H3 character-sheet preset adapted from
 [`PoopMan333/H3_Character_Sheet_Generator`](https://huggingface.co/PoopMan333/H3_Character_Sheet_Generator)
 at revision `13c095e84c6d651d49ddcbdb672779cc66a7d44d`. It does not execute that
-repository's workflow. The preset selects H3 Reference/Ref2VA, supplies
+repository's workflow graph. The preset selects H3 Reference/Ref2VA, supplies
 the source's fixed orbit prompt, accepts the existing ordered set of up to nine
 visual references, and performs frame extraction and stitching inside AIR.
 
@@ -630,7 +666,7 @@ sky, framing, and walking path matched the source. Source-video VAE encode took
 Swap speed-up (same day): the source clip was encoded on the 768-short-edge
 creator canvas (1344x768 for an 832x480 clip), tripling encoder tiles and
 reference tokens. Unmasked swaps now set `reference_video_match` and encode at
-the target resolution (reference size matched to the target). The H3 encoder's cuDNN
+the target resolution. The H3 encoder's cuDNN
 Conv3d workspace cap rose from 64 MiB to 1 GiB, which picks kernels 3.6x faster
 per 17x256x256 tile (`tests/video_encode_bench.ai`; moments rel_l2 1.2e-4).
 The same job now takes 48 s to encode, 3m04s to sample, and 4m50s end to end
@@ -638,7 +674,7 @@ The same job now takes 48 s to encode, 3m04s to sample, and 4m50s end to end
 
 ### Turbo Character Swap and corrected LoRA layout (2026-10-15)
 
-- **Layout fix.** Third-party-format LoRAs (the akatz swap LoRA, lightx2v turbo)
+- **Layout fix.** Single-file community LoRAs (the akatz swap LoRA, lightx2v turbo)
   address fused QKV as contiguous [q;k;v], but the raw official shards
   interleave Q/K/V per head (diffusers `reorder_interleaved_qkv`). FC1 is
   [gate; value] in both. Checked exactly against the Diffusers build of the turbo
@@ -669,6 +705,20 @@ The swap and turbo LoRAs are no longer merged into checkpoint roots. AIR's H3
 ConvRot path now applies PEFT adapters at runtime (`std.inference.h3`
 `forward_convrot_lora`), so a new or updated swap LoRA is just a file:
 
+- **Guide-video adapters (character swap v1.1, head swap r32):** in Character Swap, "Source video is used as" chooses
+  *Guide video · character swap* or *Guide video · head swap*. The source clip is then packed as an aligned guide beside
+  the character pictures (it is not a `<Video 1>` reference), the adapter file named in Settings
+  (`MM_AIR_H3_GUIDE_CHARACTER_SWAP_LORA`, `MM_AIR_H3_GUIDE_HEAD_SWAP_LORA`) runs unmerged, and Build Prompt has Qwen describe
+  the first picture and fills the adapter's own template (`body_swap:` / `head_swap:`), which stays editable. Output frames
+  are `17n + 5`; Turbo is not available with these adapters. The adapters and templates are Alissonerdx's (credit and terms in
+  `docs/models/H3.md`).
+- **Guide-video edit adapters (VFX edit, style transfer, sharpen):** the same dropdown also lists *Guide video · VFX edit*,
+  *style transfer* and *sharpen*. The source clip is an aligned guide; pictures are optional (the edited first frame for the
+  `_ffp` VFX adapter, the style picture for style transfer; none for sharpen). Build Prompt sets the adapter's trigger word
+  (`vfx_edit:` / `style_transfer:`) in front of your sentence, or the sharpness adapter's fixed caption. Settings:
+  `MM_AIR_H3_GUIDE_VFX_EDIT_LORA`, `MM_AIR_H3_GUIDE_STYLE_TRANSFER_LORA`, `MM_AIR_H3_GUIDE_SHARPEN_LORA`. Live wallpaper is
+  ordinary Ref2VA with one to three pictures and its LoRA in the Generate LoRA list. Credit and terms: Alissonerdx (see
+  `docs/models/H3.md`).
 - **Settings:** `MM_AIR_H3_CHARACTER_SWAP_LORA` (the swap LoRA) and
   `MM_AIR_H3_CHARACTER_SWAP_TURBO_LORA` (the 4-step turbo LoRA). Unmasked
   swaps add the swap LoRA, plus the turbo LoRA when Turbo is on, to the job's
@@ -852,8 +902,8 @@ single-window because reference-media slicing and authored-mask scheduling need
 their own product gate; the worker rejects rather than silently changing those
 semantics. Visual-only AV edits preserve the independent audio storage verbatim;
 a visual subject mask is never converted into an audio mask.
-These behaviors were independently implemented in native AIR; MM-Air includes
-no third-party node or runtime code.
+These behaviors are independently implemented in native AIR; no external node or
+runtime code is included.
 
 The bounded product receipt is `tests/windowed_generate.ai`: 56 requested frames
 at 256x256, two 39-frame windows, a representable 22-frame overlap, exact BF16
@@ -1010,6 +1060,7 @@ cmake -S . -B build-mm-air -G Ninja \
   -DCMAKE_CUDA_ARCHITECTURES=86 \
   -DMM_AIR_TOOLCHAIN="$AIR_ROOT/build-gcc15" \
   -DMM_AIR_H3_MANIFEST_DIR="$AIR_ROOT/build-gcc15/h3-manifests" \
+  -DMM_AIR_H3_MODEL_ROOT=/models/MiniMax-H3/FL2VA \
   -DMM_AIR_PROMPT_MANIFEST_DIR="$AIR_ROOT/build-gcc15/prompt-manifests" \
   -DPKG_CONFIG_EXECUTABLE="$AIR_ROOT/build-dev/desktop-sdk/pkg-config"
 
@@ -1023,6 +1074,8 @@ MM_AIR_H3_CHECKPOINT_ROOT=/models/MiniMax-H3/FL2VA \
 MM_AIR_H3_REFERENCE_ROOT=/models/MiniMax-H3/Ref2VA \
 MM_AIR_H3_DONOR_ROOT=/artifacts/h3-flref-product \
 MM_AIR_H3_MANIFEST_ROOT="$AIR_ROOT/build-gcc15/h3-manifests" \
+MM_AIR_H3_DEPLOYMENT="$AIR_ROOT/models/h3/presets/h3_deployment.json" \
+MM_AIR_H3_APP_PRESET="$AIR_ROOT/models/h3/presets/h3_app.json" \
 MM_AIR_PROMPT_MANIFEST_ROOT="$AIR_ROOT/build-gcc15/prompt-manifests" \
 AIR_QWEN3_VL_4B_DIR=/models/Qwen3-VL-4B-Instruct \
 MM_AIR_SAM3_MODEL="$HOME/.serenity/models/sam3/sam3-q4_0.ggml" \

@@ -7,12 +7,13 @@ import std.system as system
 
 pub fn main(args:view<str>)->i32
     effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,process,time} {
-  if view.len(args)<3 or view.len(args)>4 {
-    io.ewrite("usage: seedvr2-existing-video SOURCE OUTPUT [3b|7b]\n")
+  if view.len(args)<3 or view.len(args)>5 {
+    io.ewrite("usage: seedvr2-existing-video SOURCE OUTPUT [3b|7b] [fast]\n")
     return 2
   }
-  let variant:u32=if view.len(args)==4 and view.get(args,3)=="7b"{1}else{0}
-  let selected=seedvr2.settings(variant,0,0,0,true,42,0,0)
+  let variant:u32=if view.len(args)>=4 and view.get(args,3)=="7b"{1}else{0}
+  let fast=view.len(args)==5 and view.get(args,4)=="fast"
+  let selected=seedvr2.with_fast(seedvr2.settings(variant,0,0,0,true,42,0,0),fast)
   match seedvr2.run(view.get(args,1),view.get(args,2),system.temp_directory(),selected) {
     ok(value)=>{var completed=value
       io.write("MM-Air SeedVR2 existing-video delivery: PASS\n")

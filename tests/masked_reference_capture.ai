@@ -1,9 +1,11 @@
 // Checkpoint diagnostic using production crop, intake, conditioning and session.
 module app.mm_air.tests.masked_reference_capture
+import std.inference.h3.policy as h3_policy
 import "../generate.ai" as generation
 import "../masked_runtime.ai" as masked
 import std.inference.h3.conditioning as conditioning
 import std.inference.h3.deployment as deployment
+import std.inference.h3.policy as policy
 import std.inference.h3.media as media
 import std.inference.h3.session as session
 import std.inference.h3.vae as vae
@@ -39,9 +41,13 @@ fn capture(context:ref<GpuContext>,stream:ref<GpuStream>,job:ref<generation.Job>
   var roots=deployment.Roots{
     checkpoint_root:string.copy(struct.borrow(job,field=reference_checkpoint_root)),
     donor_root:string.copy(struct.borrow(job,field=donor_root)),
-    manifest_root:string.copy(struct.borrow(job,field=manifest_root))}
-  var sources=deployment.sources(roots,job.model,job.task,job.evaluations,false,
-    job.timing,job.schedule_kind)
+    manifest_root:string.copy(struct.borrow(job,field=manifest_root)),
+    layout:match deployment.load(str.view(struct.borrow(job,field=deployment_file))){
+      ok(value)=>value,err(problem)=>{io.ewrite(problem)
+        panic "H3 deployment layout failed"},}}
+  var sources=match deployment.sources(roots,job.model,job.task,job.evaluations,false,
+      job.timing,job.schedule_kind,policy.copy(struct.borrow(job,field=policy))){ok(value)=>value,err(problem)=>{io.ewrite(problem)
+    panic "H3 deployment sources failed"},}
   var progress:option<channel.Sender> = option.none()
   if mode=="decoded-session-live" {
     var connected=match channel.connect(struct.borrow(job,field=progress),
@@ -51,7 +57,7 @@ fn capture(context:ref<GpuContext>,stream:ref<GpuStream>,job:ref<generation.Job>
   }
   var inputs=match generation.prepare_ref2va_inputs(context,stream,job,sources,
       struct.borrow(roots,field=checkpoint_root),struct.borrow(roots,field=manifest_root),
-      directory,progress){ok(value)=>value,err(message)=>{
+      directory,progress,struct.borrow(roots,field=layout)){ok(value)=>value,err(message)=>{
     io.ewrite(message)
     panic "H3 reference intake failed"},}
   if inputs.has_audio {panic "Masked crop unexpectedly contains audio"}
@@ -140,8 +146,8 @@ pub fn main(args:view<str>) -> i32
   var audio:array<string> = []
   var job=generation.job(config,view.get(args,3),session.Model.Reference,session.Task.Ref2VA,
     geometry,references,audio,path.join(directory,"unused.mp4"),0,"",42,7,
-    session.Projection.ConvRotI8,session.Projection.ConvRotI8,session.Attention.CkInt8,
-    channel.ticket(receiver),session.Schedule.Exponential)
+    session.Projection.ConvRotI8,session.Projection.ConvRotI8,session.Attention.DenseInt8,
+    channel.ticket(receiver),session.Schedule.Exponential,h3_policy.Sampler.ResMultistep)
   struct.set(job,true,field=masked)
   var weights:array<f32> = []
   let latent=struct.borrow(prepared,field=latent)

@@ -1,4 +1,5 @@
 module app.mm_air.tests.native_h3_job
+import "h3_presets_fixture.ai" as fixture
 import "../generate.ai" as generation
 import "../parameters.ai" as parameters
 import "../native_seed.ai" as seed
@@ -6,18 +7,20 @@ import std.inference.h3.request as h3
 import std.inference.h3.session as session
 import std.channel as channel
 
-pub fn main(args:view<str>)->i32 effects {alloc,io.write,net,random,time} {
+pub fn main(args:view<str>)->i32 effects {alloc,env,fs.read,io.write,net,random,time} {
   var config=generation.Configuration{checkpoint_root:"base",reference_checkpoint_root:"reference",
-    donor_root:"prepared",manifest_root:"manifests",scratch_root:"scratch"}
+    donor_root:"prepared",manifest_root:"manifests",deployment_file:"h3_deployment.json",
+    presets:fixture.presets(),scratch_root:"scratch"}
   var receiver=match channel.open(8,1024){ok(v)=>v,err(_)=>{return 1},}
   var loras:array<parameters.LoraEntry> = [parameters.LoraEntry{path:"D:/adapter.safetensors",strength:0.5,enabled:true}]
-  var request=h3.request("A robot walks, birds sing",1,3,3,1,2,4,9223372036854775807,6,["first.png","last.png"],"movie.mp4")
+  var request=h3.request("A robot walks, birds sing",1,3,3,1,2,3,9223372036854775807,6,["first.png","last.png"],"movie.mp4")
+  fixture.with_preset_geometry(struct.borrow(config,field=presets),request)
   let old=ref.swap(struct.borrow(request,field=audio_references),[string.copy("sound.wav")])
   var job=match generation.h3_job(config,request,loras,channel.ticket(receiver)){ok(v)=>v,err(p)=>{io.ewrite(p)
     let _=channel.close(receiver)
     return 2},}
   if job.model!=session.Model.Reference or job.task!=session.Task.Ref2VA{return 3}
-  if job.seed!=9223372036854775807 or job.attention!=session.Attention.CkInt8{return 4}
+  if job.seed!=9223372036854775807 or job.attention!=session.Attention.DenseInt8{return 4}
   if job.transformer_projection!=session.Projection.ConvRotI8Streaming or job.conditioner_projection!=session.Projection.ExactBF16{return 5}
   if job.schedule_kind!=session.Schedule.Exponential or job.evaluations!=19{return 6}
   if job.geometry.width!=832 or array.len(struct.borrow(job,field=references))!=2{return 7}

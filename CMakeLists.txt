@@ -62,8 +62,8 @@ file(READ "${MM_AIR_PROJECT_FILE}" MM_AIR_PROJECT_JSON)
 string(JSON MM_AIR_H3_DEPENDENCY_PATH ERROR_VARIABLE MM_AIR_H3_PATH_ERROR
   GET "${MM_AIR_PROJECT_JSON}" dependencies h3 path)
 if(NOT MM_AIR_H3_PATH_ERROR STREQUAL "NOTFOUND")
-  message(FATAL_ERROR
-    "Cannot read dependencies.h3.path from ${MM_AIR_PROJECT_FILE}: ${MM_AIR_H3_PATH_ERROR}")
+  # H3 inference (and its manifest writer) moved into stdlib/inference/h3.
+  set(MM_AIR_H3_DEPENDENCY_PATH "../AIR/stdlib/inference/h3")
 endif()
 get_filename_component(MM_AIR_H3_SOURCE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/${MM_AIR_H3_DEPENDENCY_PATH}" ABSOLUTE)
@@ -81,24 +81,38 @@ else()
 endif()
 set(MM_AIR_H3_MANIFEST_DIR "${MM_AIR_H3_MANIFEST_DIR_DEFAULT}" CACHE PATH
   "Generated H3 manifest directory used by MM_AIR_H3_MANIFEST_ROOT")
-set(MM_AIR_H3_MANIFEST_NAMES
-  h3-token-refiner-bf16.json
-  h3-transformer-denoiser-static.json
-  h3-blocks-bf16.json
-  h3-blocks-convrot.json
-  h3-blocks-row-scaled-i8.json
-  h3-modulation-cache.json
-  h3-video-vae-encoder.json
-  h3-video-vae-decoder-aux.json
-  h3-video-vae-decoder-convrot.json
-  h3-audio-vae.json
-  h3-audio-encoder.json
-  h3-qwen-static.json
-  h3-qwen-layers-bf16.json
-  h3-qwen-norms-bf16.json
-  h3-qwen-convrot-i8.json
-  h3-vision-static.json
-  h3-vision-layers.json)
+# Every manifest file name comes from the H3 deployment layout (the same file
+# MM_AIR_H3_DEPLOYMENT names at run time): its "manifests" and
+# "training_manifests" objects, which write_manifests.ai writes in full.
+set(MM_AIR_H3_DEPLOYMENT_FILE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../models/h3/presets/h3_deployment.json"
+  CACHE FILEPATH "H3 deployment layout (schema air.inference.h3.deployment)")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${MM_AIR_H3_DEPLOYMENT_FILE}")
+file(READ "${MM_AIR_H3_DEPLOYMENT_FILE}" MM_AIR_H3_DEPLOYMENT_JSON)
+# The manifests follow the model's own config (block counts, head regrouping, tower
+# depths), so generation needs the H3 pipeline folder (the one with model_index.json).
+set(MM_AIR_H3_MODEL_ROOT "" CACHE PATH "H3 pipeline folder (model_index.json)")
+if(MM_AIR_H3_MODEL_ROOT STREQUAL "")
+  message(FATAL_ERROR "Set MM_AIR_H3_MODEL_ROOT to the H3 pipeline folder (model_index.json)")
+endif()
+set(MM_AIR_H3_MANIFEST_NAMES)
+foreach(manifest_group IN ITEMS manifests training_manifests)
+  string(JSON manifest_count ERROR_VARIABLE manifest_error
+    LENGTH "${MM_AIR_H3_DEPLOYMENT_JSON}" ${manifest_group})
+  if(NOT manifest_error STREQUAL "NOTFOUND")
+    message(FATAL_ERROR
+      "${MM_AIR_H3_DEPLOYMENT_FILE}: key ${manifest_group} is required: ${manifest_error}")
+  endif()
+  math(EXPR manifest_last "${manifest_count} - 1")
+  foreach(manifest_index RANGE ${manifest_last})
+    string(JSON manifest_key MEMBER "${MM_AIR_H3_DEPLOYMENT_JSON}"
+      ${manifest_group} ${manifest_index})
+    string(JSON manifest_name GET "${MM_AIR_H3_DEPLOYMENT_JSON}"
+      ${manifest_group} ${manifest_key})
+    list(APPEND MM_AIR_H3_MANIFEST_NAMES "${manifest_name}")
+  endforeach()
+endforeach()
 set(MM_AIR_H3_MANIFEST_OUTPUTS)
 foreach(manifest_name IN LISTS MM_AIR_H3_MANIFEST_NAMES)
   list(APPEND MM_AIR_H3_MANIFEST_OUTPUTS
@@ -111,8 +125,9 @@ add_custom_command(OUTPUT ${MM_AIR_H3_MANIFEST_OUTPUTS}
   COMMAND "${MM_AIR_AIRC}" run
     "${MM_AIR_H3_SOURCE_DIR}/write_manifests.ai"
     --mode release --cc "${CMAKE_C_COMPILER}" --
-    "${MM_AIR_H3_MANIFEST_DIR}"
+    "${MM_AIR_H3_DEPLOYMENT_FILE}" "${MM_AIR_H3_MODEL_ROOT}" "${MM_AIR_H3_MANIFEST_DIR}"
   DEPENDS ${MM_AIR_H3_MANIFEST_TOOL_DEPS} ${MM_AIR_H3_MANIFEST_SOURCES}
+    "${MM_AIR_H3_DEPLOYMENT_FILE}"
   VERBATIM)
 add_custom_target(mm_air_h3_manifests DEPENDS ${MM_AIR_H3_MANIFEST_OUTPUTS})
 

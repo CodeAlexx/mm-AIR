@@ -5,7 +5,7 @@ import "../.air/deps/prompt/types.ai" as prompt
 import std.text as text
 
 pub fn main(args: view<str>) -> i32
-    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,process} {
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,process,time} {
   if view.len(args) != 4 {
     io.ewrite("usage: character-swap-4b-smoke MANIFESTS SOURCE_VIDEO CHARACTER_IMAGE\n")
     return 2

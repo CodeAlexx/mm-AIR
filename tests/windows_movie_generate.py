@@ -28,7 +28,7 @@ def main():
     expected = json.loads(args.parameters.read_text(encoding="utf-8"))
     shot = project["shots"][0]
     expected_geometry = dict(width=shot["width"], height=shot["height"], seconds=shot["duration_seconds"], seed=shot["seed"])
-    assert expected["attention"] == 4, "This acceptance test requires selected CK INT8"
+    assert expected["attention"] == 3, "This acceptance test requires selected dense INT8"
     user = C.WinDLL("user32")
     user.SetProcessDPIAware()
     user.SendMessageW.argtypes = [W.HWND, W.UINT, W.WPARAM, W.LPARAM]
@@ -80,13 +80,13 @@ def main():
                 time.sleep(.1)
             else:
                 raise AssertionError("Saved H3 parameters were not restored")
-            assert any(text(w) == "CK INT8" for w in controls), "Movie did not show selected CK policy"
+            assert any(text(w) == "Dense INT8" for w in controls), "Movie did not show selected dense INT8 policy"
             movie = next(w for w in controls if text(w) == "Movie")
             user.SendMessageW(movie, 0xF5, 0, 0)
             queue = next(w for w in controls if text(w) == "Queue H3 take")
             user.SendMessageW(queue, 0xF5, 0, 0)
             started = time.monotonic()
-            print("Shared Movie Queue H3 take activated with selected CK INT8", flush=True)
+            print("Shared Movie Queue H3 take activated with selected dense INT8", flush=True)
             while time.monotonic() - started < 1200:
                 assert process.poll() is None, "Controller exited during generation"
                 saved = json.loads(project_path.read_text(encoding="utf-8"))

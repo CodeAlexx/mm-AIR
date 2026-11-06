@@ -1,0 +1,122 @@
+// Shared retained model bridge. UI adapters move Runtime into one bounded
+// worker action and receive it back; no model process, sockets or reloads.
+module app.mm_air.native_flux1
+import ".air/deps/flux1/session.ai" as session
+import "parameters.ai" as parameters
+import "runtime_config.ai" as config
+import std.generation_backend as lifecycle
+import std.widgets as w
+import std.files as files
+import std.path as path
+import std.system as system
+import std.text as text
+
+pub type Runtime=struct {loaded:array<session.Session>,attempted_open:bool}
+pub type Action=enum {Begin(parameters.Flux1Request),Advance,Cancel,Status}
+pub type Work=struct {state:Runtime,action:Action}
+pub type Completed=struct {state:Runtime,event:lifecycle.Event,problem:string}
+pub fn empty() -> Runtime effects {alloc} {Runtime {loaded:[],attempted_open:false}}
+fn required(name:str) -> result<string,string> effects {alloc,env,fs.read,fs.meta} {
+  match try config.value(name) {some(value)=>result.ok(value),none=>result.err(text.concat("Set the model path ",name)),}
+}
+fn prepare() -> result<session.Paths,string> effects {alloc,env,fs.read,fs.write,fs.meta} {
+  if not session.inference_qualified() {return result.err("FLUX.1 DEV inference is not admitted")}
+  let assets:string=try required("FLUX1_ROOT")
+  let checkpoint:string=match try config.value("FLUX1_CHECKPOINT") {some(value)=>value,none=>path.join(assets,"flux1-dev.safetensors"),}
+  let manifests:string=match try config.value("FLUX1_MANIFEST_ROOT") {some(value)=>value,none=>path.join(system.temp_directory(),"mm-air-flux1"),}
+  let _=match files.mkdirs(manifests) {ok(_)=>(),err(_)=>{return result.err("FLUX.1 DEV manifest directory unavailable")},}
+  let _=try session.prepare_manifests(checkpoint,manifests)
+  result.ok(session.Paths {assets:assets,checkpoint:checkpoint,T5_manifest:path.join(manifests,"t5.json"),
+    DiT_manifest:path.join(manifests,"dit.json"),adapters:[]}
+  )
+}
+pub fn request(value:ref<parameters.Flux1Request>) -> result<session.Request,string> effects {alloc} {
+  let _=try parameters.validate_flux1(value)
+  var selected:session.Request=session.defaults(value.prompt,value.output)
+  selected.width=value.width
+  selected.height=value.height
+  selected.steps=value.steps
+  selected.seed=value.seed
+  selected.guidance=value.guidance
+  session.public_request(selected)
+}
+fn apply(state:ref<Runtime>,action:Action own) -> result<lifecycle.Event,string>
+    effects {alloc,env,gpu,fs.read,fs.write,fs.meta} {
+  match action {Begin(value)=>{
+    var selected:session.Request=try request(value)
+    if array.len(struct.borrow(state,field=loaded))==0 {
+      if state.attempted_open {return result.err("FLUX.1 DEV startup failed; model files cannot be reread in this process")}
+      // Missing configuration can be corrected before any tensor payload open.
+      // Only the model-open attempt seals the read-once startup lifecycle.
+      var paths:session.Paths=try prepare()
+      state.attempted_open=true
+      array.push(struct.borrow(state,field=loaded),try session.open(paths,session.Budget {device_bytes:17179869184,host_bytes:55834574848}))
+    }
+    let model=array.borrow(struct.borrow(state,field=loaded),0)
+    let _=try session.act(model,session.Action.Prime(session.copy_request(selected)))
+    session.act(model,session.Action.Start(selected))
+  },Advance=>{
+    if array.len(struct.borrow(state,field=loaded))!=1 {return result.err("FLUX.1 DEV has no loaded session")}
+    session.act(array.borrow(struct.borrow(state,field=loaded),0),session.Action.Advance)
+  },Cancel=>{
+    if array.len(struct.borrow(state,field=loaded))!=1 {return result.err("FLUX.1 DEV has no loaded session")}
+    session.act(array.borrow(struct.borrow(state,field=loaded),0),session.Action.Cancel)
+  },Status=>{
+    if array.len(struct.borrow(state,field=loaded))==1 {
+      return session.act(array.borrow(struct.borrow(state,field=loaded),0),session.Action.Status)
+    }
+    var idle:lifecycle.State=lifecycle.idle()
+    result.ok(lifecycle.event(idle))
+  },}
+}
+pub fn execute(work:Work own) -> Completed effects {alloc,env,gpu,fs.read,fs.write,fs.meta} {
+  var owned:Work=work
+  var state:Runtime=struct.replace(owned,empty(),field=state)
+  var action:Action=struct.replace(owned,Action.Status,field=action)
+  var idle:lifecycle.State=lifecycle.idle()
+  var event:lifecycle.Event=lifecycle.event(idle)
+  var problem:string=""
+  match apply(state,action) {ok(value)=>{event=value},err(message)=>{
+    problem=message
+    if array.len(struct.borrow(state,field=loaded))==1 {
+      event=lifecycle.event(struct.borrow(array.borrow(struct.borrow(state,field=loaded),0),field=state))
+    }
+  },}
+  Completed {state:state,event:event,problem:problem}
+}
+pub fn restore(ui:ref<w.Ui>,base:u64,value:ref<parameters.Flux1Request>) -> unit effects {alloc} {
+  w.set_text(ui,w.find(ui,base+1),value.prompt)
+  w.set_text(ui,w.find(ui,base+3),string.from_int(value.seed))
+  w.set_text(ui,w.find(ui,base+5),string.from_int(value.width))
+  w.set_text(ui,w.find(ui,base+7),string.from_int(value.height))
+  w.set_text(ui,w.find(ui,base+9),string.from_int(value.steps))
+  w.set_text(ui,w.find(ui,base+11),string.from_float(value.guidance))
+  w.set_text(ui,w.find(ui,base+13),value.output)
+}
+pub fn fields(ui:ref<w.Ui>,parent:u64,base:u64) -> unit effects {alloc} {
+  let _=w.label(ui,base,parent,24,"Prompt")
+  let _=w.textarea(ui,base+1,parent,140,"")
+  let _=w.label(ui,base+2,parent,24,"Seed")
+  let _=w.field(ui,base+3,parent,30,"42")
+  let _=w.label(ui,base+4,parent,24,"Width (64px quantization)")
+  let _=w.field(ui,base+5,parent,30,"1024")
+  let _=w.label(ui,base+6,parent,24,"Height")
+  let _=w.field(ui,base+7,parent,30,"1024")
+  let _=w.label(ui,base+8,parent,24,"Euler steps")
+  let _=w.field(ui,base+9,parent,30,"30")
+  let _=w.label(ui,base+10,parent,24,"Guidance")
+  let _=w.field(ui,base+11,parent,30,"3.5")
+  let _=w.label(ui,base+12,parent,24,"Output PNG")
+  let _=w.field(ui,base+13,parent,30,"")
+}
+pub fn read(ui:ref<w.Ui>,base:u64) -> result<parameters.Flux1Request,string> effects {alloc} {
+  let seed:u64=match text.parse_u64(w.text_of(ui,w.find(ui,base+3))) {some(value)=>value,none=>{return result.err("FLUX seed must be a nonnegative whole number")},}
+  let width:u64=match text.parse_u64(w.text_of(ui,w.find(ui,base+5))) {some(value)=>value,none=>{return result.err("FLUX width must be a whole number")},}
+  let height:u64=match text.parse_u64(w.text_of(ui,w.find(ui,base+7))) {some(value)=>value,none=>{return result.err("FLUX height must be a whole number")},}
+  let steps:u64=match text.parse_u64(w.text_of(ui,w.find(ui,base+9))) {some(value)=>value,none=>{return result.err("FLUX steps must be a whole number")},}
+  let guidance:f64=match text.parse_f64(w.text_of(ui,w.find(ui,base+11))) {some(value)=>value,none=>{return result.err("FLUX guidance must be a number")},}
+  var value:parameters.Flux1Request=parameters.Flux1Request {prompt:w.text_of(ui,w.find(ui,base+1)),output:w.text_of(ui,w.find(ui,base+13)),
+    width:width,height:height,steps:steps,seed:seed,guidance:guidance}
+  let _=try parameters.validate_flux1(value)
+  result.ok(value)
+}

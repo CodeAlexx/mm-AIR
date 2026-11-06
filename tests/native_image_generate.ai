@@ -1,0 +1,62 @@
+module app.mm_air.tests.native_image_generate
+import "../generate.ai" as generation
+import "../parameters.ai" as parameters
+import std.channel as channel
+import std.text as text
+
+// One real MM-Air image generation through the application's own workers (generation.run_moss,
+// generation.run_fibo) with the deployment's runtime configuration (folders from Settings):
+//   image-generate MODEL OUTPUT.png PROMPT SEED [STEPS [SOURCE...]]
+// MODEL: moss-image-base | moss-image-sft | fibo-2.0-dev | fibo-2.0-edit-turbo (SOURCEs: the
+// picture to change, then references). STEPS 0 or absent keeps the Generate / Image Edit default;
+// every other value is the app's default too.
+pub fn main(args:view<str>)->i32
+    effects {alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
+  if view.len(args)<5 {
+    io.ewrite("usage: image-generate MODEL OUTPUT.png PROMPT SEED [STEPS [SOURCE...]]\n")
+    return 1
+  }
+  let model=view.get(args,1)
+  let seed=match text.parse_u64(view.get(args,4)){some(value)=>value,none=>{return 2},}
+  let steps:u64=if view.len(args)>5{match text.parse_u64(view.get(args,5)){some(value)=>value,none=>{return 4},}}else{0}
+  var receiver=match channel.open(128,1024){ok(value)=>value,err(_)=>{return 5},}
+  var outcome=if model=="fibo-2.0-dev" or model=="fibo-2.0-edit-turbo" {
+    var request=parameters.fibo_defaults_for(model=="fibo-2.0-edit-turbo")
+    let _=ref.swap(struct.borrow(request,field=prompt),string.copy(view.get(args,3)))
+    let _=ref.swap(struct.borrow(request,field=output),string.copy(view.get(args,2)))
+    struct.set(request,seed,field=seed)
+    if steps!=0{struct.set(request,steps,field=steps)}
+    var index:u64=6
+    loop{if index>=view.len(args){break}
+      array.push(struct.borrow(request,field=images),string.copy(view.get(args,index)))
+      index=index+1}
+    // The saved-settings round trip the History sidecar uses.
+    let saved=match parameters.encode_fibo(request){ok(value)=>value,err(message)=>{
+      io.ewrite(message)
+      return 6},}
+    if not parameters.is_fibo(saved){return 7}
+    var work=generation.FiboJob{request:request,progress:channel.ticket(receiver)}
+    generation.run_fibo(work)
+  } else {
+    let index=match parameters.moss_model_index_of(model){some(value)=>value,none=>{
+      io.ewrite("unknown MODEL\n")
+      return 3},}
+    if view.len(args)>6{io.ewrite("MOSS-Image takes no source images\n")
+      return 3}
+    var request=parameters.moss_defaults(index)
+    let _=ref.swap(struct.borrow(request,field=prompt),string.copy(view.get(args,3)))
+    let _=ref.swap(struct.borrow(request,field=output),string.copy(view.get(args,2)))
+    struct.set(request,seed,field=seed)
+    if steps!=0{struct.set(request,steps,field=steps)}
+    let saved=match parameters.encode_moss(request){ok(value)=>value,err(message)=>{
+      io.ewrite(message)
+      return 6},}
+    if not parameters.is_moss(saved){return 7}
+    var work=generation.MossJob{request:request,progress:channel.ticket(receiver)}
+    generation.run_moss(work)
+  }
+  let _=channel.close(receiver)
+  io.write(text.concat("MM-Air image generation: ",outcome.message))
+  io.write("\n")
+  if outcome.succeeded{0}else{8}
+}

@@ -48,10 +48,10 @@ assert [item.text for item in tree.findall(
     "9:16 · 1536×2752", "Custom"]
 assert [item.text for item in tree.findall(
     ".//object[@id='qwen_image_scheduler_list']/items/item")] == [
-    "Creator Dynamic Flow", "Linear Flow · native alternate"]
+    "Creator Dynamic Flow", "Linear Flow"]
 assert [item.text for item in tree.findall(
     ".//object[@id='qwen_image_sampler_list']/items/item")] == [
-    "Euler", "DPM++ 2M · native alternate"]
+    "Euler", "DPM++ 2M"]
 
 for control in ("gen_qwen_sampling", "qwen_image_resolution",
                 "qwen_image_scheduler", "qwen_image_sampler",
@@ -194,8 +194,8 @@ assert 'proc.check(["gio","trash"' not in main
 # geometry. Qwen and Krea resolutions belong to their source generation only.
 use_as_h3 = main[main.index('if id == "gen_use_image_reference"'):
                  main.index('if id == "gen_visual_earlier"')]
-assert 'model_index == parameters.krea_model_index() or' in use_as_h3
-assert 'model_index == parameters.qwen_image_model_index()' in use_as_h3
+# Every PNG model (Krea, Qwen-Image, MOSS-Image, Fibo 2.0) is one test.
+assert 'parameters.image_model(model_index)' in use_as_h3
 for assignment in (
     'width = saved_h3_width', 'height = saved_h3_height',
     'seconds = saved_h3_seconds', 'resolution_index = saved_h3_resolution',
@@ -250,7 +250,10 @@ for required in (
     assert required in ui, required
 
 assert [item.text for item in tree.findall(".//object[@id='gen_model_list']/items/item")] == [
-    "MiniMax H3 Base", "MiniMax H3 Reference", "Krea 2 Turbo", "Qwen-Image-2.1"]
+    "MiniMax H3 Base", "MiniMax H3 Reference", "Krea 2 Turbo", "Qwen-Image-2.1",
+    "MOSS-Image Base", "MOSS-Image SFT", "Fibo 2.0"]
+assert [item.text for item in tree.findall(".//object[@id='qwen_edit_model_list']/items/item")] == [
+    "Qwen-Image-2.1", "Fibo 2.0 Edit Turbo"]
 assert [item.text for item in tree.findall(".//object[@id='h3_resolution_list']/items/item")] == [
     "16:9 · 1344×768", "21:9 · 1536×672", "4:3 · 1024×768",
     "1:1 · 768×768", "3:4 · 768×1024", "9:16 · 768×1344",

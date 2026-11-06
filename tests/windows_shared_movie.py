@@ -148,7 +148,7 @@ def main():
                         raise AssertionError("Result Trash did not recycle media, sidecar and remove its history entry")
                     restore_fixture(result, bitmap, Path(temporary)/"restored-result.png")
                     restore_fixture(sidecar, b'{"owned_test_fixture":true}', Path(temporary)/"restored-sidecar.json")
-                choose("CK INT8 · all evaluations", 1)
+                choose("Dense INT8 · all evaluations", 1)
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
                     if any(text(w) == "Exact" for w in controls if kind(w) == "Static"):
@@ -162,7 +162,7 @@ def main():
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
                     labels = [text(w) for w in controls if kind(w) == "Static"]
-                    if "CK INT8" in labels and "DC Euler · 19" in labels and labels.count("ConvRot INT8") >= 2:
+                    if "Dense INT8" in labels and "DC Euler · 19" in labels and labels.count("ConvRot INT8") >= 2:
                         break
                     time.sleep(.05)
                 else:
@@ -243,11 +243,11 @@ def main():
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
                     labels = [text(w) for w in controls if kind(w) == "Static"]
-                    if "CK INT8" in labels and "Euler · 19" in labels:
+                    if "Dense INT8" in labels and "Euler · 19" in labels:
                         break
                     time.sleep(.05)
                 else:
-                    raise AssertionError("Reset did not preserve the shared CK default")
+                    raise AssertionError("Reset did not preserve the shared dense INT8 default")
                 if reopening and args.trash:
                     library = Path(temporary) / "output/movies"
                     previous = set(library.glob("*.serenitymovie.json"))
@@ -279,7 +279,7 @@ def main():
                 log.seek(0)
                 output = log.read()
                 assert "Unknown widget" not in output and "Unsupported desktop operation" not in output, output
-    print("Shared Movie controller: selected H3 runtime policies, CK Reset, native Unicode edit, custom Endless target/segment durations, project autosave, clean close and reopening persisted values passed." + (" Native Recycle Bin media, sidecar, history and project deletion and restoration verified." if args.trash else ""))
+    print("Shared Movie controller: selected H3 runtime policies, dense INT8 Reset, native Unicode edit, custom Endless target/segment durations, project autosave, clean close and reopening persisted values passed." + (" Native Recycle Bin media, sidecar, history and project deletion and restoration verified." if args.trash else ""))
 
 
 if __name__ == "__main__":

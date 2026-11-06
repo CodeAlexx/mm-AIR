@@ -2,7 +2,7 @@
 // sections) and the Qwen Turbo choice in the user's runtime preferences.
 module app.mm_air.layout_memory
 import "runtime_config.ai" as config
-import "../../AIR/toolkits/desktop/ui.ai" as desk
+import "../AIR/toolkits/desktop/ui.ai" as desk
 import std.json as json
 import std.text as text
 
@@ -13,6 +13,7 @@ fn sections()->array<string> effects{alloc}{
   ["gen_model_group_expander","gen_swap_group_expander","gen_character_group_expander",
    "gen_lora_group_expander","gen_krea_sampling_expander","gen_enhance_group_expander",
    "gen_seed_group_expander","gen_h3_core_group_expander","gen_qwen_sampling_expander",
+   "gen_image_sampling_expander",
    "gen_h3_geometry_group_expander","gen_output_summary_group_expander",
    "gen_seedvr2_group_expander","gen_h3_runtime_group_expander"]
 }

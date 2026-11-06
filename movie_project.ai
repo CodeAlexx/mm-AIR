@@ -323,10 +323,7 @@ pub fn set_character_text(project:ref<Project>,index:u64,field:u32,value:str)
 }
 
 fn validate_geometry(width:u64,height:u64,seconds:f64)->result<unit,string> effects{alloc}{
-  var request=h3.request("geometry",h3.model_base(),h3.task_t2va(),h3.profile_quality_19(),
-    h3.projection_exact_bf16(),h3.projection_convrot_int8(),h3.attention_ck_int8(),0,
-    h3.resolution_custom(),[],"geometry.mp4")
-  match h3.set_geometry(request,width,height,seconds){
+  match h3.geometry_for(width,height,seconds){
     ok(_)=>{},err(problem)=>{var held=problem
       return result.err(string.copy(struct.borrow(held,field=message)))},
   }
@@ -825,9 +822,10 @@ pub fn set_locked(project:ref<Project>,index:u64,value:bool)->unit effects{}{
   ()
 }
 
-pub fn set_resolution(project:ref<Project>,index:u64,value:u32)->unit effects{}{
+pub fn set_resolution(presets:ref<h3.Presets>,project:ref<Project>,index:u64,value:u32)
+    ->unit effects{}{
   let shot=array.borrow(struct.borrow(project,field=shots),index)
-  let size=h3.resolution(value)
+  let size=h3.resolution(presets,value)
   if size.width!=0 and size.height!=0{
     struct.set(shot,size.width,field=width)
     struct.set(shot,size.height,field=height)}
@@ -844,14 +842,14 @@ pub fn set_dimensions(project:ref<Project>,index:u64,width:u64,height:u64)->unit
 // Match imported opening frames to an admitted H3 canvas, rather than silently
 // stretching a portrait onto the default landscape shot. Users can then change
 // the visible resolution control explicitly.
-pub fn resolution_for_aspect(width:u64,height:u64)->u32 effects{}{
+pub fn resolution_for_aspect(presets:ref<h3.Presets>,width:u64,height:u64)->u32 effects{}{
   if width==0 or height==0{return 0}
   let aspect:f64=cast.float(width)/cast.float(height)
   var best:u32=0
   var distance:f64=1000000.0
   var index:u32=0
   loop{if index>=h3.resolution_custom(){break}
-    let size=h3.resolution(index)
+    let size=h3.resolution(presets,index)
     let error:f64=math.abs(cast.float(size.width)/cast.float(size.height)-aspect)
     if error<distance{distance=error
       best=index}

@@ -1,5 +1,6 @@
 module app.mm_air.tests.character_sheet_generate
 
+import std.inference.h3.policy as h3_policy
 import "../character_sheet.ai" as sheet
 import "../generate.ai" as generation
 import std.inference.h3.media as media
@@ -46,7 +47,7 @@ pub fn main(args: view<str>) -> i32
     sheet.six_panel(),view.get(args,3),20260831,19,
     session.Projection.ExactBF16,session.Projection.RowScaledI8,
     session.Attention.DenseInt8,channel.ticket(receiver),
-    session.Schedule.Exponential)
+    session.Schedule.Exponential,h3_policy.Sampler.Euler)
   var completed = generation.Outcome {succeeded:false,output:string.new(),
     message:string.copy("H3 character-sheet worker did not complete"),runtime_ms:0,
     peak_vram_bytes:0}

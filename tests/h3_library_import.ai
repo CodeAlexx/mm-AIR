@@ -11,7 +11,6 @@ pub fn main(args: view<str>) -> i32 effects {alloc, io.write} {
     ok(value) => match value {
       Exact => {},
       DenseInt8 => { return 1 },
-      CkInt8 => { return 1 },
     },
     err(_) => { return 1 },
   }
@@ -20,12 +19,11 @@ pub fn main(args: view<str>) -> i32 effects {alloc, io.write} {
     ok(value) => match value {
       Exact => { return 1 },
       DenseInt8 => {},
-      CkInt8 => { return 1 },
     },
     err(_) => { return 1 },
   }
-  match session.attention_for_evaluation(session.Attention.CkInt8,0){
-    ok(value)=>{if value!=session.AttentionStep.CkInt8{return 2}},
+  match session.attention_for_evaluation(session.Attention.DenseInt8,0){
+    ok(value)=>{if value!=session.AttentionStep.DenseInt8{return 2}},
     err(_)=>{return 2},
   }
   io.write("MM-Air imported std.inference.h3.session: PASS\n")

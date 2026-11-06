@@ -28,7 +28,7 @@ pub fn request(project:ref<movie.Project>,index:u64,output:str)->result<h3.Reque
   }}
   var value=h3.request(movie.compile_project_prompt(project,index),model,task,
     h3.profile_dc_euler_19(),h3.projection_convrot_int8(),h3.projection_convrot_int8(),
-    h3.attention_ck_int8(),shot.seed,h3.resolution_custom(),references,output)
+    h3.attention_dense_int8(),shot.seed,h3.resolution_custom(),references,output)
   match h3.set_geometry(value,shot.width,shot.height,shot.duration){ok(_)=>{},err(problem)=>{var held=problem
     return result.err(h3.describe(held))},}
   match h3.validate(value){ok(_)=>result.ok(value),err(problem)=>{var held=problem
@@ -80,7 +80,7 @@ pub fn fields(ui:ref<w.Ui>,parent:u64)->unit effects{alloc}{
   let _=w.button(ui,9032,shots,32,"Import finished take")
   let _=w.button(ui,9033,shots,32,"Use selected take")
   let _=w.button(ui,9034,shots,32,"Export movie")
-  let _=w.button(ui,9035,shots,36,"Generate H3 take · CK INT8")
+  let _=w.button(ui,9035,shots,36,"Generate H3 take · Dense INT8")
   let _=w.button(ui,9036,shots,30,"Choose first frame")
   let _=w.button(ui,9037,shots,30,"Choose last frame")
   let _=w.button(ui,9038,shots,30,"Clear frame references")

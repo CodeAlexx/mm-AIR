@@ -1,0 +1,31 @@
+// The repository's H3 application presets for MM-Air tests (AIR_APP_ROOT is
+// apps/mm-air when airproj runs a test).
+module app.mm_air.tests.h3_presets_fixture
+
+import std.inference.h3.request as h3
+import std.path as path
+
+pub fn presets() -> h3.Presets effects {alloc, env, fs.read, io.write} {
+  let root: string = match env.get("AIR_APP_ROOT") {
+    some(value) => value,
+    none => { panic "AIR_APP_ROOT must name the apps/mm-air project" },
+  }
+  let file: string = path.join(str.view(root), "../../models/h3/presets/h3_app.json")
+  match h3.load_presets(str.view(file)) {
+    ok(value) => value,
+    err(problem) => {
+      io.ewrite(problem)
+      io.ewrite("\n")
+      panic "H3 application presets failed to load"
+    },
+  }
+}
+
+// A request's preset geometry (its resolution index at the presets' default frames).
+pub fn with_preset_geometry(presets: ref<h3.Presets>, value: ref<h3.Request>) -> unit
+    effects {alloc} {
+  match h3.use_preset_geometry(presets, value) {
+    ok(_) => (),
+    err(_) => { panic "H3 preset geometry failed" },
+  }
+}

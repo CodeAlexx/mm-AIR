@@ -15,6 +15,7 @@ import std.path as path
 import std.process as proc
 import std.telemetry as telemetry
 import std.text as text
+import std.inference.h3.task_names as task_names
 import std.system as system
 import "runtime_config.ai" as runtime_config
 import ".air/deps/qwen/tokenizer.ai" as tokenizer
@@ -22,13 +23,17 @@ import std.inference.h3.audio_encode as audio_encode
 import std.inference.h3.checkpoint as checkpoint
 import std.inference.h3.conditioning as conditioning
 import std.inference.h3.deployment as h3_deployment
-import std.inference.h3.image_input as image_input
+import std.image_lanczos as image_input
 import std.inference.h3.lora as h3_lora
 import std.inference.h3.media as h3_media
 import std.inference.h3.packing as packing
 import std.inference.h3.presentation as presentation
+import std.inference.h3.reference_images as reference_images
 import std.inference.h3.session as session
 import std.inference.h3.request as h3_request
+import std.inference.h3.policy as h3_policy
+import std.inference.h3.audio_vae as h3_audio_vae
+import std.inference.h3.model_config as h3_model_config
 import std.inference.h3.timeline as timeline
 import std.inference.h3.timing as h3_timing
 import ".air/deps/h3_repair/plan.ai" as repair_plan
@@ -38,12 +43,19 @@ import std.inference.krea2.session as krea_session
 import std.inference.krea2.config as krea_config
 import std.inference.krea2.attention as krea_attention
 import std.inference.krea2.lora as krea_lora
+import std.inference.krea2.pose_control as krea_pose
 import ".air/deps/qwenimage21/session.ai" as qwen_image_session
 import ".air/deps/qwenimage21/generate.ai" as qwen_image_generate
 import ".air/deps/qwenimage21/contract.ai" as qwen_image_contract
 import ".air/deps/qwenimage21/attention.ai" as qwen_image_attention
+import ".air/deps/qwenimage21/adapters.ai" as qwen_image_adapters
 import ".air/deps/qwenimage21/prompt_enhancer.ai" as qwen_prompt_enhancer
-import ".air/deps/flux3/generate.ai" as flux3_generate
+import ".air/deps/moss_image/generate.ai" as moss_generate
+import ".air/deps/moss_image/lora.ai" as moss_lora
+import ".air/deps/moss_image/scheduler.ai" as moss_scheduler
+import std.trainers.core.lycoris.algorithms as lycoris_algorithms
+import ".air/deps/fibo2/generate.ai" as fibo_generate
+import ".air/deps/fibo2/adapters.ai" as fibo_adapters
 import "character_sheet.ai" as character_sheet
 import "masked_runtime.ai" as masked_runtime
 import "outpaint.ai" as outpaint
@@ -61,7 +73,6 @@ fn projection_id(value:session.Projection)->u64 effects{}{
 }
 
 fn attention_id(value:session.Attention)->u64 effects{}{
-  if value==session.Attention.CkInt8{return 4}
   if value==session.Attention.Exact{return 1}
   if value==session.Attention.HybridExact3DenseInt8{return 2}
   if value==session.Attention.DenseInt8{return 3}
@@ -74,96 +85,174 @@ fn schedule_id(value:session.Schedule)->u64 effects{}{
 
 pub type KreaJob = struct {sources:krea_session.Sources,request:parameters.KreaRequest,progress:channel.Ticket}
 pub type KreaCancelableJob = struct {job:KreaJob,cancel_path:string}
+pub type MossJob = struct {request:parameters.MossRequest,progress:channel.Ticket}
+pub type FiboJob = struct {request:parameters.FiboRequest,progress:channel.Ticket}
 pub type QwenImageJob = struct {request:parameters.QwenImageRequest,progress:channel.Ticket}
 pub type QwenImageCancelableJob = struct {job:QwenImageJob,cancel_path:string}
-pub type Flux3Job = struct {request:parameters.Flux3Request,progress:channel.Ticket}
 
-// FLUX 3 Image Klein through the native AIR pipeline (models/flux3). Weights:
-// FLUX3_KLEIN_ROOT (the downloaded black-forest-labs/flux-3-image-klein folder
-// with air-int8/ from tools/quantize_int8.py). The INT8 DiT stays resident on
-// the GPU for every step. With request.upsample the prompt first goes through
-// BFL's upsampler, FLUX3_PUP_ROOT (black-forest-labs/flux-3-image-klein-pup with
-// air-int8/ and air-tokenizer/); the expanded prompt is saved beside the PNG.
-pub fn run_flux3(job:Flux3Job own)->Outcome
+// MOSS-Image Base or SFT in this process (models/moss_image): the text encoder is read once
+// and freed, the DiT is read once and stays resident for every step, then the VAE decodes.
+// The model folder comes from Settings (MM_AIR_MOSS_BASE_ROOT / MM_AIR_MOSS_SFT_ROOT).
+// LoRAs run beside the DiT weights at their strength; nothing is merged.
+pub fn run_moss(job:MossJob own)->Outcome
     effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
   var owned=job
   var ticket=ref.swap(struct.borrow(owned,field=progress),no_progress())
   var connection=match channel.connect(ticket,time.monotonic_ns()+30000000000){
     ok(value)=>value,
     err(_)=>{return outcome(false,struct.borrow(struct.borrow(owned,field=request),field=output),
-      "Cannot connect the MM-Air FLUX 3 progress channel")},
+      "Cannot connect the MM-Air MOSS-Image progress channel")},
   }
   var sender:option<channel.Sender> = option.some(connection)
-  let started=time.monotonic_ns()
-  let request=struct.borrow(owned,field=request)
-  var finished=match parameters.validate_flux3(request){
-    err(message)=>outcome(false,struct.borrow(request,field=output),message),
-    ok(_)=>{
-      let root=match runtime_config.value("FLUX3_KLEIN_ROOT"){
-        ok(value)=>match value{some(found)=>found,none=>string.copy("D:/Models/FLUX-3-Image-Klein"),},
-        err(message)=>{return outcome(false,struct.borrow(request,field=output),message)},}
-      let edit:bool=array.len(struct.borrow(request,field=references))!=0
-      let upsampler=if request.upsample{
-        match runtime_config.value("FLUX3_PUP_ROOT"){
-          ok(value)=>match value{some(found)=>found,none=>string.copy("D:/Models/FLUX-3-Image-Klein-PUP"),},
-          err(message)=>{return outcome(false,struct.borrow(request,field=output),message)},}
-      }else{string.new()}
-      if upsampler!=""{report(sender,"Upsampling the prompt with the native AIR FLUX 3 upsampler")}
-      report(sender,if edit{"Running native AIR FLUX 3 Image Klein edit"}
-        else{"Running native AIR FLUX 3 Image Klein text-to-image"})
-      var references:array<string>=array.new()
-      var index:u64=0
-      loop{
-        if index>=array.len(struct.borrow(request,field=references)){break}
-        array.push(references,string.copy(str.view(array.borrow(struct.borrow(request,field=references),index))))
-        index=index+1
-      }
-      let scratch=path.join(system.temp_directory(),"mm-air-flux3")
-      let _made=files.mkdirs(str.view(scratch))
-      var options=flux3_generate.Options{root:root,
-        prompt:string.copy(struct.borrow(request,field=prompt)),references:references,
-        width:request.width,height:request.height,steps:request.steps,seed:request.seed,
-        output:string.copy(struct.borrow(request,field=output)),scratch:scratch,
-        int8:true,reference_budget:0,upsampler:upsampler}
-      match flux3_generate.run(options){
-        ok(report_value)=>{
-          var done=report_value
-          var message=string.copy("Native AIR FLUX 3 Image Klein PNG completed")
-          if request.upsample{
-            let sidecar=text.concat(str.view(struct.borrow(request,field=output)),".prompt.txt")
-            let _saved=files.write_text(str.view(sidecar),str.view(struct.borrow(done,field=prompt)))
-            message=text.concat(str.view(message),text.concat(" with upsampled prompt (",
-              text.concat(str.view(string.from_int(cast.sat(done.seconds_upsample))),
-              text.concat(" s), saved as ",str.view(sidecar)))))
-          }
-          outcome_metrics(true,struct.borrow(request,field=output),str.view(message),
-            (time.monotonic_ns()-started)/1000000,0)
-        },
-        err(message)=>outcome(false,struct.borrow(request,field=output),message),
-      }
-    },
-  }
+  var finished=run_moss_inner(struct.borrow(owned,field=request),sender)
   finish_progress(sender,finished)
   finished
+}
+
+fn run_moss_inner(request:ref<parameters.MossRequest>,sender:ref<option<channel.Sender>>)->Outcome
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+  let started=time.monotonic_ns()
+  let output=string.copy(struct.borrow(request,field=output))
+  match parameters.validate_moss(request){
+    err(message)=>{return outcome(false,output,message)},ok(_)=>{},
+  }
+  let index=match parameters.moss_model_index_of(str.view(struct.borrow(request,field=model))){
+    some(value)=>value,none=>{return outcome(false,output,"Unknown MOSS-Image model")},}
+  let label=parameters.moss_label(index)
+  let key=if index==parameters.moss_sft_model_index(){"MM_AIR_MOSS_SFT_ROOT"}else{"MM_AIR_MOSS_BASE_ROOT"}
+  let root=match runtime_config.value(key){
+    ok(value)=>match value{some(found)=>found,none=>string.new(),},
+    err(message)=>{return outcome(false,output,message)},}
+  if text.trim(str.view(root))==""{
+    return outcome(false,output,str.view(text.concat("Choose the ",
+      str.view(text.concat(label," folder in Settings first")))))
+  }
+  var loras:array<moss_lora.Request> = []
+  let entries=struct.borrow(request,field=loras)
+  var lora_index:u64=0
+  loop{
+    if lora_index>=array.len(entries){break}
+    let entry=array.borrow(entries,lora_index)
+    if entry.enabled{
+      array.push(loras,moss_lora.Request{path:string.copy(struct.borrow(entry,field=path)),
+        strength:cast.float(entry.strength),policy:lycoris_algorithms.ScalePolicy.Forward})
+    }
+    lora_index=lora_index+1
+  }
+  // Run-time manifests only, rewritten by every run (the same reuse as the Qwen enhancer's scratch).
+  let scratch=path.join(system.temp_directory(),"mm-air-moss")
+  let _made=files.mkdirs(str.view(scratch))
+  var skip:array<u64> = [moss_scheduler.default_uncond_skip_layer()]
+  var options=moss_generate.Options{model:root,
+    prompt:string.copy(struct.borrow(request,field=prompt)),
+    negative:string.copy(struct.borrow(request,field=negative)),
+    width:request.width,height:request.height,steps:request.steps,
+    shift:request.shift,train_shift:moss_scheduler.training_shift(),
+    grid:moss_scheduler.Grid.Oracle,guidance:cast.float(request.cfg),seed:request.seed,
+    skip_uncond:skip,max_tokens:4096,output:string.copy(output),scratch:string.copy(str.view(scratch)),
+    fast:if request.fast{string.copy(moss_generate.fast_modes())}else{string.new()}}
+  report(sender,str.view(text.concat("Loading ",label)))
+  let result=moss_generate.run_adapted(options,loras,sender)
+  match result{
+    ok(_)=>outcome_metrics(true,output,str.view(text.concat(label,
+      str.view(text.concat(" PNG completed in ",str.view(text.concat(
+        str.view(string.from_int(cast.sat((time.monotonic_ns()-started)/1000000000))),
+        " s")))))),(time.monotonic_ns()-started)/1000000,0),
+    err(message)=>outcome(false,output,message),
+  }
+}
+
+// Fibo 2.0 Dev (text to image) or Edit Turbo (instruction edit) in this process
+// (models/fibo2 generate.run): the Qwen3-VL encoder is read once and closed, the transformer is
+// read once and stays resident on the GPU for every step, then the VAE decodes. Folders come from
+// Settings (MM_AIR_FIBO_DEV_ROOT, MM_AIR_FIBO_EDIT_TURBO_ROOT) with the pipeline description
+// MM_AIR_FIBO_PIPELINE_PRESET (AIR's models/fibo2/presets/pipeline.json). LoRAs run unmerged.
+pub fn run_fibo(job:FiboJob own)->Outcome
+    effects {alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+  var owned=job
+  var ticket=ref.swap(struct.borrow(owned,field=progress),no_progress())
+  var connection=match channel.connect(ticket,time.monotonic_ns()+30000000000){
+    ok(value)=>value,
+    err(_)=>{return outcome(false,struct.borrow(struct.borrow(owned,field=request),field=output),
+      "Cannot connect the MM-Air Fibo 2.0 progress channel")},
+  }
+  var sender:option<channel.Sender> = option.some(connection)
+  var finished=run_fibo_inner(struct.borrow(owned,field=request),sender)
+  finish_progress(sender,finished)
+  finished
+}
+
+fn configured_path(key:str,missing:str)->result<string,string> effects{alloc,env,fs.read,fs.meta}{
+  let found=match try runtime_config.value(key){some(value)=>value,none=>string.new(),}
+  if text.trim(str.view(found))==""{return result.err(text.copy(missing))}
+  result.ok(found)
+}
+
+fn run_fibo_inner(request:ref<parameters.FiboRequest>,sender:ref<option<channel.Sender>>)->Outcome
+    effects {alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+  let started=time.monotonic_ns()
+  let output=string.copy(struct.borrow(request,field=output))
+  match parameters.validate_fibo(request){
+    err(message)=>{return outcome(false,output,message)},ok(_)=>{},
+  }
+  let edit=parameters.fibo_is_edit(request)
+  let label=if edit{"Fibo 2.0 Edit Turbo"}else{"Fibo 2.0 Dev"}
+  let root=match configured_path(if edit{"MM_AIR_FIBO_EDIT_TURBO_ROOT"}else{"MM_AIR_FIBO_DEV_ROOT"},
+      if edit{"Choose the Fibo 2.0 Edit Turbo folder in Settings first"}else{"Choose the Fibo 2.0 Dev folder in Settings first"}){
+    ok(value)=>value,err(message)=>{return outcome(false,output,message)},}
+  let preset=match configured_path("MM_AIR_FIBO_PIPELINE_PRESET",
+      "Choose the Fibo 2.0 pipeline file in Settings first"){
+    ok(value)=>value,err(message)=>{return outcome(false,output,message)},}
+  var loras:array<fibo_adapters.Request> = []
+  let entries=struct.borrow(request,field=loras)
+  var lora_index:u64=0
+  loop{
+    if lora_index>=array.len(entries){break}
+    let entry=array.borrow(entries,lora_index)
+    if entry.enabled{
+      array.push(loras,fibo_adapters.Request{path:string.copy(struct.borrow(entry,field=path)),strength:entry.strength})
+    }
+    lora_index=lora_index+1
+  }
+  var images:array<string> = []
+  var image_index:u64=0
+  loop{
+    if image_index>=array.len(struct.borrow(request,field=images)){break}
+    array.push(images,string.copy(str.view(array.borrow(struct.borrow(request,field=images),image_index))))
+    image_index=image_index+1
+  }
+  // Run-time manifests only, rewritten by every run.
+  let scratch=path.join(system.temp_directory(),"mm-air-fibo2")
+  let _made=files.mkdirs(str.view(scratch))
+  let negative=if edit{string.new()}else{string.copy(struct.borrow(request,field=negative))}
+  let has_negative:bool=text.trim(str.view(negative))!=""
+  var job=fibo_generate.Request{model_dir:root,preset:preset,work_dir:string.copy(str.view(scratch)),
+    prompt:string.copy(struct.borrow(request,field=prompt)),negative:negative,has_negative:has_negative,
+    images:images,mask:string.new(),width:request.width,height:request.height,steps:request.steps,
+    guidance:cast.float(request.guidance),seed:request.seed,output:string.copy(str.view(output)),
+    pinned_resident_gib:0,pinned_slots:3,text_images:true,fonts:[],dump_dir:string.new(),loras:loras}
+  report(sender,str.view(text.concat(label,": reading the model and generating")))
+  match fibo_generate.run(job){
+    ok(_)=>outcome_metrics(true,output,str.view(text.concat(label,
+      str.view(text.concat(" PNG completed in ",str.view(text.concat(
+        str.view(string.from_int(cast.sat((time.monotonic_ns()-started)/1000000000))),
+        " s")))))),(time.monotonic_ns()-started)/1000000,0),
+    err(message)=>outcome(false,output,message),
+  }
 }
 
 pub fn run_qwen_image(job:QwenImageJob own)->Outcome
     effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
   var owned=job
-  run_qwen_image_policy(owned,qwen_image_attention.Policy.CkInt8,"")
+  run_qwen_image_policy(owned,qwen_image_attention.Policy.Exact,"")
 }
 
-// Compatibility entrypoint for existing CK callers. Both operating systems
-// use the same request handling, progress and CK generation policy.
-pub fn run_qwen_image_ck(job:QwenImageJob own)->Outcome
-    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
-  run_qwen_image(job)
-}
-
-pub fn run_qwen_image_ck_cancelable(work:QwenImageCancelableJob own)->Outcome
+// Both operating systems use the same request handling, progress and
+// generation policy.
+pub fn run_qwen_image_cancelable(work:QwenImageCancelableJob own)->Outcome
     effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
   var owned=work
-  run_qwen_image_policy(struct.borrow(owned,field=job),qwen_image_attention.Policy.CkInt8,
+  run_qwen_image_policy(struct.borrow(owned,field=job),qwen_image_attention.Policy.Exact,
     struct.borrow(owned,field=cancel_path))
 }
 
@@ -195,8 +284,8 @@ fn run_qwen_image_policy(owned:ref<QwenImageJob>,policy:qwen_image_attention.Pol
           ok(value)=>match value{some(found)=>found,none=>string.copy(if edit{"E:/Models/Qwen-Image-2.1-PE-I2I"}
             else{"E:/Models/Qwen-Image-2.1-PE-T2I"}),},
           err(message)=>{return outcome(false,struct.borrow(request,field=output),message)},}
-        report(sender,if edit{"Enhancing the edit request with the native AIR Qwen-Image-2.1 edit prompt enhancer (looks at the sources, then thinks)"}
-          else{"Enhancing the prompt with the native AIR Qwen-Image-2.1 prompt enhancer (thinking)"})
+        report(sender,if edit{"Enhancing the edit request with the Qwen-Image-2.1 edit prompt enhancer (looks at the sources, then thinks)"}
+          else{"Enhancing the prompt with the Qwen-Image-2.1 prompt enhancer (thinking)"})
         let pe_scratch=path.join(system.temp_directory(),"mm-air-qwen-pe")
         let _made=files.mkdirs(str.view(pe_scratch))
         let pe_started=time.monotonic_ns()
@@ -257,8 +346,8 @@ fn run_qwen_image_policy(owned:ref<QwenImageJob>,policy:qwen_image_attention.Pol
       }
       qwen_image_session.set_cancel_path(session,cancel_path)
       report(sender,if condition_count==0{
-        "Running native AIR Qwen-Image-2.1 text-to-image"}else{
-        "Running native AIR Qwen-Image-2.1 image edit"})
+        "Running Qwen-Image-2.1 text-to-image"}else{
+        "Running Qwen-Image-2.1 image edit"})
       var sources: array<string> = array.new()
       if condition_count!=0{
         if struct.borrow(request,field=source)!=""{
@@ -284,16 +373,27 @@ fn run_qwen_image_policy(owned:ref<QwenImageJob>,policy:qwen_image_attention.Pol
         ok(value)=>match value{some(path)=>path,none=>string.new(),},
         err(message)=>{return outcome(false,struct.borrow(request,field=output),message)},}
       let residency=match runtime_config.value("QWEN_IMAGE21_TEXT_RESIDENCY"){
-        ok(value)=>match value{some(value)=>value,none=>string.copy("streaming"),},
+        ok(value)=>match value{some(value)=>value,none=>string.copy("pinned"),},
         err(message)=>{return outcome(false,struct.borrow(request,field=output),message)},}
-      let result=qwen_image_generate.run_request_images_configured(
+      // Swap / style files: run-time adapters beside the resident weights, never merged.
+      var adapters: array<qwen_image_adapters.Request> = array.new()
+      var lora_index:u64=0
+      loop{
+        if lora_index>=array.len(struct.borrow(request,field=loras)){break}
+        let entry=array.borrow(struct.borrow(request,field=loras),lora_index)
+        if entry.enabled{
+          array.push(adapters,qwen_image_session.lora(str.view(struct.borrow(entry,field=path)),cast.float(entry.strength)))
+        }
+        lora_index=lora_index+1
+      }
+      let result=qwen_image_generate.run_request_images_adapted(
         if condition_count==0{"t2i"}else{"edit"},
         str.view(prompt),struct.borrow(request,field=output),sources,
-        session.request,sender,policy,cancel_path,root,manifests,residency)
+        session.request,sender,policy,cancel_path,root,manifests,residency,adapters)
       match result{
         ok(_)=>outcome_metrics(true,struct.borrow(request,field=output),
-          str.view(text.concat(if turbo{"Native AIR Qwen-Image-2.1-Turbo PNG completed"}
-            else{"Native AIR Qwen-Image-2.1 PNG completed"},str.view(enhanced_note))),
+          str.view(text.concat(if turbo{"Qwen-Image-2.1-Turbo PNG completed"}
+            else{"Qwen-Image-2.1 PNG completed"},str.view(enhanced_note))),
           (time.monotonic_ns()-started)/1000000,0),
         err(message)=>outcome(false,struct.borrow(request,field=output),message),
       }
@@ -311,20 +411,17 @@ pub fn krea_sources() -> result<krea_session.Sources,string> effects {alloc,env,
     vae_config:try required_environment("MM_AIR_KREA_VAE_CONFIG"),
     manifest_directory:try required_environment("MM_AIR_KREA_MANIFEST_ROOT")})
 }
-pub fn run_krea(job: KreaJob own) -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time} {
+pub fn run_krea(job: KreaJob own) -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time,env} {
   var owned=job
   run_krea_policy(owned,krea_attention.Policy.CkInt8,"")
 }
-pub fn run_krea_ck(job:KreaJob own) -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time} {
-  run_krea(job)
-}
-pub fn run_krea_ck_cancelable(work:KreaCancelableJob own)->Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time} {
+pub fn run_krea_cancelable(work:KreaCancelableJob own)->Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time,env} {
   var owned=work
   run_krea_policy(struct.borrow(owned,field=job),krea_attention.Policy.CkInt8,
     struct.borrow(owned,field=cancel_path))
 }
 fn run_krea_policy(owned:ref<KreaJob>,policy:krea_attention.Policy,cancel_path:str)
-    -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time} {
+    -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time,env} {
   var ticket = ref.swap(struct.borrow(owned,field=progress),no_progress())
   var connection = match channel.connect(ticket,time.monotonic_ns()+30000000000) {
     ok(value) => value,
@@ -336,7 +433,7 @@ fn run_krea_policy(owned:ref<KreaJob>,policy:krea_attention.Policy,cancel_path:s
   finish_progress(sender,finished)
   finished
 }
-fn run_krea_inner(owned: ref<KreaJob>,sender:ref<option<channel.Sender>>,policy:krea_attention.Policy,cancel_path:str) -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time} {
+fn run_krea_inner(owned: ref<KreaJob>,sender:ref<option<channel.Sender>>,policy:krea_attention.Policy,cancel_path:str) -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time,env} {
   let request = struct.borrow(owned,field=request)
   let seed: u64 = cast.sat(request.seed)
   let settings = krea_config.Config {width:request.width,height:request.height}
@@ -356,6 +453,25 @@ fn run_krea_inner(owned: ref<KreaJob>,sender:ref<option<channel.Sender>>,policy:
     }
     index = index + 1
   }
+  if request.pose != "" {
+    // Pose control: native geometry, the release's own input layer and LoRA (unmerged); the pose is a
+    // skeleton raster used as is (.png) or a keypoint file drawn at its own canvas (.json).
+    let release = match required_environment("MM_AIR_KREA_POSE_RELEASE") {
+      ok(value) => value,
+      err(message) => { return outcome(false,struct.borrow(request,field=output),message) },
+    }
+    let is_json = text.ends_with(text.lower_ascii(struct.borrow(request,field=pose)),".json")
+    let condition = krea_pose.Request {release:release,
+      pose_png:if is_json { string.new() } else { string.copy(struct.borrow(request,field=pose)) },
+      keypoints:if is_json { string.copy(struct.borrow(request,field=pose)) } else { string.new() },
+      prompt:string.copy(struct.borrow(request,field=prompt)),seed:seed,control_scale:cast.float(request.pose_scale),
+      width:0,height:0,trace_dir:string.new()}
+    return match krea_pose.run_to_png(struct.borrow(owned,field=sources),condition,
+        str.view(struct.borrow(request,field=output)),0,sender,cancel_path) {
+      ok(_) => outcome(true,struct.borrow(request,field=output),"Linked AIR Krea 2 Turbo pose-control image completed"),
+      err(message) => outcome(false,struct.borrow(request,field=output),message),
+    }
+  }
   match krea_session.run_to_png_cancelable(struct.borrow(owned,field=sources),
       struct.borrow(request,field=prompt),seed,settings,struct.borrow(request,field=output),loras,0,sender,policy,cancel_path) {
     ok(_) => outcome(true,struct.borrow(request,field=output),"Linked AIR Krea 2 Turbo image completed"),
@@ -368,7 +484,12 @@ pub type Job = struct {
   reference_checkpoint_root: string,
   donor_root: string,
   manifest_root: string,
+  deployment_file: string,
   scratch_root: string,
+  // The generation policy: the presets' policy with the request's sampler.
+  policy: h3_policy.Policy,
+  // The presets' Ref2VA rolling window length in frames.
+  rolling_window_frames: u64,
   prompt: string,
   model: session.Model,
   task: session.Task,
@@ -397,9 +518,11 @@ pub type Job = struct {
   drift_control:session.DriftControl,
   character_sheet_mode: u32,
   character_sheet_output: string,
-  // Encode reference videos at the target resolution (ComfyUI ref_image_size
-  // "match") instead of the 768-short-edge creator canvas.
+  // Encode reference videos at the target resolution instead of the 768-short-edge creator canvas.
   reference_video_match: bool,
+  // An aligned guide video (a guide-video swap adapter's source clip): packed beside the references,
+  // fitted to the output canvas. Empty: none.
+  guide_video: string,
   seed: u64,
   evaluations: u64,
   schedule_kind: session.Schedule,
@@ -425,6 +548,12 @@ pub type Configuration = struct {
   reference_checkpoint_root: string,
   donor_root: string,
   manifest_root: string,
+  // The H3 deployment layout file (schema air.inference.h3.deployment,
+  // models/h3/presets/h3_deployment.json): every checkpoint, cache and manifest name.
+  deployment_file: string,
+  // The H3 application presets (MM_AIR_H3_APP_PRESET, schema
+  // air.inference.h3.app_preset, models/h3/presets/h3_app.json).
+  presets: h3_request.Presets,
   scratch_root: string
 }
 
@@ -452,17 +581,85 @@ pub fn configuration() -> result<Configuration,string> effects {alloc,env,fs.rea
   }
   let donor_root: string = try required_environment("MM_AIR_H3_DONOR_ROOT")
   let manifest_root: string = try required_environment("MM_AIR_H3_MANIFEST_ROOT")
+  let deployment_file: string = try required_environment("MM_AIR_H3_DEPLOYMENT")
+  let presets: h3_request.Presets = try app_presets()
   let scratch_root: string = system.temp_directory()
   result.ok(Configuration {checkpoint_root: checkpoint_root,
     reference_checkpoint_root: reference_checkpoint_root,
     donor_root: donor_root, manifest_root: manifest_root,
-    scratch_root: scratch_root})
+    deployment_file: deployment_file, presets: presets, scratch_root: scratch_root})
+}
+
+// The H3 application presets named by MM_AIR_H3_APP_PRESET.
+pub fn app_presets() -> result<h3_request.Presets,string> effects {alloc,env,fs.read,fs.meta} {
+  let file: string = try required_environment("MM_AIR_H3_APP_PRESET")
+  h3_request.load_presets(str.view(file))
 }
 
 // Character Swap's LoRA, applied at run time on the plain Ref2VA root; a newer
 // swap LoRA is just a different file. Unset, empty or missing means plain Ref2VA.
 pub fn character_swap_lora() -> option<string> effects {alloc,env,fs.read,fs.meta} {
   lora_file("MM_AIR_H3_CHARACTER_SWAP_LORA")
+}
+
+// The guide-video adapters (character swap and head swap): the source clip is a guide, not a reference video.
+pub fn guide_character_swap_lora() -> option<string> effects {alloc,env,fs.read,fs.meta} {
+  lora_file("MM_AIR_H3_GUIDE_CHARACTER_SWAP_LORA")
+}
+
+pub fn guide_head_swap_lora() -> option<string> effects {alloc,env,fs.read,fs.meta} {
+  lora_file("MM_AIR_H3_GUIDE_HEAD_SWAP_LORA")
+}
+
+// The guide-video edit adapters of the H3 LoRA pack, by kind: 0 VFX edit, 1 style transfer, 2 sharpness.
+pub fn guide_edit_lora(kind: u32) -> option<string> effects {alloc,env,fs.read,fs.meta} {
+  if kind == 0 { return lora_file("MM_AIR_H3_GUIDE_VFX_EDIT_LORA") }
+  if kind == 1 { return lora_file("MM_AIR_H3_GUIDE_STYLE_TRANSFER_LORA") }
+  if kind == 3 { return lora_file("MM_AIR_H3_GUIDE_MOTION_TRANSFER_LORA") }
+  lora_file("MM_AIR_H3_GUIDE_SHARPEN_LORA")
+}
+
+// The training adapter the motion transfer LoRA was trained on top of (ostris' V2): loaded first, strength 1.
+pub fn motion_training_adapter() -> option<string> effects {alloc,env,fs.read,fs.meta} {
+  lora_file("MM_AIR_H3_TRAINING_ADAPTER_LORA")
+}
+
+fn guide_edit_trigger(kind: u32) -> str effects {} {
+  if kind == 0 { return "vfx_edit:" }
+  if kind == 1 { return "style_transfer:" }
+  if kind == 3 { return "motion_transfer:" }
+  ""
+}
+
+// Build Prompt for an edit adapter: the sharpness adapter takes its fixed caption; the others get their trigger word
+// in front of what is typed (an empty prompt gets an example sentence of the adapter's own form to edit).
+pub fn guide_edit_prompt(kind: u32, typed: str) -> string effects {alloc} {
+  if kind == 2 { return string.copy(task_names.sharpen_caption()) }
+  let trigger: str = guide_edit_trigger(kind)
+  var body: string = text.trim(typed)
+  if str.starts_with(str.view(body), trigger) { return body }
+  if str.len(str.view(body)) == 0 {
+    body = if kind == 0 {
+      string.copy("Describe the change here while preserving the subject's identity, pose, motion, clothing, framing, lighting and background.")
+    } else if kind == 3 {
+      string.copy("subject_definitions: <Subject 1> is the character shown in <Picture 1>. summary: <Subject 1> performs the motion and timing of the guide video. retention_analysis: <Subject 1> keeps the identity and clothing of <Picture 1>. detailed_description: [Shot 1] <Subject 1> follows the guide's pose, gestures and head motion frame by frame in the guide's setting. overall_soundscape: Room tone. non_diegetic_music: N/A")
+    } else {
+      string.copy("Transfer the visual style of <Picture 1> onto this video.")
+    }
+  }
+  text.concat(text.concat(trigger, " "), str.view(body))
+}
+
+// The prompt must follow the adapter's form before any model work starts.
+pub fn guide_edit_check(kind: u32, prompt: str) -> result<unit,string> effects {alloc} {
+  if kind == 2 {
+    if prompt == task_names.sharpen_caption() { return result.ok(()) }
+    return result.err("The sharpness adapter takes its fixed caption: press Build Prompt")
+  }
+  if not str.starts_with(prompt, guide_edit_trigger(kind)) {
+    return result.err(text.concat("The prompt must start with ", text.concat(guide_edit_trigger(kind), " (press Build Prompt)")))
+  }
+  task_names.check_prompt("ref2va", prompt)
 }
 
 // The 4-step Ref2VA turbo (distillation) LoRA used by the four-evaluation profile.
@@ -504,6 +701,10 @@ pub fn h3_job(configuration:ref<Configuration>,request:ref<h3_request.Request>,
     ->result<Job,string> effects {alloc} {
   match h3_request.validate(request){ok(_)=>{},err(problem)=>{var held=problem
     return result.err(h3_request.describe(held))},}
+  let presets: ref<h3_request.Presets> = struct.borrow(configuration, field=presets)
+  if h3_request.evaluations(presets, request.profile) == 0 {
+    return result.err("The H3 profile is not in the application presets")
+  }
   try parameters.validate_loras(loras)
   if request.seed<0{return result.err("Resolve the random seed before starting H3")}
   if (request.model==h3_request.model_reference())!=(request.task==h3_request.task_ref2va()){
@@ -514,14 +715,15 @@ pub fn h3_job(configuration:ref<Configuration>,request:ref<h3_request.Request>,
     if request.task==2{session.Task.FL2VA}else{if request.task==4{session.Task.L2VA}else{session.Task.Ref2VA}}}}
   let attention=if request.attention==1{session.Attention.Exact}else{
     if request.attention==2{session.Attention.HybridExact3DenseInt8}else{
-    if request.attention==3{session.Attention.DenseInt8}else{session.Attention.CkInt8}}}
+    session.Attention.DenseInt8}}
   result.ok(job_loras(configuration,struct.borrow(request,field=prompt),model,task,
     request.geometry,copied_paths(struct.borrow(request,field=references)),
     copied_paths(struct.borrow(request,field=audio_references)),struct.borrow(request,field=output),
     parameters.clone_loras(loras),character_sheet.off(),"",cast.sat(request.seed),
-    h3_request.evaluations(request.profile),request_projection(request.conditioner_projection),
+    h3_request.evaluations(presets,request.profile),request_projection(request.conditioner_projection),
     request_projection(request.transformer_projection),attention,progress,
-    if request.profile==h3_request.profile_dc_euler_19(){session.Schedule.Exponential}else{session.Schedule.Simple}))
+    if h3_request.exponential(presets,request.profile){session.Schedule.Exponential}else{session.Schedule.Simple},
+    h3_request.sampler(presets,request.profile)))
 }
 
 pub fn job_loras(configuration: ref<Configuration>, prompt: str,
@@ -534,8 +736,11 @@ pub fn job_loras(configuration: ref<Configuration>, prompt: str,
            conditioner_projection: session.Projection,
            transformer_projection: session.Projection,
            attention: session.Attention, progress: channel.Ticket own,
-           schedule_kind: session.Schedule) -> Job
+           schedule_kind: session.Schedule, sampler: h3_policy.Sampler) -> Job
     effects {alloc} {
+  var run_policy: h3_policy.Policy = h3_policy.copy(struct.borrow(
+    struct.borrow(configuration, field=presets), field=policy))
+  struct.set(run_policy, sampler, field=sampler)
   var owned_references: array<string> = references
   var owned_audio_references: array<string> = audio_references
   var owned_loras: array<parameters.LoraEntry> = loras
@@ -553,6 +758,10 @@ pub fn job_loras(configuration: ref<Configuration>, prompt: str,
       field=donor_root))),
     manifest_root: text.copy(str.view(struct.borrow(configuration,
       field=manifest_root))),
+    deployment_file: text.copy(str.view(struct.borrow(configuration,
+      field=deployment_file))),
+    policy: run_policy,
+    rolling_window_frames: struct.borrow(configuration, field=presets).rolling_window_frames,
     scratch_root: text.copy(str.view(struct.borrow(configuration,
       field=scratch_root))),
     prompt: text.copy(prompt), model: model, task: task, geometry: geometry,
@@ -572,6 +781,7 @@ pub fn job_loras(configuration: ref<Configuration>, prompt: str,
     character_sheet_mode: character_sheet_mode,
     character_sheet_output: text.copy(character_sheet_output),
     reference_video_match: false,
+    guide_video: string.new(),
     seed: seed, evaluations: evaluations,
     schedule_kind: schedule_kind,
     conditioner_projection: conditioner_projection,
@@ -594,13 +804,13 @@ pub fn job(configuration: ref<Configuration>, prompt: str,
            conditioner_projection: session.Projection,
            transformer_projection: session.Projection,
            attention: session.Attention, progress: channel.Ticket own,
-           schedule_kind: session.Schedule) -> Job
+           schedule_kind: session.Schedule, sampler: h3_policy.Sampler) -> Job
     effects {alloc} {
   var loras: array<parameters.LoraEntry> = []
   job_loras(configuration,prompt,model,task,geometry,references,
     audio_references,output,loras,character_sheet_mode,
     character_sheet_output,seed,evaluations,conditioner_projection,
-    transformer_projection,attention,progress,schedule_kind)
+    transformer_projection,attention,progress,schedule_kind,sampler)
 }
 
 // Preserve the generator artifact beside the final result. This also creates
@@ -678,6 +888,11 @@ pub fn masked_composite_prompt(prompt:str) -> string effects {alloc} {
 // strategy when strict token-local denoising retains the source identity.
 pub fn enable_reference_video_match(job: ref<Job>) -> unit effects {} {
   struct.set(job,true,field=reference_video_match)
+}
+
+pub fn enable_guide_video(job: ref<Job>, source: str) -> unit effects {alloc} {
+  let _ = ref.swap(struct.borrow(job,field=guide_video),string.copy(source))
+  ()
 }
 
 pub fn enable_masked_composite(job:ref<Job>,settings:masked_runtime.Settings own)
@@ -809,7 +1024,7 @@ fn apply_seedvr2(job:ref<Job>,generated:Outcome own,
   let final_output=string.copy(struct.borrow(job,field=seedvr2_final_output))
   report(sender,"Unloading the generation model and reclaiming its GPU context")
   report(sender,if job.seedvr2_settings.variant==1{
-    "Loading native AIR SeedVR2 7B"}else{"Loading native AIR SeedVR2 3B"})
+    "Loading SeedVR2 7B"}else{"Loading SeedVR2 3B"})
   report(sender,"Restoring / upscaling generated video")
   match seedvr2_post.run(str.view(source),str.view(final_output),
       struct.borrow(job,field=scratch_root),job.seedvr2_settings){
@@ -817,7 +1032,7 @@ fn apply_seedvr2(job:ref<Job>,generated:Outcome own,
       var held=completed
       report(sender,"Muxing source audio and saving the SeedVR2 result")
       outcome(true,struct.borrow(held,field=final_output),
-        "Native AIR SeedVR2 restoration completed; pre-upscale generation retained")},
+        "SeedVR2 restoration completed; pre-upscale generation retained")},
     err(message)=>outcome(true,str.view(source),text.concat(
       "H3 generation completed and is displayed without SeedVR2; optional post-process failed: ",
       str.view(message))),
@@ -1151,7 +1366,8 @@ fn reference_audio_sample_cap(target_frames: u64) -> u64 effects {} {
 fn append_video_vision(
     presentations: ref<array<presentation.Reference>>,
     patches: ref<array<presentation.VisionPatches>>,
-    frames: ref<VideoFrames>, has_audio: bool) -> unit effects {alloc} {
+    frames: ref<VideoFrames>, has_audio: bool, video_min: u64, video_max: u64,
+    pd: presentation.Dims) -> unit effects {alloc} {
   let frame_bytes: u64 = frames.width * frames.height * 3
   let sampled: u64 = (frames.frames + 11) / 12
   var grids: array<presentation.VisionGrid> = array.new()
@@ -1177,8 +1393,9 @@ fn append_video_vision(
         second_index * frame_bytes + byte_index))
       byte_index = byte_index + 1
     }
-    var patch: presentation.VisionPatches = presentation.vision_patch_rows(
-      array.view(pair), frames.width, frames.height, 2, true)
+    var patch: presentation.VisionPatches = presentation.vision_patch_rows_bounded_dims(
+      array.view(pair), frames.width, frames.height, pd.temporal_patch, true, video_min,
+      video_max, pd)
     array.push(grids, patch.grid)
     array.push(patches, patch)
     // Sample timestamps are ordinal/2 seconds; Qwen merges each pair and uses
@@ -1235,8 +1452,21 @@ fn intake_report(sender: ref<option<channel.Sender>>, rail: str, index: u64,
 pub fn prepare_ref2va_inputs(
     context: ref<GpuContext>, stream: ref<GpuStream>, job: ref<Job>,
     sources: ref<session.Sources>, checkpoint_root: str, manifests: str,
-    scratch: str, sender: ref<option<channel.Sender>>) -> result<ReferenceInputs,string>
+    scratch: str, sender: ref<option<channel.Sender>>, layout: ref<h3_deployment.Layout>)
+    -> result<ReferenceInputs,string>
     effects {alloc,fs.meta,fs.read,fs.write,gpu,net,process,time} {
+  // Latent statistics and processor pixel bounds from the model's own config.
+  var h3_config: h3_model_config.Config = match session.load_config(sources) {
+    ok(value) => value,
+    err(problem) => { var held: session.Error = problem
+      return result.err(session.error_message(held)) },
+  }
+  var video_stats: vae.LatentStats = vae.latent_stats(h3_config)
+  var audio_stats: h3_audio_vae.LatentStats = h3_audio_vae.latent_stats(h3_config)
+  let image_min: u64 = h3_config.processor.min_pixels
+  let image_max: u64 = h3_config.processor.max_pixels
+  let video_min: u64 = h3_config.processor.video_min_pixels
+  let video_max: u64 = h3_config.processor.video_max_pixels
   var rows: array<session.ReferenceRows> = array.new()
   var presentations: array<presentation.Reference> = array.new()
   var patches: array<presentation.VisionPatches> = array.new()
@@ -1247,9 +1477,12 @@ pub fn prepare_ref2va_inputs(
   var embedded_audio_rows: array<u64> = array.new()
   let visual_count: u64 = array.len(struct.borrow(job, field=references))
 
-  if visual_count != 0 {
+  // A guide video alone (VFX edit, sharpness) also needs the encoder, with no pictures.
+  if visual_count != 0 or str.len(str.view(struct.borrow(job, field=guide_video))) != 0 {
+    // Resident: the encoder is read from disk once and held for every reference
+    // of this job (docs/NO_DISK_STREAMING.md).
     var options: offload.Options = offload.Options {
-      mode: offload.Mode.Streaming, fp8_pinned: false, stage_threads: 1}
+      mode: offload.Mode.Resident, fp8_pinned: false, stage_threads: 1}
     var encoder: offload.Offloader = match offload.open(context,
         str.view(struct.borrow(sources, field=video_vae_checkpoint)),
         str.view(struct.borrow(sources, field=video_encoder_manifest)), options) {
@@ -1308,9 +1541,9 @@ pub fn prepare_ref2va_inputs(
                 "image geometry", source_path, str.view(problem))) },
           }
           var rgb: array<byte> = rgb_pixels(surface)
-          var patch: presentation.VisionPatches = presentation.vision_patch_rows(
+          var patch: presentation.VisionPatches = presentation.vision_patch_rows_bounded_dims(
             array.view(rgb), reference_geometry.width, reference_geometry.height,
-            1, false)
+            1, false, image_min, image_max, presentation.dims_of(h3_config))
           let grid: presentation.VisionGrid = patch.grid
           var pixels: array<f32> = match vae.preprocess_keyframe_geometry(
               surface, reference_geometry) {
@@ -1324,9 +1557,9 @@ pub fn prepare_ref2va_inputs(
           }
           intake_report(sender, "visual", visual, visual_count, source_path,
             "encoding image")
-          var video_rows: array<f32> = match vae.encode_keyframe_geometry(
+          var video_rows: array<f32> = match vae.encode_keyframe_geometry_stats(
               context, stream, held, array.view(pixels), 42,
-              reference_geometry) {
+              reference_geometry, video_stats) {
             ok(value) => value,
             err(problem) => { let _ = offload.release(held)
               let _ = offload.close(encoder)
@@ -1337,7 +1570,7 @@ pub fn prepare_ref2va_inputs(
             geometry: packing.ReferenceGeometry {
               kind: packing.ReferenceKind.Image, latent_frames: 1,
               latent_height: reference_geometry.latent_height,
-              latent_width: reference_geometry.latent_width, audio_latents: 0},
+              latent_width: reference_geometry.latent_width, audio_latents: 0, anchor_frame: 0},
             video: video_rows, audio: []})
           var grids: array<presentation.VisionGrid> = [grid]
           array.push(presentations, presentation.Reference {
@@ -1414,22 +1647,23 @@ pub fn prepare_ref2va_inputs(
           }
           intake_report(sender, "visual", visual, visual_count, source_path,
             "encoding video")
-          var video_rows: array<f32> = match vae.encode_video_geometry(
+          var video_rows: array<f32> = match vae.encode_video_geometry_stats(
               context, stream, held, array.view(pixels), encode_frames, 42,
-              reference_geometry) {
+              reference_geometry, video_stats) {
             ok(value) => value,
             err(problem) => { let _ = offload.release(held)
               let _ = offload.close(encoder)
               return result.err(intake_failure(
                 "video encode", source_path, problem.message)) },
           }
-          append_video_vision(presentations, patches, frames, has_audio)
+          append_video_vision(presentations, patches, frames, has_audio, video_min, video_max,
+            presentation.dims_of(h3_config))
           array.push(rows, session.ReferenceRows {
             geometry: packing.ReferenceGeometry {
               kind: packing.ReferenceKind.Video, latent_frames: latent_frames,
               latent_height: reference_geometry.latent_height,
               latent_width: reference_geometry.latent_width,
-              audio_latents: soundtrack_latents},
+              audio_latents: soundtrack_latents, anchor_frame: 0},
             video: video_rows, audio: []})
         },
         Audio => {
@@ -1446,6 +1680,29 @@ pub fn prepare_ref2va_inputs(
         },
       }
       visual = visual + 1
+    }
+    // The guide video goes through the same held encoder; its rows lead the packed condition rows.
+    if str.len(str.view(struct.borrow(job, field=guide_video))) != 0 {
+      intake_report(sender, "guide", 0, 1, str.view(struct.borrow(job, field=guide_video)),
+        "decoding and encoding the guide video")
+      var guide_request: reference_images.Guide = reference_images.Guide {
+        path: string.copy(str.view(struct.borrow(job, field=guide_video))), anchor_frame: 0}
+      match reference_images.encode_guide(context, stream, held, guide_request, job.geometry, scratch,
+          sender, video_stats) {
+        ok(guide_rows) => {
+          array.push(rows, guide_rows)
+          var lead: u64 = array.len(rows) - 1
+          loop {
+            if lead == 0 { break }
+            array.swap(rows, lead, lead - 1)
+            lead = lead - 1
+          }
+        },
+        err(problem) => { let _ = offload.release(held)
+          let _ = offload.close(encoder)
+          return result.err(intake_failure("guide video",
+            str.view(struct.borrow(job, field=guide_video)), str.view(problem))) },
+      }
     }
     let released: unit = match offload.release(held) {
       ok(value) => value,
@@ -1493,8 +1750,10 @@ pub fn prepare_ref2va_inputs(
     var options: offload.Options = offload.Options {
       mode: offload.Mode.Resident, fp8_pinned: false, stage_threads: 1}
     var encoder: offload.Offloader = match offload.open(context,
-        str.view(joined(checkpoint_root, "audio_vae/model.safetensors")),
-        str.view(joined(manifests, "h3-audio-encoder.json")), options) {
+        str.view(joined(checkpoint_root,
+          str.view(struct.borrow(layout, field=audio_vae_source)))),
+        str.view(joined(manifests,
+          str.view(struct.borrow(layout, field=audio_encoder_manifest)))), options) {
       ok(value) => value,
       err(problem) => { return result.err(text.copy(problem.message)) },
     }
@@ -1519,8 +1778,8 @@ pub fn prepare_ref2va_inputs(
       intake_report(sender, "audio", audio_index, audio_count, source_path,
         "encoding audio")
       let latent_frames: u64 = audio_encode.latent_frames_for(waveform.samples)
-      var audio_rows: array<f32> = match audio_encode.encode_rows(context,
-          stream, held, prepared, waveform) {
+      var audio_rows: array<f32> = match audio_encode.encode_rows_stats(context,
+          stream, held, prepared, waveform, audio_stats) {
         ok(value) => value,
         err(problem) => { let _ = audio_encode.close(prepared)
           let _ = offload.release(held)
@@ -1537,7 +1796,7 @@ pub fn prepare_ref2va_inputs(
         array.push(rows, session.ReferenceRows {
           geometry: packing.ReferenceGeometry {
             kind: packing.ReferenceKind.Audio, latent_frames: 0,
-            latent_height: 0, latent_width: 0, audio_latents: latent_frames},
+            latent_height: 0, latent_width: 0, audio_latents: latent_frames, anchor_frame: 0},
           video: [], audio: audio_rows})
         array.push(presentations, presentation.Reference {
           kind: presentation.ReferenceKind.Audio, has_audio: true,
@@ -1603,7 +1862,8 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
       "MiniMax-H3 Base tasks do not accept audio references")
   }
   if job.model == session.Model.Reference and
-     array.len(struct.borrow(job, field=references)) == 0 {
+     array.len(struct.borrow(job, field=references)) == 0 and
+     str.len(str.view(struct.borrow(job, field=guide_video))) == 0 {
     return outcome(false, str.view(output_path),
       "MiniMax-H3 Ref2VA needs at least one image or video reference; audio references cannot stand alone")
   }
@@ -1654,7 +1914,7 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
   }
   if windowed and (job.model!=session.Model.Base or job.masked) {
     return outcome(false,str.view(output_path),
-      "Native H3 latent windowing currently supports unmasked Base tasks")
+      "H3 latent windowing currently supports unmasked Base tasks")
   }
   let scratch_name: string = text.concat("mm-air-h3-",
     str.view(string.from_int(time.monotonic_ns())))
@@ -1706,11 +1966,23 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
     }
   }
 
+  var layout: h3_deployment.Layout = match h3_deployment.load(
+      str.view(struct.borrow(job, field=deployment_file))) {
+    ok(value) => value,
+    err(problem) => { clean_scratch(str.view(scratch))
+      return outcome(false, str.view(output_path), str.view(problem)) },
+  }
   var deployment_roots: h3_deployment.Roots = h3_deployment.Roots {
     checkpoint_root: text.copy(str.view(checkpoint_root)), donor_root: text.copy(str.view(donor_root)),
-    manifest_root: text.copy(str.view(manifests))}
-  var sources: session.Sources = h3_deployment.sources(deployment_roots, job.model, job.task,
-    job.evaluations, motion_context_enabled, job.timing, job.schedule_kind)
+    manifest_root: text.copy(str.view(manifests)), layout: layout}
+  var run_policy: h3_policy.Policy = h3_policy.copy(struct.borrow(job, field=policy))
+  var sources: session.Sources = match h3_deployment.sources(deployment_roots, job.model,
+      job.task, job.evaluations, motion_context_enabled, job.timing, job.schedule_kind,
+      run_policy) {
+    ok(value) => value,
+    err(problem) => { clean_scratch(str.view(scratch))
+      return outcome(false, str.view(output_path), str.view(problem)) },
+  }
 
   var context: GpuContext = match agpu.open(0) {
     ok(value) => value,
@@ -1753,7 +2025,7 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
   } else {
     var inputs: ReferenceInputs = match prepare_ref2va_inputs(context, stream,
         job, sources, str.view(checkpoint_root), str.view(manifests),
-        str.view(scratch), sender) {
+        str.view(scratch), sender, struct.borrow(deployment_roots, field=layout)) {
       ok(value) => value,
       err(problem) => {
         let gpu_message: string = agpu.message(context)
@@ -1784,9 +2056,13 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
     // visual/audio (four slots). Select only after media intake has established
     // whether a video carries a soundtrack.
     if inputs.has_audio {
+      var audio_modulation: string = match h3_deployment.ref2va_audio_modulation(
+          deployment_roots, job.evaluations, job.schedule_kind) {
+        ok(value) => value,
+        err(problem) => { return outcome(false, str.view(output_path), str.view(problem)) },
+      }
       let _ = ref.swap(struct.borrow(struct.borrow(sources, field=transformer),
-        field=modulation_checkpoint),
-        h3_deployment.ref2va_audio_modulation(deployment_roots, job.evaluations, job.schedule_kind))
+        field=modulation_checkpoint), audio_modulation)
     }
     report(sender, "Denoising MiniMax-H3 in AIR")
     if job.masked_denoise {
@@ -1988,7 +2264,7 @@ fn run_outpaint(job:ref<Job>,sender:ref<option<channel.Sender>>)->Outcome
   let _=files.remove(str.view(root))
   outcome(true,str.view(final_output),if settings.preview_first_window{
     "Video Outpaint first-window preview saved"}else{
-    "Native H3 Video Outpaint completed with source audio preserved"})
+    "H3 Video Outpaint completed with source audio preserved"})
 }
 
 fn track_repair_target(job:ref<Job>,prepared:ref<repair_runtime.Prepared>)
@@ -2136,7 +2412,7 @@ fn run_rolling_repair(job:ref<Job>,made:ref<repair_plan.RepairPlan>,
     index=index+1}
   let _=files.remove(str.view(root))
   outcome_metrics(true,str.view(final_output),
-    "Native H3 rolling repair completed; each window was exact-spliced and source audio preserved",
+    "H3 rolling repair completed; each window was exact-spliced and source audio preserved",
     total_runtime_ms,peak_vram_bytes)
 }
 
@@ -2158,7 +2434,7 @@ fn run_rolling_reference(job:ref<Job>,sender:ref<option<channel.Sender>>)->Outco
   let total=job.geometry.frames
   let width=job.geometry.width
   let height=job.geometry.height
-  let window=h3_media.frames()
+  let window=job.rolling_window_frames
   let source=string.copy(array.borrow(struct.borrow(job,field=references),0))
   let root=path.join(str.view(struct.borrow(job,field=scratch_root)),text.concat(
     "mm-air-rolling-swap-",str.view(string.from_int(time.monotonic_ns()))))
@@ -2240,7 +2516,7 @@ fn run_rolling_reference(job:ref<Job>,sender:ref<option<channel.Sender>>)->Outco
       "FFmpeg could not join the rolling Ref2VA windows")},
   }
   let _=ref.swap(struct.borrow(job,field=output),string.copy(str.view(final_output)))
-  var message=string.copy("Native H3 rolling Ref2VA completed: ")
+  var message=string.copy("H3 rolling Ref2VA completed: ")
   string.append(message,str.view(string.from_int(count)))
   string.append(message," windows joined")
   outcome_metrics(true,str.view(final_output),str.view(message),total_runtime_ms,
@@ -2301,7 +2577,7 @@ pub fn run(source: Job own) -> Outcome
     }
   }
   if not job.repair and not job.masked and job.model==session.Model.Reference and
-      job.task==session.Task.Ref2VA and job.geometry.frames>h3_media.frames() and
+      job.task==session.Task.Ref2VA and job.geometry.frames>job.rolling_window_frames and
       array.len(struct.borrow(job,field=references))!=0 and
       is_video_path(str.view(array.borrow(struct.borrow(job,field=references),0))){
     var finished=run_rolling_reference(job,sender)
@@ -2415,7 +2691,7 @@ pub fn run(source: Job own) -> Outcome
             struct.borrow(job,field=timing),repair_runtime_ms,
             repair_peak_vram_bytes){
           ok(metrics)=>{
-            var message=string.copy("Native H3 repair completed; outside frames exact; seam MAD entry=")
+            var message=string.copy("H3 repair completed; outside frames exact; seam MAD entry=")
             string.append(message,str.view(string.from_float(metrics.entry_delta)))
             string.append(message," exit=")
             string.append(message,str.view(string.from_float(metrics.exit_delta)))
@@ -2437,7 +2713,7 @@ pub fn run(source: Job own) -> Outcome
     some(value)=>{
       var held=value
       if finished.succeeded and job.two_matte {
-        report(sender,"Tracking the generated replacement with native SAM 3")
+        report(sender,"Tracking the generated replacement with SAM 3")
         var target_job=auto_mask.Job{
           plugin:string.copy(struct.borrow(job,field=sam3_plugin)),
           model:string.copy(struct.borrow(job,field=sam3_model)),
@@ -2466,7 +2742,7 @@ pub fn run(source: Job own) -> Outcome
           struct.set(job,false,field=masked_denoise)
           finished=execute(job,sender)
           if finished.succeeded {
-            report(sender,"Compositing reconstructed background and replacement under separate native mattes")
+            report(sender,"Compositing reconstructed background and replacement under separate mattes")
             match masked_runtime.finish_two_matte(held) {
               ok(_)=>{finished=outcome(true,struct.borrow(held,field=final_output),
                 "Linked AIR H3 two-matte edit completed; old silhouette removed and source outside the authored region preserved")},

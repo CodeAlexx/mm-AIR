@@ -52,7 +52,7 @@ pub fn fields(ui:ref<w.Ui>,parent:u64,base:u64,request:ref<h3.Request>)->unit ef
   choices(ui,parent,base+48,"Schedule",["Unselected","Donor 7","Quality 19","DC Euler 19"],request.profile)
   choices(ui,parent,base+56,"Encoder",["Unselected","BF16","ConvRot INT8"],request.conditioner_projection)
   choices(ui,parent,base+64,"Transformer",["Unselected","BF16","ConvRot I8","Row I8"],request.transformer_projection)
-  choices(ui,parent,base+72,"Attention",["Unselected","Exact","Hybrid","Dense I8","CK INT8"],request.attention)
+  choices(ui,parent,base+72,"Attention",["Unselected","Exact","Hybrid","Dense I8"],request.attention)
   let _=w.label(ui,base+14,parent,22,"Output MP4")
   let _=w.field(ui,base+15,parent,30,struct.borrow(request,field=output))
 }

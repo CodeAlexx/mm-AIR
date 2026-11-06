@@ -4,68 +4,247 @@ import std.codec as codec
 import std.json as json
 import std.text as text
 import std.math as math
+import std.path as path
 import std.inference.h3.request as h3
 import "./.air/deps/qwenimage21/contract.ai" as qwen_contract
 import std.inference.krea2.config as krea_config
+import std.draw as draw
+import "./.air/deps/flux1/latent.ai" as flux1_latent
+import "./.air/deps/fibo2/defaults.ai" as fibo_defaults
 
 pub fn krea_model_index() -> u32 effects {} { 2 }
 pub fn qwen_image_model_index() -> u32 effects {} { 3 }
-pub fn flux3_model_index() -> u32 effects {} { 4 }
-// Qwen-Image-2.1 and FLUX 3 Image Klein share the PNG geometry and saved sizes.
-pub fn qwen_like(model:u32) -> bool effects {} { model==3 or model==4 }
-
-// FLUX 3 Image Klein: text-to-image, or an edit with 1..10 ordered references.
-// width/height 0 means the creator default (the first prepared reference, or
-// 1024x1024 for text-to-image).
-pub type Flux3Request = struct {
-  prompt:string,output:string,references:array<string>,
-  width:u64,height:u64,steps:u64,seed:u64,
-  // Run BFL's prompt upsampler (flux-3-image-klein-pup) before generating.
-  upsample:bool
+// Generate's model dropdown (gen_model_list) order. Only H3's 0/1 is ever written to a file;
+// image models save their own schema with a model name, so these positions can move.
+pub fn moss_base_model_index() -> u32 effects {} { 4 }
+pub fn moss_sft_model_index() -> u32 effects {} { 5 }
+pub fn is_moss_model(model:u32) -> bool effects {} { model==4 or model==5 }
+// Every Generate model that outputs a PNG (not H3).
+pub fn fibo_dev_model_index() -> u32 effects {} { 6 }
+pub fn image_model(model:u32) -> bool effects {} { model>=2 and model<=6 }
+// Image models that share Generate's Sampling panel and remembered size (not Krea or Qwen).
+pub fn uses_image_geometry(model:u32) -> bool effects {} { is_moss_model(model) or model==fibo_dev_model_index() }
+// The Windows presenter's FLUX.1 id; it is not on the desktop dropdown, so it stays clear of it.
+pub fn flux1_model_index() -> u32 effects {} { 7 }
+pub type Flux1Request=struct {prompt:string,output:string,width:u64,height:u64,steps:u64,seed:u64,guidance:f64} derive codec(strict)
+type Flux1File=struct {schema:string,request:Flux1Request} derive codec(strict)
+pub fn flux1_defaults() -> Flux1Request effects {alloc} {
+  Flux1Request {prompt:"",output:"",width:1024,height:1024,steps:30,seed:42,guidance:3.5}
 }
-
-pub fn validate_flux3(request:ref<Flux3Request>)->result<unit,string> effects {alloc}{
-  if request.prompt==""{return result.err("FLUX 3 prompt must not be empty")}
-  if array.len(struct.borrow(request,field=references))>10{
-    return result.err("FLUX 3 Image Klein accepts at most ten references")
+pub fn validate_flux1(request:ref<Flux1Request>) -> result<unit,string> effects {alloc} {
+  if request.prompt=="" {return result.err("FLUX.1 DEV needs a prompt")}
+  // Geometry is the model's own: the session rounds sides to its packing grid (session.public_request) and bounds the
+  // area by the output surface; device memory is admitted by Prime for the exact size.
+  let step:u64=flux1_latent.pixel_alignment()
+  if request.width<step/2 or request.height<step/2 or request.height>draw.max_pixels()/request.width or
+      request.steps==0 or request.steps>1000 or not math.is_finite(cast.float(request.guidance)) or request.guidance<0.0 or request.guidance>100.0 {
+    return result.err("FLUX.1 DEV requires dimensions within the output surface bound (rounded to the 16 px packing grid),1..1000steps and finite guidance0..100")
   }
-  if (request.width==0)!=(request.height==0){return result.err("Set both FLUX 3 width and height, or neither")}
-  if request.width!=0 and (request.width<64 or request.height<64 or request.width>4096 or
-      request.height>4096 or request.width%16!=0 or request.height%16!=0){
-    return result.err("FLUX 3 size must be 64..4096 px with both sides divisible by 16")
-  }
-  if request.steps<1 or request.steps>64{return result.err("FLUX 3 steps must be between 1 and 64")}
-  if not text.ends_with(text.lower_ascii(struct.borrow(request,field=output)),".png"){
-    return result.err("FLUX 3 output must be a PNG")
+  if not path.is_absolute(request.output) or path.extension(request.output)!=".png" {
+    return result.err("Choose an absolute PNG output path for FLUX.1 DEV")
   }
   result.ok(())
 }
+pub fn copy_flux1(request:ref<Flux1Request>) -> Flux1Request effects {alloc} {
+  Flux1Request {prompt:string.copy(request.prompt),output:string.copy(request.output),width:request.width,height:request.height,
+    steps:request.steps,seed:request.seed,guidance:request.guidance}
+}
+pub fn encode_flux1(request:ref<Flux1Request>) -> result<string,string> effects {alloc} {
+  let _=try validate_flux1(request)
+  var file:Flux1File=Flux1File {schema:"mm-air.flux1-dev.parameters.v1",request:copy_flux1(request)}
+  match Flux1File_encode(file) {
+    ok(value)=>result.ok(value),err(_)=>result.err("FLUX.1 DEV parameter encoding failed"),}
+}
+pub fn is_flux1(source:str) -> bool effects {alloc} {
+  var doc:json.Document=match json.parse(source) {ok(value)=>value,err(_)=>{return false},}
+  match string_field(doc,"schema") {ok(value)=>value=="mm-air.flux1-dev.parameters.v1",err(_)=>false,}
+}
+pub fn decode_flux1(source:str) -> result<Flux1Request,string> effects {alloc} {
+  var file:Flux1File=match Flux1File_decode(source) {ok(value)=>value,err(_)=>{return result.err("FLUX.1 DEV parameters do not match the strict schema")},}
+  if file.schema!="mm-air.flux1-dev.parameters.v1" {return result.err("Unsupported FLUX.1 DEV parameter schema")}
+  let _=try validate_flux1(struct.borrow(file,field=request))
+  result.ok(struct.replace(file,flux1_defaults(),field=request))
+}
+// Qwen-Image-2.1 owns the Qwen PNG geometry and saved sizes.
+pub fn qwen_like(model:u32) -> bool effects {} { model==qwen_image_model_index() }
 
-pub fn encode_flux3(request:ref<Flux3Request>)->string effects {alloc}{
-  var refs:string=string.copy("[")
+// FLUX 3 Image Klein was removed from MM-Air (2026-11-05). Its saved parameter files and
+// history entries keep their own schema; they are recognized here so that loading or
+// reusing one is refused by name instead of being read as another model's request.
+pub fn is_retired_flux3(source:str)->bool effects {alloc}{
+  var doc:json.Document=match json.parse(source){ok(value)=>value,err(_)=>{return false},}
+  match string_field(doc,"schema"){ok(value)=>value=="mm-air.flux3-klein.parameters",err(_)=>false,}
+}
+pub fn retired_flux3_message()->str effects {} {
+  "These settings were made with FLUX 3 Image Klein, which MM-Air no longer includes. Nothing was restored."
+}
+
+pub type LoraEntry = struct {path:string,strength:f64,enabled:bool} derive codec(strict)
+
+// MOSS-Image Base or SFT text-to-image. Creator defaults (models/moss_image/scheduler.ai,
+// OpenMOSS README): 50 steps, CFG 3, shift 5, empty negative prompt, block-22 negative skip.
+// `fast` runs the INT8 projections (about twice as fast; fine detail differs).
+pub type MossRequest = struct {
+  model:string,prompt:string,negative:string,output:string,
+  width:u64,height:u64,steps:u64,cfg:f64,shift:f64,seed:u64,fast:bool,
+  loras:array<LoraEntry>
+} derive codec(strict)
+type MossFile=struct {schema:string,request:MossRequest} derive codec(strict)
+// Fibo 2.0: Dev text-to-image on Generate, Edit Turbo on Image Edit. Creator defaults
+// (models/fibo2/defaults.ai): Dev 50 steps, guidance 5; Edit Turbo 4 steps, guidance 1.
+// `images` (Edit Turbo only): the picture to change first, then up to four references.
+// width/height 0 (edits only) keep the first picture's size.
+pub type FiboRequest = struct {
+  model:string,prompt:string,negative:string,output:string,images:array<string>,
+  width:u64,height:u64,steps:u64,guidance:f64,seed:u64,loras:array<LoraEntry>
+} derive codec(strict)
+type FiboFile=struct {schema:string,request:FiboRequest} derive codec(strict)
+pub fn fibo_schema() -> str effects {} { "mm-air.fibo2.parameters.v1" }
+pub fn fibo_dev_name() -> str effects {} { "fibo-2.0-dev" }
+pub fn fibo_edit_name() -> str effects {} { "fibo-2.0-edit-turbo" }
+pub fn fibo_max_images() -> u64 effects {} { fibo_defaults.max_images() }
+pub fn fibo_is_edit(request:ref<FiboRequest>) -> bool effects {} {
+  struct.borrow(request,field=model)==fibo_edit_name()
+}
+pub fn fibo_defaults_for(edit:bool) -> FiboRequest effects {alloc} {
+  FiboRequest {model:string.copy(if edit{fibo_edit_name()}else{fibo_dev_name()}),prompt:"",negative:"",output:"",
+    images:[],width:if edit{0}else{fibo_defaults.default_side()},height:if edit{0}else{fibo_defaults.default_side()},
+    steps:if edit{fibo_defaults.turbo_steps()}else{fibo_defaults.dev_steps()},
+    guidance:if edit{fibo_defaults.turbo_guidance()}else{fibo_defaults.dev_guidance()},seed:42,loras:[]}
+}
+pub fn validate_fibo(request:ref<FiboRequest>) -> result<unit,string> effects {alloc} {
+  let model=struct.borrow(request,field=model)
+  if model!=fibo_dev_name() and model!=fibo_edit_name() {return result.err("Unknown Fibo 2.0 model")}
+  let edit=fibo_is_edit(request)
+  if text.trim(struct.borrow(request,field=prompt))=="" {
+    return result.err(if edit{"Write the edit instruction first"}else{"Write a prompt first"})
+  }
+  let count=array.len(struct.borrow(request,field=images))
+  if edit and (count<1 or count>fibo_max_images()) {
+    return result.err("Fibo 2.0 Edit Turbo takes the picture to change plus up to four references (1 to 5 images)")
+  }
+  if not edit and count!=0 {return result.err("Fibo 2.0 Dev makes images from text only")}
   var index:u64=0
   loop{
-    if index>=array.len(struct.borrow(request,field=references)){break}
-    if index>0{string.append(refs,",")}
-    string.append(refs,str.view(json.quote(str.view(array.borrow(struct.borrow(request,field=references),index)))))
+    if index>=count{break}
+    let lower=text.lower_ascii(str.view(array.borrow(struct.borrow(request,field=images),index)))
+    if not (text.ends_with(str.view(lower),".png") or text.ends_with(str.view(lower),".jpg") or
+        text.ends_with(str.view(lower),".jpeg")){
+      return result.err("Fibo 2.0 Edit Turbo reads PNG or JPEG sources")
+    }
     index=index+1
   }
-  string.append(refs,"]")
-  var out:string=string.copy("{\"schema\":\"mm-air.flux3-klein.parameters\",\"prompt\":")
-  string.append(out,str.view(json.quote(str.view(struct.borrow(request,field=prompt)))))
-  string.append(out,",\"references\":")
-  string.append(out,str.view(refs))
-  string.append(out,str.view(text.concat(",\"width\":",str.view(string.from_int(cast.sat(request.width))))))
-  string.append(out,str.view(text.concat(",\"height\":",str.view(string.from_int(cast.sat(request.height))))))
-  string.append(out,str.view(text.concat(",\"steps\":",str.view(string.from_int(cast.sat(request.steps))))))
-  string.append(out,str.view(text.concat(",\"seed\":",str.view(string.from_int(cast.sat(request.seed))))))
-  string.append(out,if request.upsample{",\"upsample\":true"}else{",\"upsample\":false"})
-  string.append(out,"}")
-  out
+  let keep_size:bool=request.width==0 and request.height==0
+  if not (edit and keep_size) and (request.width<256 or request.height<256 or request.width>2048 or
+      request.height>2048 or request.width%fibo_defaults.side_step()!=0 or request.height%fibo_defaults.side_step()!=0) {
+    return result.err("Fibo 2.0 size must be 256 to 2048 px, both sides multiples of 16")
+  }
+  if request.steps<1 or request.steps>200 {return result.err("Fibo 2.0 steps must be 1 to 200")}
+  if not math.is_finite(request.guidance) or request.guidance<1.0 or request.guidance>20.0 {
+    return result.err("Fibo 2.0 guidance must be 1 to 20")
+  }
+  if not path.is_absolute(struct.borrow(request,field=output)) or
+      text.lower_ascii(path.extension(struct.borrow(request,field=output)))!=".png" {
+    return result.err("Fibo 2.0 output must be an absolute PNG path")
+  }
+  validate_loras(struct.borrow(request,field=loras))
 }
-pub type LoraEntry = struct {path:string,strength:f64,enabled:bool}
+pub fn copy_fibo(request:ref<FiboRequest>) -> FiboRequest effects {alloc} {
+  var images:array<string> = []
+  var index:u64=0
+  loop{
+    if index>=array.len(struct.borrow(request,field=images)){break}
+    array.push(images,string.copy(str.view(array.borrow(struct.borrow(request,field=images),index))))
+    index=index+1
+  }
+  FiboRequest {model:string.copy(struct.borrow(request,field=model)),prompt:string.copy(struct.borrow(request,field=prompt)),
+    negative:string.copy(struct.borrow(request,field=negative)),output:string.copy(struct.borrow(request,field=output)),
+    images:images,width:request.width,height:request.height,steps:request.steps,guidance:request.guidance,
+    seed:request.seed,loras:clone_loras(struct.borrow(request,field=loras))}
+}
+pub fn encode_fibo(request:ref<FiboRequest>) -> result<string,string> effects {alloc} {
+  let _=try validate_fibo(request)
+  var file:FiboFile=FiboFile {schema:string.copy(fibo_schema()),request:copy_fibo(request)}
+  match FiboFile_encode(file) {ok(value)=>result.ok(value),err(_)=>result.err("Fibo 2.0 parameter encoding failed"),}
+}
+pub fn is_fibo(source:str) -> bool effects {alloc} {
+  var doc:json.Document=match json.parse(source) {ok(value)=>value,err(_)=>{return false},}
+  match string_field(doc,"schema") {ok(value)=>value==fibo_schema(),err(_)=>false,}
+}
+pub fn decode_fibo(source:str) -> result<FiboRequest,string> effects {alloc} {
+  var file:FiboFile=match FiboFile_decode(source) {ok(value)=>value,
+    err(_)=>{return result.err("Fibo 2.0 parameters do not match the saved format")},}
+  if file.schema!=fibo_schema() {return result.err("Unsupported Fibo 2.0 parameter file")}
+  let _=try validate_fibo(struct.borrow(file,field=request))
+  result.ok(struct.replace(file,fibo_defaults_for(false),field=request))
+}
+
+pub fn moss_schema() -> str effects {} { "mm-air.moss-image.parameters.v1" }
+pub fn moss_model_name(model:u32) -> str effects {} {
+  if model==moss_sft_model_index() {"moss-image-sft"} else {"moss-image-base"}
+}
+pub fn moss_model_index_of(name:str) -> option<u32> effects {} {
+  if name=="moss-image-base" {return option.some(moss_base_model_index())}
+  if name=="moss-image-sft" {return option.some(moss_sft_model_index())}
+  option.none()
+}
+pub fn moss_label(model:u32) -> str effects {} {
+  if model==moss_sft_model_index() {"MOSS-Image SFT"} else {"MOSS-Image Base"}
+}
+pub fn moss_defaults(model:u32) -> MossRequest effects {alloc} {
+  MossRequest {model:string.copy(moss_model_name(model)),prompt:"",negative:"",output:"",
+    width:1024,height:1024,steps:50,cfg:3.0,shift:5.0,seed:42,fast:false,loras:[]}
+}
+pub fn validate_moss(request:ref<MossRequest>) -> result<unit,string> effects {alloc} {
+  match moss_model_index_of(str.view(struct.borrow(request,field=model))) {
+    some(_)=>{},none=>{return result.err("Unknown MOSS-Image model")},}
+  if text.trim(struct.borrow(request,field=prompt))=="" {return result.err("Write a prompt first")}
+  if request.width<256 or request.height<256 or request.width>2048 or request.height>2048 or
+      request.width%16!=0 or request.height%16!=0 {
+    return result.err("MOSS-Image size must be 256 to 2048 px, both sides multiples of 16")
+  }
+  if request.steps<1 or request.steps>200 {return result.err("MOSS-Image steps must be 1 to 200")}
+  if not math.is_finite(request.cfg) or request.cfg<1.0 or request.cfg>20.0 {
+    return result.err("MOSS-Image CFG must be 1 to 20")
+  }
+  if not math.is_finite(request.shift) or request.shift<0.1 or request.shift>20.0 {
+    return result.err("MOSS-Image shift must be 0.1 to 20")
+  }
+  if not path.is_absolute(struct.borrow(request,field=output)) or
+      text.lower_ascii(path.extension(struct.borrow(request,field=output)))!=".png" {
+    return result.err("MOSS-Image output must be an absolute PNG path")
+  }
+  validate_loras(struct.borrow(request,field=loras))
+}
+pub fn copy_moss(request:ref<MossRequest>) -> MossRequest effects {alloc} {
+  MossRequest {model:string.copy(struct.borrow(request,field=model)),prompt:string.copy(struct.borrow(request,field=prompt)),
+    negative:string.copy(struct.borrow(request,field=negative)),output:string.copy(struct.borrow(request,field=output)),
+    width:request.width,height:request.height,steps:request.steps,cfg:request.cfg,shift:request.shift,
+    seed:request.seed,fast:request.fast,loras:clone_loras(struct.borrow(request,field=loras))}
+}
+pub fn encode_moss(request:ref<MossRequest>) -> result<string,string> effects {alloc} {
+  let _=try validate_moss(request)
+  var file:MossFile=MossFile {schema:string.copy(moss_schema()),request:copy_moss(request)}
+  match MossFile_encode(file) {ok(value)=>result.ok(value),err(_)=>result.err("MOSS-Image parameter encoding failed"),}
+}
+pub fn is_moss(source:str) -> bool effects {alloc} {
+  var doc:json.Document=match json.parse(source) {ok(value)=>value,err(_)=>{return false},}
+  match string_field(doc,"schema") {ok(value)=>value==moss_schema(),err(_)=>false,}
+}
+pub fn decode_moss(source:str) -> result<MossRequest,string> effects {alloc} {
+  var file:MossFile=match MossFile_decode(source) {ok(value)=>value,
+    err(_)=>{return result.err("MOSS-Image parameters do not match the saved format")},}
+  if file.schema!=moss_schema() {return result.err("Unsupported MOSS-Image parameter file")}
+  let _=try validate_moss(struct.borrow(file,field=request))
+  result.ok(struct.replace(file,moss_defaults(moss_base_model_index()),field=request))
+}
+// `pose`: path of a pose-control condition (a COCO-17 skeleton raster .png, used as is, or a keypoint
+// .json rendered at its own canvas); empty = ordinary Krea 2 Turbo. With a pose the run takes the
+// Krea-2 Pose Control-LoRA release (MM_AIR_KREA_POSE_RELEASE) at the pose's native size; `pose_scale`
+// is its control scale (1.0 frozen default, 1.25 to 1.5 stronger).
 pub type KreaRequest = struct {
-  prompt:string,seed:i64,width:u64,height:u64,output:string,loras:array<LoraEntry>
+  prompt:string,seed:i64,width:u64,height:u64,output:string,loras:array<LoraEntry>,
+  pose:string = "",pose_scale:f64 = 1.0
 }
 pub type QwenImageRequest = struct {
   prompt:string,output:string,source:string,references:array<string>,
@@ -73,7 +252,10 @@ pub type QwenImageRequest = struct {
   scheduler:u32,sampler:u32,
   // Text-to-image: rewrite the prompt first with Qwen-Image-2.1-PE-T2I, which
   // also picks the aspect ratio (width/height follow it, as in its model card).
-  enhance:bool
+  enhance:bool,
+  // Run-time adapters (face / head / body swap files), applied unmerged beside the resident
+  // transformer; empty is the base model.
+  loras:array<LoraEntry>
 }
 
 pub fn qwen_condition_count(request:ref<QwenImageRequest>)->u64 effects {} {
@@ -133,6 +315,7 @@ pub fn validate_qwen_image(request:ref<QwenImageRequest>)->result<unit,string>
     }
     reference_index=reference_index+1
   }
+  try validate_loras(struct.borrow(request,field=loras))
   result.ok(())
 }
 
@@ -169,6 +352,21 @@ pub fn encode_qwen_image(request:ref<QwenImageRequest>)->result<string,string>
   codec.field_text(out,"solver",str.view(solver_name))
   codec.field_u64(out,"seed",request.seed)
   codec.field_bool(out,"enhance",request.enhance)
+  codec.key(out,"loras")
+  codec.begin_array(out)
+  let lora_entries=struct.borrow(request,field=loras)
+  var lora_index:u64=0
+  loop{
+    if lora_index>=array.len(lora_entries){break}
+    let entry=array.borrow(lora_entries,lora_index)
+    codec.begin_object(out)
+    codec.field_text(out,"path",struct.borrow(entry,field=path))
+    codec.field_f64(out,"strength",entry.strength)
+    codec.field_bool(out,"enabled",entry.enabled)
+    codec.end_object(out)
+    lora_index=lora_index+1
+  }
+  codec.end_array(out)
   codec.end_object(out)
   match codec.finish(out){ok(value)=>result.ok(value),err(error)=>result.err(codec.describe(error))}
 }
@@ -225,7 +423,8 @@ pub fn decode_qwen_image(source:str)->result<QwenImageRequest,string>
     width:width,height:height,steps:steps,seed:seed,
     scheduler:cast.sat(scheduler),sampler:cast.sat(sampler),
     enhance:match json.get(document,json.root(),"enhance"){
-      some(node)=>match json.as_bool(document,node){some(value)=>value,none=>false},none=>false}}
+      some(node)=>match json.as_bool(document,node){some(value)=>value,none=>false},none=>false},
+    loras:try decode_loras(document)}
   try validate_qwen_image(request)
   result.ok(request)
 }
@@ -285,6 +484,23 @@ pub fn validate_krea(request: ref<KreaRequest>) -> result<unit,string> effects {
     return result.err("Choose a .png output for Krea 2 Turbo")
   }
   try validate_loras(struct.borrow(request,field=loras))
+  if request.pose != "" {
+    let lowered = text.lower_ascii(struct.borrow(request,field=pose))
+    if not text.ends_with(lowered,".png") and not text.ends_with(lowered,".json") {
+      return result.err("Pose control takes a .png skeleton raster or a .json keypoint file")
+    }
+    if not math.is_finite(request.pose_scale) or request.pose_scale <= 0.0 or request.pose_scale > 3.0 {
+      return result.err("Pose control scale must be above 0 and at most 3 (1.0 is the default)")
+    }
+    var enabled: u64 = 0
+    var index: u64 = 0
+    loop {
+      if index >= array.len(struct.borrow(request,field=loras)) { break }
+      if array.borrow(struct.borrow(request,field=loras),index).enabled { enabled = enabled + 1 }
+      index = index + 1
+    }
+    if enabled != 0 { return result.err("Pose control applies its own LoRA; disable the other LoRAs") }
+  }
   result.ok(())
 }
 pub fn encode_krea(request: ref<KreaRequest>) -> result<string,string> effects {alloc} {
@@ -300,6 +516,10 @@ pub fn encode_krea(request: ref<KreaRequest>) -> result<string,string> effects {
   codec.field_u64(out,"steps",8)
   codec.field_text(out,"precision","bf16")
   codec.field_text(out,"output",struct.borrow(request,field=output))
+  if request.pose != "" {
+    codec.field_text(out,"pose",struct.borrow(request,field=pose))
+    codec.field_f64(out,"pose_scale",request.pose_scale)
+  }
   codec.key(out,"loras")
   codec.begin_array(out)
   let entries = struct.borrow(request,field=loras)
@@ -337,6 +557,16 @@ pub fn decode_krea(source: str) -> result<KreaRequest,string> effects {alloc} {
   var request = KreaRequest {prompt:try string_field(document,"prompt"),seed:seed,
     width:try count(document,"width"),height:try count(document,"height"),
     output:try string_field(document,"output"),loras:try decode_loras(document)}
+  match json.get(document,json.root(),"pose") {
+    some(_) => {
+      request.pose = try string_field(document,"pose")
+      request.pose_scale = match json.get(document,json.root(),"pose_scale") {
+        some(node) => match json.as_f64(document,node) { some(value) => value, none => { return result.err("Expected numeric pose_scale") } },
+        none => 1.0,
+      }
+    },
+    none => {},
+  }
   try validate_krea(request)
   result.ok(request)
 }
@@ -510,7 +740,10 @@ pub fn decode(source: str) -> result<h3.Request,string> effects {alloc} {
   let profile = try selection(document, "profile")
   let conditioner = try selection(document, "conditioner_projection")
   let transformer = try selection(document, "transformer_projection")
-  let attention = try selection(document, "attention")
+  // Files saved with the retired approximate route (code 4) load as the
+  // owned dense INT8 route.
+  let stored_attention = try selection(document, "attention")
+  let attention: u32 = if stored_attention == 4 { h3.attention_dense_int8() } else { stored_attention }
   let resolution = try selection(document, "resolution")
   let seed = match json.as_i64(document, try field(document, "seed")) {
     some(value) => value,

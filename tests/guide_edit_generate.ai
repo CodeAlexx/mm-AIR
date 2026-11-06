@@ -1,0 +1,86 @@
+// Bounded real-model receipt for the guide-video edit adapters of MM-Air (VFX edit, style transfer, sharpen, motion transfer): the
+// same Job the Character Swap panel builds for those styles (guide video, optional pictures, the adapter file from the Settings key,
+// the training adapter first for motion transfer, ConvRot, 19-evaluation quality profile).
+module app.mm_air.tests.guide_edit_generate
+import std.inference.h3.policy as h3_policy
+import "../generate.ai" as generation
+import std.inference.h3.media as media
+import std.inference.h3.session as session
+import std.channel as channel
+import std.text as text
+import std.files as files
+import "../parameters.ai" as parameters
+
+fn failure(message:str)->i32 effects{io.write}{
+  io.ewrite(message)
+  io.ewrite("\n")
+  1
+}
+
+fn num(value:str,fallback:u64)->u64 effects{}{
+  match text.parse_u64(value){some(found)=>found,none=>fallback}
+}
+
+pub fn main(args:view<str>)->i32
+    effects{alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time}{
+  if view.len(args)<5{
+    io.ewrite("usage: guide-edit-generate vfx|style|sharpen|motion GUIDE_VIDEO PICTURE_OR_none OUTPUT [FRAMES WIDTH HEIGHT EVALUATIONS PROMPT_FILE]\n")
+    return 2
+  }
+  let kind:u32=if view.get(args,1)=="vfx"{0}else if view.get(args,1)=="style"{1}else if view.get(args,1)=="sharpen"{2}else{3}
+  var configuration=match generation.configuration(){ok(value)=>value,
+    err(message)=>{return failure(str.view(message))}}
+  let frames:u64=if view.len(args)>5{num(view.get(args,5),22)}else{22}
+  let width:u64=if view.len(args)>6{num(view.get(args,6),448)}else{448}
+  let height:u64=if view.len(args)>7{num(view.get(args,7),256)}else{256}
+  let evaluations:u64=if view.len(args)>8{num(view.get(args,8),19)}else{19}
+  let geometry=match media.geometry(frames,width,height){ok(value)=>value,
+    err(problem)=>{var held=problem
+      return failure(str.view(media.error_message(held)))}}
+  let lora=match generation.guide_edit_lora(kind){
+    some(file)=>file,
+    none=>{return failure("set the MM_AIR_H3_GUIDE_*_LORA key of this kind to an existing file")}}
+  var typed:string=if view.len(args)>9{match files.read_text(view.get(args,9)){ok(value)=>value,
+    err(_)=>{return failure("cannot read the prompt file")}}}else{string.new()}
+  var prompt:string=generation.guide_edit_prompt(kind,str.view(typed))
+  match generation.guide_edit_check(kind,str.view(prompt)){ok(_)=>{},err(message)=>{return failure(str.view(message))}}
+  var receiver=match channel.open(128,1024){ok(value)=>value,
+    err(problem)=>{var held=problem
+      return failure(str.view(channel.message(held)))}}
+  var pictures:array<string> = if view.get(args,3)=="none"{[]}else{[string.copy(view.get(args,3))]}
+  var loras:array<parameters.LoraEntry> = []
+  if kind==3{
+    match generation.motion_training_adapter(){
+      some(file)=>{array.push(loras,parameters.LoraEntry{path:file,strength:1.0,enabled:true})},
+      none=>{return failure("set MM_AIR_H3_TRAINING_ADAPTER_LORA")}}
+  }
+  array.push(loras,parameters.LoraEntry{path:lora,strength:1.0,enabled:true})
+  var job=generation.job_loras(configuration,str.view(prompt),session.Model.Reference,
+    session.Task.Ref2VA,geometry,pictures,[],view.get(args,4),loras,0,"",42,evaluations,
+    session.Projection.ConvRotI8,session.Projection.ConvRotI8,
+    session.Attention.HybridExact3DenseInt8,channel.ticket(receiver),session.Schedule.Simple,
+    h3_policy.Sampler.Euler)
+  generation.enable_reference_video_match(job)
+  generation.enable_guide_video(job,view.get(args,2))
+  var completed=generation.Outcome{succeeded:false,output:string.new(),
+    message:string.copy("Guide edit worker did not complete"),runtime_ms:0,
+    peak_vram_bytes:0}
+  task.scope{
+    var jobs:array<task<generation.Outcome>> = [task.spawn(job,fn=generation.run)]
+    loop{
+      match channel.recv_now(receiver,time.monotonic_ns()){
+        ok(value)=>match value{some(item)=>{var update=item
+          match channel.text_of(update){some(message)=>{io.write(str.view(message))
+            io.write("\n")},none=>{}}},none=>{}},err(_)=>{}}
+      match task.wait_any(jobs,0){some(_)=>{completed=task.join(option.unwrap(
+        array.pop(jobs)))
+        break},none=>{time.sleep_ms(50)}}
+    }
+  }
+  let _=channel.close(receiver)
+  io.write(text.concat("result=",text.concat(if completed.succeeded{"success"}
+    else{"failure"},"\n")))
+  io.write(text.concat("output=",text.concat(struct.borrow(completed,field=output),"\n")))
+  io.write(text.concat("message=",text.concat(struct.borrow(completed,field=message),"\n")))
+  if completed.succeeded{0}else{1}
+}
