@@ -2584,7 +2584,11 @@ pub fn main(args: view<str>) -> i32
               break },
           }
           let kind: string = desk.field(event, "event")
-          let id: string = desk.field(event, "id")
+          // The Linux helper reports a text view by its own id; Movie's text views are
+          // named <buffer>_view, so their edits reach the handlers keyed by the buffer id.
+          let raw_id: string = desk.field(event, "id")
+          let id: string = if text.ends_with(str.view(raw_id),"_view"){
+            text.replace(str.view(raw_id),"_view","_buffer")}else{raw_id}
           if kind=="dialog" or kind=="drop" {
             if not desk.boolean(event, "cancelled") {
               let selected: string = desk.field(event, "value")
