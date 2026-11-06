@@ -702,7 +702,7 @@ fn model_widgets(session: ref<desk.Session>, model:u32, sheet_mode: u32,
   let _ = desk.set_text(session,"generate_action",if fibo {"Generate Fibo PNG"} else if moss {"Generate MOSS PNG"} else if qwen_image {"Generate Qwen PNG"} else if krea {"Generate Krea PNG"} else if sheet {"Generate H3 Character Sheet"} else if masked {"Generate Masked H3 Swap"} else if swap {"Generate H3 Character Swap"} else {"Generate H3 MP4"})
   let _ = desk.set_text(session,"gen_media_badge",if image_model {"Image"} else if sheet {"Sheet"} else if masked {"Masked"} else if swap {"Swap"} else {"Video"})
   let _ = desk.set_text(session,"gen_stage_badge",if fibo {"FIBO"} else if moss {"MOSS"} else if qwen_image {"Q21"} else if krea {"K2"} else {"H3"})
-  let _ = desk.set_text(session,"gen_stage_model",if fibo {"Fibo 2.0"} else if moss {parameters.moss_label(model)} else if qwen_image {"Qwen-Image-2.1 · native AIR session"} else if krea {"Krea 2 Turbo · native AIR session"} else {"MiniMax H3 · native AIR session"})
+  let _ = desk.set_text(session,"gen_stage_model",if fibo {"Fibo 2.0"} else if moss {parameters.moss_label(model)} else if qwen_image {"Qwen-Image-2.1"} else if krea {"Krea 2 Turbo"} else {"MiniMax H3"})
   let _ = desk.set_text(session,"gen_fps_badge",if image_model {"PNG"} else {"24 FPS"})
   let _ = desk.set_text(session,"gen_prompt_label",if swap {"Built Prompt · editable before Generate"} else {"Prompt"})
 }
@@ -1054,7 +1054,7 @@ fn show_movie(session:ref<desk.Session>,project:ref<movie.Project>)
   let _=desk.set_number(session,"movie_endless_target","value",project.endless_target)
   let _=desk.set_number(session,"movie_endless_segment","value",project.endless_segment)
   let _=desk.set_text(session,"movie_endless_status",if project.endless_active{
-    "Running · each segment continues from the preceding native latent tail."}
+    "Running · each segment continues from the preceding latent tail."}
     else{"Stopped · project can resume from its final selected take."})
   let _=desk.set_text(session,"movie_shot_count",text.concat(str.view(string.from_int(count)),if count==1{" shot"}else{" shots"}))
   let _=desk.set_text(session,"movie_deck_count",str.view(string.from_int(count)))
@@ -1097,7 +1097,7 @@ fn show_movie(session:ref<desk.Session>,project:ref<movie.Project>)
   let _=desk.set_text(session,"movie_monitor_status",str.view(monitor_status))
   let _=desk.set_text(session,"movie_monitor_contract",text.concat(str.view(string.from_int(shot.width)),
     text.concat("×",text.concat(str.view(string.from_int(shot.height)),text.concat(" · ",
-    text.concat(str.view(string.from_float(shot.duration)),"s · H3 NATIVE 24 FPS · SYNC AUDIO"))))))
+    text.concat(str.view(string.from_float(shot.duration)),"s · H3 · 24 FPS · SYNC AUDIO"))))))
   var shot_labels:array<string> = []
   var timeline=string.new()
   var cursor:f64=0.0
@@ -2336,7 +2336,7 @@ pub fn main(args: view<str>) -> i32
                             match save_movie(movie_state,str.view(movie_project_path)){
                               ok(_)=>{},err(message)=>{io.ewrite(text.concat(message,"\n"))}}
                             show_movie(session,movie_state)
-                            let _=desk.set_text(session,"status","Endless chain · starting next native continuation")
+                            let _=desk.set_text(session,"status","Endless chain · starting next continuation")
                             let _=desk.activate(session,"queue_take")},
                           err(message)=>{struct.set(movie_state,false,field=endless_active)
                             let _=desk.set_text(session,"status",message)},
@@ -3439,7 +3439,7 @@ pub fn main(args: view<str>) -> i32
                 seedvr2_enabled)
               let _=desk.set_text(session,"gen_seedvr2_note",if seedvr2_enabled{
                 "Generator unloads first. The pre-upscale MP4 is retained beside the final result."}
-                else{"Optional native AIR video restoration is disabled."})
+                else{"Optional video restoration is disabled."})
               continue
             }
             if id=="gen_seedvr2_after"{
@@ -3901,6 +3901,7 @@ pub fn main(args: view<str>) -> i32
               let _ = desk.set_bool(session,"gen_swap_open_prompt","sensitive",false)
               let _ = desk.set_text(session,"gen_swap_status",
                 if swap_style == 0 {"Add a source video and character picture(s), then Build Prompt."}
+                else if swap_style >= 3 {"Guide-video edit adapter: add the source video (pictures are optional: the edited first frame, or the style picture). Write one sentence in the prompt; Build Prompt inserts the adapter's trigger word. 17n + 5 frames."}
                 else {"Guide-video adapter: add the source video and the picture(s) of the person; Build Prompt describes the first picture and fills the adapter's template. 17n + 5 frames (about 5 s is 124)."})
             }
             if id == "gen_swap_target" {
@@ -4576,7 +4577,7 @@ pub fn main(args: view<str>) -> i32
               array.push(generations,task.spawn(work,fn=generation.run_qwen_image))
               let _=desk.set_bool(session,"qwen_edit_run","sensitive",false)
               let _=desk.set_text(session,"qwen_edit_status",
-                "Starting native Qwen-Image-2.1 edit · loading checkpoint once")
+                "Starting Qwen-Image-2.1 edit · loading checkpoint once")
               let _=desk.set_text(session,"gen_run_state","Generating")
               continue
             }
@@ -5038,6 +5039,16 @@ pub fn main(args: view<str>) -> i32
             if id == "gen_swap_build_prompt" {
               if not character_swap.is_swap(generation_mode) {
                 generation_status(session,"Select H3 Character Swap mode first")
+                continue
+              }
+              if swap_style >= 3 {
+                // Guide-video edit adapters: one sentence behind the trigger word, written by the user.
+                prompt = generation.guide_edit_prompt(swap_style - 3, str.view(prompt))
+                swap_built_prompt = string.copy(str.view(prompt))
+                swap_prompt_built = true
+                let _ = desk.set_text(session,"gen_prompt_buffer",str.view(prompt))
+                let _ = desk.set_text(session,"gen_swap_status",
+                  "Trigger word set; edit the sentence after it, then Generate")
                 continue
               }
               if swap_style != 0 {
@@ -5609,6 +5620,10 @@ pub fn main(args: view<str>) -> i32
                   none => match env.get("HOME") { some(home) => path.join(home,"models/loras"), none => string.new(), }, },
                 err(_) => match env.get("HOME") { some(home) => path.join(home,"models/loras"), none => string.new(), },
               }
+              let folder = if text.trim(str.view(configured_folder)) != "" {configured_folder}
+                else {match env.get("HOME") {
+                  some(value) => path.join(value,".serenity/models/loras"), none => string.new(),
+                }}
               let title = if model_index == parameters.krea_model_index() {
                 "Add Krea LoRA"} else if parameters.image_model(model_index) {"Add LoRA"} else {"Add H3 LoRA"}
               let _ = desk.dialog_multiple(session,id,title,folder)
@@ -6098,7 +6113,7 @@ pub fn main(args: view<str>) -> i32
                 continue}
               struct.set(movie_state,next,field=selected_shot)
               show_movie(session,movie_state)
-              let _=desk.set_text(session,"status","Render all started · shots run sequentially on the native H3 session")
+              let _=desk.set_text(session,"status","Render all started · shots run sequentially on the H3 session")
               let _=desk.activate(session,"queue_take")
               continue
             }
@@ -6142,7 +6157,7 @@ pub fn main(args: view<str>) -> i32
               match save_movie(movie_state,str.view(movie_project_path)){
                 ok(_)=>{},err(message)=>{let _=desk.set_text(session,"status",message)}}
               show_movie(session,movie_state)
-              let _=desk.set_text(session,"status","Endless native continuation started; segments run sequentially")
+              let _=desk.set_text(session,"status","Endless continuation started; segments run sequentially")
               let _=desk.activate(session,"queue_take")
               continue
             }
@@ -6246,7 +6261,7 @@ pub fn main(args: view<str>) -> i32
                   "Load a source video before automatic motion analysis")
               }else{
                 let _=desk.set_text(session,"edit_status",
-                  "Analyzing decoded source motion in native AIR…")
+                  "Analyzing decoded source motion…")
                 match repair_runtime.analyze_motion(str.view(edit_source),system.temp_directory(),
                     1.0,cast.float(edit_repair_dilation)){
                   ok(value)=>{var found=value
@@ -6498,7 +6513,7 @@ pub fn main(args: view<str>) -> i32
                 generation_status(session,"Choose the Character Swap Source Video")
                 continue
               }
-              if swap and array.len(swap_character_references) == 0 and
+              if swap and array.len(swap_character_references) == 0 and swap_style < 3 and
                  not (id=="edit_run" and not edit_source_video) {
                 generation_status(session,"Add at least one Reference Character image")
                 continue
@@ -6699,7 +6714,7 @@ pub fn main(args: view<str>) -> i32
                 let _=desk.set_text(session,"gen_run_state","Generating")
                 let _=desk.set_text(session,"gen_batch_status","Running")
                 generation_status(session,
-                  "Starting native AIR Qwen-Image-2.1 · checkpoint loads once")
+                  "Starting Qwen-Image-2.1 · checkpoint loads once")
                 io.write("mm-air started native AIR Qwen-Image-2.1 generation\n")
                 continue
               }
@@ -6787,6 +6802,7 @@ pub fn main(args: view<str>) -> i32
               }
               let request_seconds:f64=if id=="edit_run" and not edit_source_video {
                 22.0/24.0}else{seconds}
+              if swap and not masked and swap_style >= 3 { struct.set(request,true,field=guided) }
               match h3.set_geometry(request, width, height, request_seconds) {
                 ok(_) => {},
                 err(error) => { var held: h3.Problem = error
@@ -6832,7 +6848,30 @@ pub fn main(args: view<str>) -> i32
                     generation_status(session,"The guide-video adapters run on a 19-evaluation schedule; choose one instead of Turbo")
                     continue
                   }
-                  if guided {
+                  if guided and swap_style >= 3 {
+                    let edit_kind: u32 = swap_style - 3
+                    match generation.guide_edit_check(edit_kind, str.view(request.prompt)) {
+                      err(message) => { generation_status(session,message)
+                        continue },
+                      ok(_) => {},
+                    }
+                    if edit_kind == 3 {
+                      match generation.motion_training_adapter() {
+                        some(file) => { array.push(job_lora_list,
+                          parameters.LoraEntry {path:file,strength:1.0,enabled:true}) },
+                        none => {
+                          generation_status(session,"Choose the training adapter V2 file in Settings (motion transfer loads it first)")
+                          continue },
+                      }
+                    }
+                    match generation.guide_edit_lora(edit_kind) {
+                      some(file) => { array.push(job_lora_list,
+                        parameters.LoraEntry {path:file,strength:1.0,enabled:true}) },
+                      none => {
+                        generation_status(session,"Choose this adapter's LoRA file in Settings")
+                        continue },
+                    }
+                  } else if guided {
                     if not swap_prompts.is_complete(
                         if swap_style == 1 { swap_prompts.Kind.Character } else { swap_prompts.Kind.Head },
                         str.view(request.prompt)) {
@@ -7104,13 +7143,13 @@ pub fn main(args: view<str>) -> i32
                   let _ = desk.set_bool(session, "generate_action", "sensitive", false)
                   let _ = desk.set_text(session, "gen_run_state", "Generating")
                   generation_status(session,if outpaint_active {
-                    if edit_outpaint_preview{"Starting native H3 Video Outpaint first-window preview"}
-                    else{"Starting sequential native H3 Video Outpaint"}
+                    if edit_outpaint_preview{"Starting H3 Video Outpaint first-window preview"}
+                    else{"Starting sequential H3 Video Outpaint"}
                   } else if repair_active{
-                    if edit_mode==7{"Starting bounded native H3 Motion Repair"}
-                    else{"Starting bounded native H3 frame repair"}
+                    if edit_mode==7{"Starting bounded H3 Motion Repair"}
+                    else{"Starting bounded H3 frame repair"}
                   } else if masked {
-                    "Preparing native masked H3 crop; no full-frame fallback"
+                    "Preparing masked H3 crop; no full-frame fallback"
                   } else if swap {
                     "Starting linked AIR MiniMax-H3 Character Swap with Video 1 + Picture 1…N"
                   } else if windowed_job {

@@ -15,6 +15,7 @@ import std.path as path
 import std.process as proc
 import std.telemetry as telemetry
 import std.text as text
+import std.inference.h3.task_names as task_names
 import std.system as system
 import "runtime_config.ai" as runtime_config
 import ".air/deps/qwen/tokenizer.ai" as tokenizer
@@ -43,6 +44,7 @@ import std.inference.krea2.session as krea_session
 import std.inference.krea2.config as krea_config
 import std.inference.krea2.attention as krea_attention
 import std.inference.krea2.lora as krea_lora
+import std.inference.krea2.pose_control as krea_pose
 import ".air/deps/qwenimage21/session.ai" as qwen_image_session
 import ".air/deps/qwenimage21/generate.ai" as qwen_image_generate
 import ".air/deps/qwenimage21/contract.ai" as qwen_image_contract
@@ -94,7 +96,7 @@ pub type QwenImageCancelableJob = struct {job:QwenImageJob,cancel_path:string}
 
 // MOSS-Image Base or SFT in this process (models/moss_image): the text encoder is read once
 // and freed, the DiT is read once and stays resident for every step, then the VAE decodes.
-// The model folder comes from runtime.json (MM_AIR_MOSS_BASE_ROOT / MM_AIR_MOSS_SFT_ROOT).
+// The model folder comes from Settings (MM_AIR_MOSS_BASE_ROOT / MM_AIR_MOSS_SFT_ROOT).
 // LoRAs run beside the DiT weights at their strength; nothing is merged.
 pub fn run_moss(job:MossJob own)->Outcome
     effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
@@ -126,9 +128,8 @@ fn run_moss_inner(request:ref<parameters.MossRequest>,sender:ref<option<channel.
     ok(value)=>match value{some(found)=>found,none=>string.new(),},
     err(message)=>{return outcome(false,output,message)},}
   if text.trim(str.view(root))==""{
-    return outcome(false,output,str.view(text.concat("The ",
-      str.view(text.concat(label,str.view(text.concat(" folder is not set (",
-        str.view(text.concat(key,")")))))))))
+    return outcome(false,output,str.view(text.concat("Choose the ",
+      str.view(text.concat(label," folder in Settings first")))))
   }
   var loras:array<moss_lora.Request> = []
   let entries=struct.borrow(request,field=loras)
@@ -168,7 +169,7 @@ fn run_moss_inner(request:ref<parameters.MossRequest>,sender:ref<option<channel.
 // Fibo 2.0 Dev (text to image) or Edit Turbo (instruction edit) in this process
 // (models/fibo2 generate.run): the Qwen3-VL encoder is read once and closed, the transformer is
 // read once and stays resident on the GPU for every step, then the VAE decodes. Folders come from
-// runtime.json (MM_AIR_FIBO_DEV_ROOT, MM_AIR_FIBO_EDIT_TURBO_ROOT) with the pipeline description
+// Settings (MM_AIR_FIBO_DEV_ROOT, MM_AIR_FIBO_EDIT_TURBO_ROOT) with the pipeline description
 // MM_AIR_FIBO_PIPELINE_PRESET (AIR's models/fibo2/presets/pipeline.json). LoRAs run unmerged.
 pub fn run_fibo(job:FiboJob own)->Outcome
     effects {alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
@@ -201,10 +202,10 @@ fn run_fibo_inner(request:ref<parameters.FiboRequest>,sender:ref<option<channel.
   let edit=parameters.fibo_is_edit(request)
   let label=if edit{"Fibo 2.0 Edit Turbo"}else{"Fibo 2.0 Dev"}
   let root=match configured_path(if edit{"MM_AIR_FIBO_EDIT_TURBO_ROOT"}else{"MM_AIR_FIBO_DEV_ROOT"},
-      if edit{"The Fibo 2.0 Edit Turbo folder is not set (MM_AIR_FIBO_EDIT_TURBO_ROOT)"}else{"The Fibo 2.0 Dev folder is not set (MM_AIR_FIBO_DEV_ROOT)"}){
+      if edit{"Choose the Fibo 2.0 Edit Turbo folder in Settings first"}else{"Choose the Fibo 2.0 Dev folder in Settings first"}){
     ok(value)=>value,err(message)=>{return outcome(false,output,message)},}
   let preset=match configured_path("MM_AIR_FIBO_PIPELINE_PRESET",
-      "The Fibo 2.0 pipeline file is not set (MM_AIR_FIBO_PIPELINE_PRESET)"){
+      "Choose the Fibo 2.0 pipeline file in Settings first"){
     ok(value)=>value,err(message)=>{return outcome(false,output,message)},}
   var loras:array<fibo_adapters.Request> = []
   let entries=struct.borrow(request,field=loras)
@@ -295,8 +296,8 @@ fn run_qwen_image_policy(owned:ref<QwenImageJob>,policy:qwen_image_attention.Pol
           ok(value)=>match value{some(found)=>found,none=>string.copy(if edit{"E:/Models/Qwen-Image-2.1-PE-I2I"}
             else{"E:/Models/Qwen-Image-2.1-PE-T2I"}),},
           err(message)=>{return outcome(false,struct.borrow(request,field=output),message)},}
-        report(sender,if edit{"Enhancing the edit request with the native AIR Qwen-Image-2.1 edit prompt enhancer (looks at the sources, then thinks)"}
-          else{"Enhancing the prompt with the native AIR Qwen-Image-2.1 prompt enhancer (thinking)"})
+        report(sender,if edit{"Enhancing the edit request with the Qwen-Image-2.1 edit prompt enhancer (looks at the sources, then thinks)"}
+          else{"Enhancing the prompt with the Qwen-Image-2.1 prompt enhancer (thinking)"})
         let pe_scratch=path.join(system.temp_directory(),"mm-air-qwen-pe")
         let _made=files.mkdirs(str.view(pe_scratch))
         let pe_started=time.monotonic_ns()
@@ -357,8 +358,8 @@ fn run_qwen_image_policy(owned:ref<QwenImageJob>,policy:qwen_image_attention.Pol
       }
       qwen_image_session.set_cancel_path(session,cancel_path)
       report(sender,if condition_count==0{
-        "Running native AIR Qwen-Image-2.1 text-to-image"}else{
-        "Running native AIR Qwen-Image-2.1 image edit"})
+        "Running Qwen-Image-2.1 text-to-image"}else{
+        "Running Qwen-Image-2.1 image edit"})
       var sources: array<string> = array.new()
       if condition_count!=0{
         if struct.borrow(request,field=source)!=""{
@@ -412,8 +413,8 @@ fn run_qwen_image_policy(owned:ref<QwenImageJob>,policy:qwen_image_attention.Pol
             }
           }
           outcome_metrics(true,struct.borrow(request,field=output),
-          str.view(text.concat(if turbo{"Native AIR Qwen-Image-2.1-Turbo PNG completed"}
-            else{"Native AIR Qwen-Image-2.1 PNG completed"},str.view(enhanced_note))),
+          str.view(text.concat(if turbo{"Qwen-Image-2.1-Turbo PNG completed"}
+            else{"Qwen-Image-2.1 PNG completed"},str.view(enhanced_note))),
           (time.monotonic_ns()-started)/1000000,0)},
         err(message)=>outcome(false,struct.borrow(request,field=output),message),
       }
@@ -431,17 +432,17 @@ pub fn krea_sources() -> result<krea_session.Sources,string> effects {alloc,env,
     vae_config:try required_environment("MM_AIR_KREA_VAE_CONFIG"),
     manifest_directory:try required_environment("MM_AIR_KREA_MANIFEST_ROOT")})
 }
-pub fn run_krea(job: KreaJob own) -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time} {
+pub fn run_krea(job: KreaJob own) -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time,env} {
   var owned=job
   run_krea_policy(owned,krea_attention.Policy.CkInt8,"")
 }
-pub fn run_krea_cancelable(work:KreaCancelableJob own)->Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time} {
+pub fn run_krea_cancelable(work:KreaCancelableJob own)->Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time,env} {
   var owned=work
   run_krea_policy(struct.borrow(owned,field=job),krea_attention.Policy.CkInt8,
     struct.borrow(owned,field=cancel_path))
 }
 fn run_krea_policy(owned:ref<KreaJob>,policy:krea_attention.Policy,cancel_path:str)
-    -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time} {
+    -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time,env} {
   var ticket = ref.swap(struct.borrow(owned,field=progress),no_progress())
   var connection = match channel.connect(ticket,time.monotonic_ns()+30000000000) {
     ok(value) => value,
@@ -453,7 +454,7 @@ fn run_krea_policy(owned:ref<KreaJob>,policy:krea_attention.Policy,cancel_path:s
   finish_progress(sender,finished)
   finished
 }
-fn run_krea_inner(owned: ref<KreaJob>,sender:ref<option<channel.Sender>>,policy:krea_attention.Policy,cancel_path:str) -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time} {
+fn run_krea_inner(owned: ref<KreaJob>,sender:ref<option<channel.Sender>>,policy:krea_attention.Policy,cancel_path:str) -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time,env} {
   let request = struct.borrow(owned,field=request)
   let seed: u64 = cast.sat(request.seed)
   let settings = krea_config.Config {width:request.width,height:request.height}
@@ -472,6 +473,25 @@ fn run_krea_inner(owned: ref<KreaJob>,sender:ref<option<channel.Sender>>,policy:
         strength:cast.float(entry.strength)})
     }
     index = index + 1
+  }
+  if request.pose != "" {
+    // Pose control: native geometry, the release's own input layer and LoRA (unmerged); the pose is a
+    // skeleton raster used as is (.png) or a keypoint file drawn at its own canvas (.json).
+    let release = match required_environment("MM_AIR_KREA_POSE_RELEASE") {
+      ok(value) => value,
+      err(message) => { return outcome(false,struct.borrow(request,field=output),message) },
+    }
+    let is_json = text.ends_with(text.lower_ascii(struct.borrow(request,field=pose)),".json")
+    let condition = krea_pose.Request {release:release,
+      pose_png:if is_json { string.new() } else { string.copy(struct.borrow(request,field=pose)) },
+      keypoints:if is_json { string.copy(struct.borrow(request,field=pose)) } else { string.new() },
+      prompt:string.copy(struct.borrow(request,field=prompt)),seed:seed,control_scale:cast.float(request.pose_scale),
+      width:0,height:0,trace_dir:string.new()}
+    return match krea_pose.run_to_png(struct.borrow(owned,field=sources),condition,
+        str.view(struct.borrow(request,field=output)),0,sender,cancel_path) {
+      ok(_) => outcome(true,struct.borrow(request,field=output),"Linked AIR Krea 2 Turbo pose-control image completed"),
+      err(message) => outcome(false,struct.borrow(request,field=output),message),
+    }
   }
   match krea_session.run_to_png_cancelable(struct.borrow(owned,field=sources),
       struct.borrow(request,field=prompt),seed,settings,struct.borrow(request,field=output),loras,0,sender,policy,cancel_path) {
@@ -612,6 +632,57 @@ pub fn guide_character_swap_lora() -> option<string> effects {alloc,env,fs.read,
 
 pub fn guide_head_swap_lora() -> option<string> effects {alloc,env,fs.read,fs.meta} {
   lora_file("MM_AIR_H3_GUIDE_HEAD_SWAP_LORA")
+}
+
+// The guide-video edit adapters of the H3 LoRA pack, by kind: 0 VFX edit, 1 style transfer, 2 sharpness.
+pub fn guide_edit_lora(kind: u32) -> option<string> effects {alloc,env,fs.read,fs.meta} {
+  if kind == 0 { return lora_file("MM_AIR_H3_GUIDE_VFX_EDIT_LORA") }
+  if kind == 1 { return lora_file("MM_AIR_H3_GUIDE_STYLE_TRANSFER_LORA") }
+  if kind == 3 { return lora_file("MM_AIR_H3_GUIDE_MOTION_TRANSFER_LORA") }
+  lora_file("MM_AIR_H3_GUIDE_SHARPEN_LORA")
+}
+
+// The training adapter the motion transfer LoRA was trained on top of (ostris' V2): loaded first, strength 1.
+pub fn motion_training_adapter() -> option<string> effects {alloc,env,fs.read,fs.meta} {
+  lora_file("MM_AIR_H3_TRAINING_ADAPTER_LORA")
+}
+
+fn guide_edit_trigger(kind: u32) -> str effects {} {
+  if kind == 0 { return "vfx_edit:" }
+  if kind == 1 { return "style_transfer:" }
+  if kind == 3 { return "motion_transfer:" }
+  ""
+}
+
+// Build Prompt for an edit adapter: the sharpness adapter takes its fixed caption; the others get their trigger word
+// in front of what is typed (an empty prompt gets an example sentence of the adapter's own form to edit).
+pub fn guide_edit_prompt(kind: u32, typed: str) -> string effects {alloc} {
+  if kind == 2 { return string.copy(task_names.sharpen_caption()) }
+  let trigger: str = guide_edit_trigger(kind)
+  var body: string = text.trim(typed)
+  if str.starts_with(str.view(body), trigger) { return body }
+  if str.len(str.view(body)) == 0 {
+    body = if kind == 0 {
+      string.copy("Describe the change here while preserving the subject's identity, pose, motion, clothing, framing, lighting and background.")
+    } else if kind == 3 {
+      string.copy("subject_definitions: <Subject 1> is the character shown in <Picture 1>. summary: <Subject 1> performs the motion and timing of the guide video. retention_analysis: <Subject 1> keeps the identity and clothing of <Picture 1>. detailed_description: [Shot 1] <Subject 1> follows the guide's pose, gestures and head motion frame by frame in the guide's setting. overall_soundscape: Room tone. non_diegetic_music: N/A")
+    } else {
+      string.copy("Transfer the visual style of <Picture 1> onto this video.")
+    }
+  }
+  text.concat(text.concat(trigger, " "), str.view(body))
+}
+
+// The prompt must follow the adapter's form before any model work starts.
+pub fn guide_edit_check(kind: u32, prompt: str) -> result<unit,string> effects {alloc} {
+  if kind == 2 {
+    if prompt == task_names.sharpen_caption() { return result.ok(()) }
+    return result.err("The sharpness adapter takes its fixed caption: press Build Prompt")
+  }
+  if not str.starts_with(prompt, guide_edit_trigger(kind)) {
+    return result.err(text.concat("The prompt must start with ", text.concat(guide_edit_trigger(kind), " (press Build Prompt)")))
+  }
+  task_names.check_prompt("ref2va", prompt)
 }
 
 // The 4-step Ref2VA turbo (distillation) LoRA used by the four-evaluation profile.
@@ -982,7 +1053,7 @@ fn apply_seedvr2(job:ref<Job>,generated:Outcome own,
   let final_output=string.copy(struct.borrow(job,field=seedvr2_final_output))
   report(sender,"Unloading the generation model and reclaiming its GPU context")
   report(sender,if job.seedvr2_settings.variant==1{
-    "Loading native AIR SeedVR2 7B"}else{"Loading native AIR SeedVR2 3B"})
+    "Loading SeedVR2 7B"}else{"Loading SeedVR2 3B"})
   report(sender,"Restoring / upscaling generated video")
   match seedvr2_post.run(str.view(source),str.view(final_output),
       struct.borrow(job,field=scratch_root),job.seedvr2_settings){
@@ -990,7 +1061,7 @@ fn apply_seedvr2(job:ref<Job>,generated:Outcome own,
       var held=completed
       report(sender,"Muxing source audio and saving the SeedVR2 result")
       outcome(true,struct.borrow(held,field=final_output),
-        "Native AIR SeedVR2 restoration completed; pre-upscale generation retained")},
+        "SeedVR2 restoration completed; pre-upscale generation retained")},
     err(message)=>outcome(true,str.view(source),text.concat(
       "H3 generation completed and is displayed without SeedVR2; optional post-process failed: ",
       str.view(message))),
@@ -1435,7 +1506,8 @@ pub fn prepare_ref2va_inputs(
   var embedded_audio_rows: array<u64> = array.new()
   let visual_count: u64 = array.len(struct.borrow(job, field=references))
 
-  if visual_count != 0 {
+  // A guide video alone (VFX edit, sharpness) also needs the encoder, with no pictures.
+  if visual_count != 0 or str.len(str.view(struct.borrow(job, field=guide_video))) != 0 {
     // Resident: the encoder is read from disk once and held for every reference
     // of this job (docs/NO_DISK_STREAMING.md).
     var options: offload.Options = offload.Options {
@@ -1822,7 +1894,8 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
       "MiniMax-H3 Base tasks do not accept audio references")
   }
   if job.model == session.Model.Reference and
-     array.len(struct.borrow(job, field=references)) == 0 {
+     array.len(struct.borrow(job, field=references)) == 0 and
+     str.len(str.view(struct.borrow(job, field=guide_video))) == 0 {
     return outcome(false, str.view(output_path),
       "MiniMax-H3 Ref2VA needs at least one image or video reference; audio references cannot stand alone")
   }
@@ -1873,7 +1946,7 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
   }
   if windowed and (job.model!=session.Model.Base or job.masked) {
     return outcome(false,str.view(output_path),
-      "Native H3 latent windowing currently supports unmasked Base tasks")
+      "H3 latent windowing currently supports unmasked Base tasks")
   }
   let scratch_name: string = text.concat("mm-air-h3-",
     str.view(string.from_int(time.monotonic_ns())))
@@ -2223,7 +2296,7 @@ fn run_outpaint(job:ref<Job>,sender:ref<option<channel.Sender>>)->Outcome
   let _=files.remove(str.view(root))
   outcome(true,str.view(final_output),if settings.preview_first_window{
     "Video Outpaint first-window preview saved"}else{
-    "Native H3 Video Outpaint completed with source audio preserved"})
+    "H3 Video Outpaint completed with source audio preserved"})
 }
 
 fn track_repair_target(job:ref<Job>,prepared:ref<repair_runtime.Prepared>)
@@ -2371,7 +2444,7 @@ fn run_rolling_repair(job:ref<Job>,made:ref<repair_plan.RepairPlan>,
     index=index+1}
   let _=files.remove(str.view(root))
   outcome_metrics(true,str.view(final_output),
-    "Native H3 rolling repair completed; each window was exact-spliced and source audio preserved",
+    "H3 rolling repair completed; each window was exact-spliced and source audio preserved",
     total_runtime_ms,peak_vram_bytes)
 }
 
@@ -2475,7 +2548,7 @@ fn run_rolling_reference(job:ref<Job>,sender:ref<option<channel.Sender>>)->Outco
       "FFmpeg could not join the rolling Ref2VA windows")},
   }
   let _=ref.swap(struct.borrow(job,field=output),string.copy(str.view(final_output)))
-  var message=string.copy("Native H3 rolling Ref2VA completed: ")
+  var message=string.copy("H3 rolling Ref2VA completed: ")
   string.append(message,str.view(string.from_int(count)))
   string.append(message," windows joined")
   outcome_metrics(true,str.view(final_output),str.view(message),total_runtime_ms,
@@ -2852,7 +2925,7 @@ pub fn run(source: Job own) -> Outcome
             struct.borrow(job,field=timing),repair_runtime_ms,
             repair_peak_vram_bytes){
           ok(metrics)=>{
-            var message=string.copy("Native H3 repair completed; outside frames exact; seam MAD entry=")
+            var message=string.copy("H3 repair completed; outside frames exact; seam MAD entry=")
             string.append(message,str.view(string.from_float(metrics.entry_delta)))
             string.append(message," exit=")
             string.append(message,str.view(string.from_float(metrics.exit_delta)))
@@ -2874,7 +2947,7 @@ pub fn run(source: Job own) -> Outcome
     some(value)=>{
       var held=value
       if finished.succeeded and job.two_matte {
-        report(sender,"Tracking the generated replacement with native SAM 3")
+        report(sender,"Tracking the generated replacement with SAM 3")
         var target_job=auto_mask.Job{
           plugin:string.copy(struct.borrow(job,field=sam3_plugin)),
           model:string.copy(struct.borrow(job,field=sam3_model)),
@@ -2903,7 +2976,7 @@ pub fn run(source: Job own) -> Outcome
           struct.set(job,false,field=masked_denoise)
           finished=execute(job,sender)
           if finished.succeeded {
-            report(sender,"Compositing reconstructed background and replacement under separate native mattes")
+            report(sender,"Compositing reconstructed background and replacement under separate mattes")
             match masked_runtime.finish_two_matte(held) {
               ok(_)=>{finished=outcome(true,struct.borrow(held,field=final_output),
                 "Linked AIR H3 two-matte edit completed; old silhouette removed and source outside the authored region preserved")},

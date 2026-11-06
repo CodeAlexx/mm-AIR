@@ -20,7 +20,11 @@ pub fn keys()->array<string> effects{alloc}{
    "MM_AIR_SEEDVR2_MANIFEST_ROOT","MM_AIR_SEEDVR2_7B_MANIFEST_ROOT",
    "MM_AIR_H3_CHARACTER_SWAP_LORA","MM_AIR_H3_CHARACTER_SWAP_TURBO_LORA",
    "MM_AIR_H3_GUIDE_CHARACTER_SWAP_LORA","MM_AIR_H3_GUIDE_HEAD_SWAP_LORA",
-   "MM_AIR_FACE_SWAP_LORA_DIR"]
+   "MM_AIR_FACE_SWAP_LORA_DIR",
+   "MM_AIR_H3_GUIDE_VFX_EDIT_LORA","MM_AIR_H3_GUIDE_STYLE_TRANSFER_LORA","MM_AIR_H3_GUIDE_SHARPEN_LORA",
+   "MM_AIR_H3_GUIDE_MOTION_TRANSFER_LORA","MM_AIR_H3_TRAINING_ADAPTER_LORA",
+   "MM_AIR_MOSS_BASE_ROOT","MM_AIR_MOSS_SFT_ROOT","MM_AIR_LORA_DIR",
+   "MM_AIR_FIBO_DEV_ROOT","MM_AIR_FIBO_EDIT_TURBO_ROOT","MM_AIR_FIBO_PIPELINE_PRESET"]
 }
 pub fn index(id:str,browse:bool)->option<u64> effects{alloc}{
   var i:u64=0
@@ -34,7 +38,8 @@ pub fn index(id:str,browse:bool)->option<u64> effects{alloc}{
 pub fn is_file(index:u64)->bool effects{}{
   // Indices into keys(): the rows whose Browse picks a file, not a folder.
   index==4 or index==5 or index==9 or index==10 or index==12 or index==13 or
-    index==19 or index==20 or index==21 or index==24 or index==25 or index==26 or index==27
+    index==19 or index==20 or index==21 or index==24 or index==25 or index==26 or index==27 or
+    index==29 or index==30 or index==31 or index==32 or index==33 or index==39
 }
 fn configured(key:str,fallback:str)->result<string,string>
     effects{alloc,env,fs.read,fs.meta}{

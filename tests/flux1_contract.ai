@@ -21,7 +21,7 @@ pub fn main(args:view<str>) -> i32 effects {alloc,io.write} {
   var decoded:parameters.Flux1Request=match parameters.decode_flux1(encoded) {ok(result)=>result,err(_)=>{return 4},}
   if decoded.seed!=9007199254740993 or decoded.width!=96 or decoded.height!=160 or decoded.steps!=30 or decoded.guidance!=3.5 {return 5}
   var selected=match bridge.request(decoded) {ok(result)=>result,err(_)=>{return 6},}
-  if selected.width!=128 or selected.height!=128 or selected.seed!=decoded.seed or selected.steps!=30 {return 7}
+  if selected.width!=96 or selected.height!=160 or selected.seed!=decoded.seed or selected.steps!=30 {return 7}
   match selected.sequence {some(_)=>{return 8},none=>{},}
   var wrong:string=text.replace(encoded,"mm-air.flux1-dev.parameters.v1","mm-air.flux1-dev.parameters.v2")
   match parameters.decode_flux1(wrong) {ok(_)=>{return 9},err(_)=>{},}

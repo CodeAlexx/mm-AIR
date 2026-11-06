@@ -181,7 +181,7 @@ and the other LyCORIS/PEFT adapters from **Model LoRA** run beside the DiT at th
 are never merged. Outputs go to `output/moss-image/generate` with the usual parameter sidecar
 (schema `mm-air.moss-image.parameters.v1`), History and Reuse.
 
-runtime.json keys (not shown in the Settings dialog of this build): `MM_AIR_MOSS_BASE_ROOT` and `MM_AIR_MOSS_SFT_ROOT` (the published folders), and
+Settings: `MM_AIR_MOSS_BASE_ROOT` and `MM_AIR_MOSS_SFT_ROOT` (the published folders), and
 `MM_AIR_LORA_DIR`, the folder **Add LoRA** opens for every model. One generation through the
 app's worker: `build/release/bin/image-generate MODEL OUT.png PROMPT SEED [STEPS]`.
 
@@ -204,7 +204,7 @@ are hidden while it is selected. Outputs: `output/fibo2/generate` and `output/fi
 schema `mm-air.fibo2.parameters.v1`; Reuse restores Dev runs on Generate and edits on
 Image Edit.
 
-runtime.json keys (not shown in the Settings dialog of this build): `MM_AIR_FIBO_DEV_ROOT`, `MM_AIR_FIBO_EDIT_TURBO_ROOT` (the published folders) and
+Settings: `MM_AIR_FIBO_DEV_ROOT`, `MM_AIR_FIBO_EDIT_TURBO_ROOT` (the published folders) and
 `MM_AIR_FIBO_PIPELINE_PRESET` (AIR's `models/fibo2/presets/pipeline.json`). One generation
 through the app's worker: `image-generate fibo-2.0-dev OUT.png PROMPT SEED` or
 `image-generate fibo-2.0-edit-turbo OUT.png INSTRUCTION SEED 0 SOURCE.png [REF...]`.
@@ -765,6 +765,13 @@ ConvRot path now applies PEFT adapters at runtime (`std.inference.h3`
   (`MM_AIR_H3_GUIDE_CHARACTER_SWAP_LORA`, `MM_AIR_H3_GUIDE_HEAD_SWAP_LORA`) runs unmerged, and Build Prompt has Qwen describe
   the first picture and fills the adapter's own template (`body_swap:` / `head_swap:`), which stays editable. Output frames
   are `17n + 5`; Turbo is not available with these adapters. The adapters and templates are Alissonerdx's (credit and terms in
+  `docs/models/H3.md`).
+- **Guide-video edit adapters (VFX edit, style transfer, sharpen):** the same dropdown also lists *Guide video · VFX edit*,
+  *style transfer* and *sharpen*. The source clip is an aligned guide; pictures are optional (the edited first frame for the
+  `_ffp` VFX adapter, the style picture for style transfer; none for sharpen). Build Prompt sets the adapter's trigger word
+  (`vfx_edit:` / `style_transfer:`) in front of your sentence, or the sharpness adapter's fixed caption. Settings:
+  `MM_AIR_H3_GUIDE_VFX_EDIT_LORA`, `MM_AIR_H3_GUIDE_STYLE_TRANSFER_LORA`, `MM_AIR_H3_GUIDE_SHARPEN_LORA`. Live wallpaper is
+  ordinary Ref2VA with one to three pictures and its LoRA in the Generate LoRA list. Credit and terms: Alissonerdx (see
   `docs/models/H3.md`).
 - **Settings:** `MM_AIR_H3_CHARACTER_SWAP_LORA` (the swap LoRA) and
   `MM_AIR_H3_CHARACTER_SWAP_TURBO_LORA` (the 4-step turbo LoRA). Unmasked

@@ -1,0 +1,33 @@
+module app.mm_air.tests.native_krea_pose
+import "../generate.ai" as generation
+import "../parameters.ai" as parameters
+import std.channel as channel
+import std.text as text
+
+// One real MM-Air Krea pose-control generation through the application's own worker
+// (generation.run_krea_cancelable) with the deployment's runtime configuration: arguments are
+// POSE(.png|.json) OUTPUT.png PROMPT SEED SCALE.
+pub fn main(args:view<str>)->i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
+  if view.len(args)!=6 {
+    io.ewrite("usage: krea-pose-generate POSE OUTPUT.png PROMPT SEED SCALE\n")
+    return 1
+  }
+  let seed=match text.parse_i64(view.get(args,4)){some(value)=>value,none=>{return 2},}
+  let scale=match text.parse_f64(view.get(args,5)){some(value)=>value,none=>{return 3},}
+  var sources=match generation.krea_sources(){ok(value)=>value,err(message)=>{
+    io.ewrite(message)
+    return 4},}
+  var receiver=match channel.open(128,1024){ok(value)=>value,err(_)=>{return 5},}
+  var request=parameters.KreaRequest{prompt:string.copy(view.get(args,3)),seed:seed,
+    width:1024,height:1024,output:string.copy(view.get(args,2)),loras:[],
+    pose:string.copy(view.get(args,1)),pose_scale:scale}
+  var work=generation.KreaCancelableJob{
+    job:generation.KreaJob{sources:sources,request:request,progress:channel.ticket(receiver)},
+    cancel_path:""}
+  var outcome=generation.run_krea_cancelable(work)
+  let _=channel.close(receiver)
+  io.write(text.concat("MM-Air Krea pose generation: ",outcome.message))
+  io.write("\n")
+  if outcome.succeeded{0}else{6}
+}

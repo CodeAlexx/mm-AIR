@@ -19,6 +19,10 @@
         "entry": "tests/runtime_config.ai"
       },
       {
+        "name": "krea-pose-generate",
+        "entry": "tests/native_krea_pose.ai"
+      },
+      {
         "name": "image-generate",
         "entry": "tests/native_image_generate.ai"
       },

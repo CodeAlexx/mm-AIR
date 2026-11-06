@@ -8,6 +8,8 @@ import std.path as path
 import std.inference.h3.request as h3
 import "./.air/deps/qwenimage21/contract.ai" as qwen_contract
 import std.inference.krea2.config as krea_config
+import std.draw as draw
+import "./.air/deps/flux1/latent.ai" as flux1_latent
 import "./.air/deps/fibo2/defaults.ai" as fibo_defaults
 
 pub fn krea_model_index() -> u32 effects {} { 2 }
@@ -31,9 +33,12 @@ pub fn flux1_defaults() -> Flux1Request effects {alloc} {
 }
 pub fn validate_flux1(request:ref<Flux1Request>) -> result<unit,string> effects {alloc} {
   if request.prompt=="" {return result.err("FLUX.1 DEV needs a prompt")}
-  if request.width<64 or request.width>1024 or request.height<64 or request.height>1024 or
+  // Geometry is the model's own: the session rounds sides to its packing grid (session.public_request) and bounds the
+  // area by the output surface; device memory is admitted by Prime for the exact size.
+  let step:u64=flux1_latent.pixel_alignment()
+  if request.width<step/2 or request.height<step/2 or request.height>draw.max_pixels()/request.width or
       request.steps==0 or request.steps>1000 or not math.is_finite(cast.float(request.guidance)) or request.guidance<0.0 or request.guidance>100.0 {
-    return result.err("FLUX.1 DEV requires64..1024 dimensions,1..1000steps and finite guidance0..100")
+    return result.err("FLUX.1 DEV requires dimensions within the output surface bound (rounded to the 16 px packing grid),1..1000steps and finite guidance0..100")
   }
   if not path.is_absolute(request.output) or path.extension(request.output)!=".png" {
     return result.err("Choose an absolute PNG output path for FLUX.1 DEV")
@@ -233,8 +238,13 @@ pub fn decode_moss(source:str) -> result<MossRequest,string> effects {alloc} {
   let _=try validate_moss(struct.borrow(file,field=request))
   result.ok(struct.replace(file,moss_defaults(moss_base_model_index()),field=request))
 }
+// `pose`: path of a pose-control condition (a COCO-17 skeleton raster .png, used as is, or a keypoint
+// .json rendered at its own canvas); empty = ordinary Krea 2 Turbo. With a pose the run takes the
+// Krea-2 Pose Control-LoRA release (MM_AIR_KREA_POSE_RELEASE) at the pose's native size; `pose_scale`
+// is its control scale (1.0 frozen default, 1.25 to 1.5 stronger).
 pub type KreaRequest = struct {
-  prompt:string,seed:i64,width:u64,height:u64,output:string,loras:array<LoraEntry>
+  prompt:string,seed:i64,width:u64,height:u64,output:string,loras:array<LoraEntry>,
+  pose:string = "",pose_scale:f64 = 1.0
 }
 pub type QwenImageRequest = struct {
   prompt:string,output:string,source:string,references:array<string>,
@@ -474,6 +484,23 @@ pub fn validate_krea(request: ref<KreaRequest>) -> result<unit,string> effects {
     return result.err("Choose a .png output for Krea 2 Turbo")
   }
   try validate_loras(struct.borrow(request,field=loras))
+  if request.pose != "" {
+    let lowered = text.lower_ascii(struct.borrow(request,field=pose))
+    if not text.ends_with(lowered,".png") and not text.ends_with(lowered,".json") {
+      return result.err("Pose control takes a .png skeleton raster or a .json keypoint file")
+    }
+    if not math.is_finite(request.pose_scale) or request.pose_scale <= 0.0 or request.pose_scale > 3.0 {
+      return result.err("Pose control scale must be above 0 and at most 3 (1.0 is the default)")
+    }
+    var enabled: u64 = 0
+    var index: u64 = 0
+    loop {
+      if index >= array.len(struct.borrow(request,field=loras)) { break }
+      if array.borrow(struct.borrow(request,field=loras),index).enabled { enabled = enabled + 1 }
+      index = index + 1
+    }
+    if enabled != 0 { return result.err("Pose control applies its own LoRA; disable the other LoRAs") }
+  }
   result.ok(())
 }
 pub fn encode_krea(request: ref<KreaRequest>) -> result<string,string> effects {alloc} {
@@ -489,6 +516,10 @@ pub fn encode_krea(request: ref<KreaRequest>) -> result<string,string> effects {
   codec.field_u64(out,"steps",8)
   codec.field_text(out,"precision","bf16")
   codec.field_text(out,"output",struct.borrow(request,field=output))
+  if request.pose != "" {
+    codec.field_text(out,"pose",struct.borrow(request,field=pose))
+    codec.field_f64(out,"pose_scale",request.pose_scale)
+  }
   codec.key(out,"loras")
   codec.begin_array(out)
   let entries = struct.borrow(request,field=loras)
@@ -526,6 +557,16 @@ pub fn decode_krea(source: str) -> result<KreaRequest,string> effects {alloc} {
   var request = KreaRequest {prompt:try string_field(document,"prompt"),seed:seed,
     width:try count(document,"width"),height:try count(document,"height"),
     output:try string_field(document,"output"),loras:try decode_loras(document)}
+  match json.get(document,json.root(),"pose") {
+    some(_) => {
+      request.pose = try string_field(document,"pose")
+      request.pose_scale = match json.get(document,json.root(),"pose_scale") {
+        some(node) => match json.as_f64(document,node) { some(value) => value, none => { return result.err("Expected numeric pose_scale") } },
+        none => 1.0,
+      }
+    },
+    none => {},
+  }
   try validate_krea(request)
   result.ok(request)
 }

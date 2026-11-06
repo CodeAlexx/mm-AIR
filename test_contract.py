@@ -48,10 +48,10 @@ assert [item.text for item in tree.findall(
     "9:16 · 1536×2752", "Custom"]
 assert [item.text for item in tree.findall(
     ".//object[@id='qwen_image_scheduler_list']/items/item")] == [
-    "Creator Dynamic Flow", "Linear Flow · native alternate"]
+    "Creator Dynamic Flow", "Linear Flow"]
 assert [item.text for item in tree.findall(
     ".//object[@id='qwen_image_sampler_list']/items/item")] == [
-    "Euler", "DPM++ 2M · native alternate"]
+    "Euler", "DPM++ 2M"]
 
 for control in ("gen_qwen_sampling", "qwen_image_resolution",
                 "qwen_image_scheduler", "qwen_image_sampler",
