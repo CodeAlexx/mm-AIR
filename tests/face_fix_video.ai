@@ -1,0 +1,77 @@
+// Face fix gate: restores the faces of a finished video with the same code Video Swap runs after its
+// final composite. Decodes IN to RGB24, runs face_fix.apply (whole frame, or inside REGION's luma when
+// given), re-encodes like the Video Swap output and stream-copies IN's audio.
+// usage: face-fix-video IN.mp4 OUT.mp4 ENHANCER FRAMES WIDTH HEIGHT SCRATCH_DIR [REGION.mp4]
+module app.mm_air.tests.face_fix_video
+
+import "../face_fix.ai" as face_fix
+import std.files as files
+import std.path as path
+import std.process as proc
+import std.text as text
+
+fn run(arguments:array<string> own) -> bool effects {alloc,process,fs.meta,fs.read,fs.write} {
+  match proc.check(arguments) {ok(_)=>true,err(_)=>false}
+}
+
+fn to_array(data:view<byte>) -> array<byte> effects {alloc} {
+  var out:array<byte> = array.new()
+  array.reserve(out,view.len(data))
+  var at:u64=0
+  loop {if at>=view.len(data){break}
+    array.push(out,view.get(data,at))
+    at=at+1}
+  out
+}
+
+fn number(value:str) -> u64 effects {alloc} {
+  match text.parse_u64(value){some(v)=>v,none=>0}
+}
+
+pub fn main(args:view<str>)->i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,process,time} {
+  if view.len(args)<8 or view.len(args)>9 {
+    io.ewrite("usage: face-fix-video IN.mp4 OUT.mp4 ENHANCER FRAMES WIDTH HEIGHT SCRATCH_DIR [REGION.mp4]\n")
+    return 2}
+  let frames=number(view.get(args,4))
+  let width=number(view.get(args,5))
+  let height=number(view.get(args,6))
+  let scratch=view.get(args,7)
+  let _made=files.mkdirs(scratch)
+  let raw=path.join(scratch,"in.rgb")
+  let region_raw=path.join(scratch,"region.gray")
+  let frame_count=string.from_int(frames)
+  if not run(["ffmpeg","-nostdin","-v","error","-y","-i",string.copy(view.get(args,1)),"-map","0:v:0",
+      "-frames:v",string.copy(str.view(frame_count)),"-pix_fmt","rgb24","-f","rawvideo",string.copy(str.view(raw))]) {
+    io.ewrite("decode failed\n")
+    return 3}
+  var region:array<byte> = array.new()
+  if view.len(args)==9 {
+    if not run(["ffmpeg","-nostdin","-v","error","-y","-i",string.copy(view.get(args,8)),"-map","0:v:0",
+        "-frames:v",string.copy(str.view(frame_count)),"-vf","format=gray","-f","rawvideo",
+        string.copy(str.view(region_raw))]) {
+      io.ewrite("region decode failed\n")
+      return 3}
+    region=match files.read_bytes(str.view(region_raw)){ok(b)=>to_array(bytes.view(b)),err(_)=>{return 3}}
+  }
+  var video=match files.read_bytes(str.view(raw)){ok(b)=>to_array(bytes.view(b)),err(_)=>{return 3}}
+  let started=time.monotonic_ns()
+  let line=match face_fix.apply(video,array.view(region),frames,width,height,view.get(args,3)){
+    ok(value)=>value,err(message)=>{io.ewrite(text.concat(str.view(message),"\n"))
+      return 4}}
+  let elapsed=time.monotonic_ns()-started
+  io.write(text.concat(str.view(line),"\n"))
+  io.write(text.concat("face fix wall ms ",text.concat(str.view(string.from_int(elapsed/1000000)),"\n")))
+  match files.write_bytes(str.view(raw),array.view(video)) {ok(_)=>{},err(_)=>{return 3}}
+  let size=text.concat(str.view(string.from_int(width)),text.concat("x",str.view(string.from_int(height))))
+  if not run(["ffmpeg","-nostdin","-v","error","-y","-f","rawvideo","-pixel_format","rgb24","-video_size",
+      string.copy(str.view(size)),"-framerate","24","-i",string.copy(str.view(raw)),"-i",string.copy(view.get(args,1)),
+      "-frames:v",string.copy(str.view(frame_count)),"-map","0:v:0","-map","1:a?","-c:v","libx264","-preset","fast",
+      "-crf","12","-pix_fmt","yuv420p","-c:a","copy","-t",string.from_float(cast.float(frames)/24.0),
+      string.copy(view.get(args,2))]) {
+    io.ewrite("encode failed\n")
+    return 5}
+  let _a=files.remove(str.view(raw))
+  let _b=files.remove(str.view(region_raw))
+  0
+}

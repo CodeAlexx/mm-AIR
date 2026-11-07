@@ -126,6 +126,7 @@
         "name": "movie-drift-ab-generate",
         "entry": "tests/movie_drift_ab_generate.ai"
       },
+      {"name": "face-fix-video", "entry": "tests/face_fix_video.ai"},
       {"name": "native-h3-twice", "entry": "tests/native_h3_twice.ai"},
       {"name": "native-h3-generate", "entry": "tests/native_h3_generate.ai"}
     ],
@@ -234,7 +235,7 @@
     "character_sheet.ai",
     "character_swap.ai",
     "masked_edit.ai",
-    "masked_runtime.ai", "mask_gpu.ai", "mask_kernels.ai",
+    "face_fix.ai", "masked_runtime.ai", "mask_gpu.ai", "mask_kernels.ai",
     "swap_masks.ai",
     "presets",
     "outpaint.ai",
@@ -286,6 +287,7 @@
       "path": "../AIR/models/qwenimage21",
       "version": ">=0.1.0"
     },
+    "twin": {"path": "../twin", "version": ">=0.1.0"},
     "h3_repair": {
       "path": "../AIR/toolkits/h3-repair",
       "version": ">=0.1.0"

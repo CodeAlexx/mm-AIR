@@ -32,6 +32,7 @@ import ".air/deps/sam3/mask.ai" as auto_mask
 import "sam31_mask.ai" as sam31_mask
 import "masked_edit.ai" as masked_edit
 import "video_swap.ai" as video_swap
+import "face_fix.ai" as face_fix
 import "outpaint.ai" as outpaint
 import "outpaint_runtime.ai" as outpaint_runtime
 import "repair_runtime.ai" as repair_runtime
@@ -1491,6 +1492,7 @@ pub fn main(args: view<str>) -> i32
   var vs_start: f64 = 0.0
   var vs_motion_index: u64 = 0
   var vs_source_index: u64 = 0
+  var vs_face_fix: u64 = 0
   var swap_manual_mask: bool = false
   var swap_mask_x: f64 = 0.0
   var swap_mask_y: f64 = 0.0
@@ -3834,6 +3836,7 @@ pub fn main(args: view<str>) -> i32
                 cast.float(choice))}
             if id=="edit_v2v_short" or id=="gen_v2v_short"{v2v_short_last=desk.boolean(event,"value")}
             if id=="edit_v2v_color" or id=="gen_v2v_color"{v2v_color_match=desk.boolean(event,"value")}
+            if id=="edit_swap_facefix"{vs_face_fix=cast.sat(desk.number(event,"value"))}
             if id=="edit_repair_window"{edit_repair_window=cast.sat(
               desk.number(event,"value"))}
             if id=="edit_repair_overlap"{edit_repair_overlap=cast.sat(
@@ -7131,6 +7134,7 @@ pub fn main(args: view<str>) -> i32
                       swap_mask_expand,swap_mask_strategy,swap_mask_padding,
                       swap_mask_preserve)}
                     generation.enable_masked_composite(job,mask_settings)
+                    if swap {generation.set_face_fix(job,face_fix.enhancer_name(vs_face_fix))}
                     generation.set_sam31_model(job,str.view(sam31_model))
                     match generation.enable_two_matte(job,str.view(sam3_plugin),
                         str.view(sam3_model)) {

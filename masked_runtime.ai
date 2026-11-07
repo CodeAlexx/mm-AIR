@@ -3,6 +3,7 @@
 // H3 geometry mapping and final compositing remain AIR-owned.
 module app.mm_air.masked_runtime
 
+import "face_fix.ai" as face_fix
 import "mask_gpu.ai" as mask_gpu
 import std.files as files
 import std.media as media
@@ -373,8 +374,11 @@ pub fn finish(value:ref<Prepared>) -> result<unit,string>
     "FFmpeg could not encode the source-preserving masked PNG")
 }
 
-pub fn finish_two_matte(value:ref<Prepared>) -> result<unit,string>
-    effects {alloc,fs.meta,fs.read,fs.write,process} {
+// `fix_faces` is the face fix-up enhancer ("" = off): after the final composite, Twin restores the
+// faces of the generated subject (inside the replacement matte only) before the encode. Returns
+// the face-fix log line ("" when off); a fix-up failure leaves the composite as it was.
+pub fn finish_two_matte(value:ref<Prepared>,fix_faces:str) -> result<string,string>
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,process,time} {
   let expected_edit:u64=value.frames*value.track.working_width*
     value.track.working_height*3
   let decode_filter=text.concat("fps=24,scale=",text.concat(str.view(
@@ -411,11 +415,20 @@ pub fn finish_two_matte(value:ref<Prepared>) -> result<unit,string>
     struct.borrow(value,field=removal_mask),struct.borrow(value,field=track))
   var composed=try edit.composite_crop_mask(array.view(cleared),bytes.view(edited),
     target_clean,struct.borrow(value,field=track))
+  var fix_note=string.new()
+  if face_fix.enabled(fix_faces) and value.source_video {
+    let region=try edit.region_bytes(target_clean,struct.borrow(value,field=track))
+    match face_fix.apply(composed,array.view(region),value.frames,value.source_width,
+        value.source_height,fix_faces) {
+      ok(line)=>{fix_note=line},
+      err(message)=>{fix_note=text.concat("face fix skipped: ",str.view(message))},
+    }
+  }
   match files.write_bytes(struct.borrow(value,field=composite_raw),array.view(composed)) {
     ok(_)=>{},err(problem)=>{return result.err(string.copy(problem.message))},
   }
   if value.source_video {
-    return check(["ffmpeg","-nostdin","-v","error","-y","-f","rawvideo",
+    let _=try check(["ffmpeg","-nostdin","-v","error","-y","-f","rawvideo",
       "-pixel_format","rgb24","-video_size",text.concat(str.view(string.from_int(
         value.source_width)),text.concat("x",str.view(string.from_int(value.source_height)))),
       "-framerate","24","-i",string.copy(struct.borrow(value,field=composite_raw)),
@@ -425,13 +438,15 @@ pub fn finish_two_matte(value:ref<Prepared>) -> result<unit,string>
       "copy","-t",string.from_float(cast.float(value.frames)/24.0),
       string.copy(struct.borrow(value,field=final_output))],
       "FFmpeg could not encode the two-matte masked output")
+    return result.ok(fix_note)
   }
-  check(["ffmpeg","-nostdin","-v","error","-y","-f","rawvideo",
+  let _=try check(["ffmpeg","-nostdin","-v","error","-y","-f","rawvideo",
     "-pixel_format","rgb24","-video_size",text.concat(str.view(string.from_int(
       value.source_width)),text.concat("x",str.view(string.from_int(value.source_height)))),
     "-framerate","24","-i",string.copy(struct.borrow(value,field=composite_raw)),
     "-frames:v","1","-c:v","png",string.copy(struct.borrow(value,field=final_output))],
     "FFmpeg could not encode the two-matte masked PNG")
+  result.ok(fix_note)
 }
 
 // Remove only files and the unique directory created by prepare. The final

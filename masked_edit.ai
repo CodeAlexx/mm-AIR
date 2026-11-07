@@ -914,6 +914,40 @@ pub fn composite_crop_mask(source:view<byte>,edited:view<byte>,mask:ref<Mask>,
   result.ok(output)
 }
 
+// Where the generated subject sits in the original frames: one byte per source pixel
+// (255 = fully replaced), from the crop-space replacement mask. Used to limit the face fix-up.
+pub fn region_bytes(mask:ref<Mask>,track:ref<Track>) -> result<array<byte>,string> effects {alloc} {
+  if mask.width != track.working_width or mask.height != track.working_height or
+     array.len(struct.borrow(track,field=crops)) != mask.frames {
+    return result.err("Replacement region does not match crop geometry")
+  }
+  var output:array<byte> = array.new()
+  let total:u64=mask.frames*track.canvas_width*track.canvas_height
+  var filled:u64=0
+  loop {if filled>=total{break}
+    array.push(output,byte_value(0))
+    filled=filled+1}
+  var frame:u64=0
+  loop {if frame>=mask.frames{break}
+    let crop=array.get(struct.borrow(track,field=crops),frame)
+    var y:u64=crop.y
+    loop {if y>=crop.y+crop.height{break}
+      var x:u64=crop.x
+      loop {if x>=crop.x+crop.width{break}
+        let edit_x:u64=(x-crop.x)*track.working_width/crop.width
+        let edit_y:u64=(y-crop.y)*track.working_height/crop.height
+        let weight:f32=array.get(struct.borrow(mask,field=weights),
+          (frame*mask.height+edit_y)*mask.width+edit_x)
+        if weight>0.0 {
+          array.set(output,(frame*track.canvas_height+y)*track.canvas_width+x,
+            byte_value(cast.sat(math.round(cast.float(weight)*255.0))))
+        }
+        x=x+1}
+      y=y+1}
+    frame=frame+1}
+  result.ok(output)
+}
+
 pub fn describe(track:ref<Track>) -> string effects {alloc} {
   text.concat(str.view(string.from_int(track.working_width)),text.concat(" × ",
     text.concat(str.view(string.from_int(track.working_height)),text.concat(

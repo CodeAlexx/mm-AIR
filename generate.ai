@@ -543,6 +543,8 @@ pub type Job = struct {
   masked_composite_source: string,
   masked_token_weights: array<f32>,
   two_matte:bool,
+  // Video Swap face fix-up enhancer ("" = off).
+  face_fix:string,
   sam3_plugin:string,
   sam3_model:string,
   sam31_model:string,
@@ -811,7 +813,7 @@ pub fn job_loras(configuration: ref<Configuration>, prompt: str,
     references: owned_references, audio_references: owned_audio_references,
     output: text.copy(output),loras:owned_loras,masked:false,masked_denoise:false,masked_composite_source:string.new(),
     masked_settings:masked_runtime.settings("",false,0.0,0.0,0.0,0.0,
-      0,0,0,0,0,true), masked_token_weights: [], two_matte:false,
+      0,0,0,0,0,true), masked_token_weights: [], two_matte:false,face_fix:string.new(),
     sam3_plugin:string.new(),sam3_model:string.new(),sam31_model:string.new(),outpaint:false,
     outpaint_settings:outpaint_runtime.settings(32,32,outpaint.right(),
       outpaint.anchor_center(),outpaint.exact(),0,22,0,false),
@@ -973,6 +975,12 @@ pub fn enable_masked_composite(job:ref<Job>,settings:masked_runtime.Settings own
 // The native SAM 3.1 weights for generated-subject masks (the SAM 3 plugin is the fallback).
 pub fn set_sam31_model(job:ref<Job>,model:str) -> unit effects {alloc} {
   let _=ref.swap(struct.borrow(job,field=sam31_model),string.copy(model))
+  ()
+}
+
+// Video Swap: restore the generated subject's faces after the final composite ("" = off).
+pub fn set_face_fix(job:ref<Job>,enhancer:str) -> unit effects {alloc} {
+  let _=ref.swap(struct.borrow(job,field=face_fix),text.copy(enhancer))
   ()
 }
 
@@ -2752,9 +2760,13 @@ pub fn run(source: Job own) -> Outcome
           finished=execute(job,sender)
           if finished.succeeded {
             report(sender,"Compositing reconstructed background and replacement under separate mattes")
-            match masked_runtime.finish_two_matte(held) {
-              ok(_)=>{finished=outcome(true,struct.borrow(held,field=final_output),
-                "Linked AIR H3 two-matte edit completed; old silhouette removed and source outside the authored region preserved")},
+            match masked_runtime.finish_two_matte(held,str.view(struct.borrow(job,field=face_fix))) {
+              ok(note)=>{
+                var done=string.copy("Linked AIR H3 two-matte edit completed; old silhouette removed and source outside the authored region preserved")
+                if str.len(str.view(note))!=0 {
+                  string.append(done," · ")
+                  string.append(done,str.view(note))}
+                finished=outcome(true,struct.borrow(held,field=final_output),str.view(done))},
               err(message)=>{finished=outcome(false,struct.borrow(held,field=final_output),message)},
             }
           } else {

@@ -146,6 +146,7 @@
   <object class="GtkStringList" id="edit_swap_margin_list"><items><item>Mask margin · Tight</item><item>Mask margin · Normal</item><item>Mask margin · Loose</item></items></object>
   <object class="GtkStringList" id="edit_swap_part_list"><items><item>Part to use · Whole video</item><item>Part to use · Start</item><item>Part to use · Middle</item><item>Part to use · End</item></items></object>
   <object class="GtkStringList" id="edit_swap_motion_list"><items><item>Motion reference · 512 px</item><item>Motion reference · 768 px</item><item>Motion reference · 1376 px</item></items></object>
+  <object class="GtkStringList" id="edit_swap_facefix_list"><items><item>Face fix · Off</item><item>Face fix · GFPGAN</item><item>Face fix · CodeFormer</item></items></object>
   <object class="GtkStringList" id="edit_swap_source_list"><items><item>Video 1 · blank edit area</item><item>Video 1 · grey silhouette</item></items></object>
   <object class="GtkStringList" id="edit_repair_memory_list"><items><item>Auto memory</item><item>Full repair window</item><item>Rolling · streaming ConvRot INT8</item></items></object>
   <object class="GtkStringList" id="edit_timing_mode_list"><items><item>Stock H3 timing · quality validated</item></items></object>
@@ -923,6 +924,7 @@
                       </object></child>
                       <child><object class="GtkDropDown" id="edit_swap_motion"><property name="model">edit_swap_motion_list</property><property name="selected">0</property><property name="tooltip-text">Short edge of the grey-mannequin motion reference (H3 uses at most 768x1344)</property></object></child>
                       <child><object class="GtkDropDown" id="edit_swap_source"><property name="model">edit_swap_source_list</property><property name="selected">0</property><property name="tooltip-text">What H3 sees as Video 1: the part with the whole edit area greyed, or only the person</property></object></child>
+                      <child><object class="GtkDropDown" id="edit_swap_facefix"><property name="model">edit_swap_facefix_list</property><property name="selected">0</property></object></child>
                       <child><object class="GtkDropDown" id="edit_v2v_window"><property name="model">v2v_window_list</property><property name="selected">1</property></object></child>
                       <child><object class="GtkDropDown" id="edit_v2v_overlap"><property name="model">v2v_overlap_list</property><property name="selected">1</property></object></child>
                       <child><object class="GtkCheckButton" id="edit_v2v_short"><property name="label">Short last window</property></object></child>
