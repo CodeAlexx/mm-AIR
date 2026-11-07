@@ -928,6 +928,11 @@
                       <child><object class="GtkCheckButton" id="edit_v2v_short"><property name="label">Short last window</property></object></child>
                       <child><object class="GtkCheckButton" id="edit_v2v_color"><property name="label">Match colour</property></object></child>
                     </object></child>
+                    <child><object class="GtkBox" id="edit_people_box"><property name="orientation">vertical</property><property name="spacing">6</property><property name="visible">false</property>
+                      <child><object class="GtkButton" id="edit_find_people"><property name="label">Find people</property><style><class name="quiet-button"/></style></object></child>
+                      <child><object class="GtkGridView" id="edit_people"><property name="max-columns">4</property><property name="single-click-activate">false</property><property name="height-request">128</property><property name="visible">false</property></object></child>
+                      <child><object class="GtkLabel" id="edit_people_status"><property name="label"></property><property name="xalign">0</property><style><class name="capability-note"/></style></object></child>
+                    </object></child>
                     <child><object class="GtkButton" id="edit_auto_mask"><property name="label">Auto Mask with SAM 3.1</property><style><class name="primary-action"/></style></object></child>
                     <child><object class="GtkLabel"><property name="visible">false</property><property name="label">Text-prompted local detection + video tracking. You can paint corrections afterward.</property><property name="wrap">true</property><property name="xalign">0</property><style><class name="capability-note"/></style></object></child>
                   </object></child></object></child>

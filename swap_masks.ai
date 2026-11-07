@@ -17,6 +17,7 @@ import std.safetensors_index as ranges
 import std.text as text
 import std.inference.h3.reference_media as reference_media
 import ".air/deps/sam3/tracks.ai" as sam_tracks
+import "pick.ai" as pick
 
 // ---------------------------------------------------------------- preset
 
@@ -261,6 +262,74 @@ pub fn select_per_frame(tracks:ref<array<sam_tracks.Track>>,frames:u64,width:u64
   t=0
   loop {if t>=array.len(tracks){break}
     if array.get(counts,t)>best {best=array.get(counts,t)
+      dominant=cast.wrap(array.borrow(tracks,t).id)}
+    t=t+1}
+  result.ok(Selection{people:people,entries:entries,dominant:dominant})
+}
+
+// Per-frame People Mask for a person chosen by face: in each frame the track whose mask covers the
+// chosen person's face box (the sighting nearest in time, within 1.5 s) with at least a quarter of
+// it; when the face is not seen or no mask covers it, the previously chosen track stays while it is
+// present, otherwise the frame is empty. `first_frame` is the part's first frame at `fps`.
+pub fn select_for_pick(tracks:ref<array<sam_tracks.Track>>,frames:u64,width:u64,height:u64,
+    chosen:ref<pick.Pick>,fps:u64,first_frame:u64) -> result<Selection,string>
+    effects {alloc,fs.read} {
+  let plane:u64=width*height
+  var people:array<byte> = array.new()
+  var entries:array<SelectionEntry> = array.new()
+  var counts:array<u64> = array.new()
+  var t:u64=0
+  loop {if t>=array.len(tracks){break}
+    array.push(counts,0)
+    t=t+1}
+  var previous:u64=18446744073709551615
+  var frame:u64=0
+  loop {if frame>=frames{break}
+    let seconds:f64=cast.float(first_frame+frame)/cast.float(fps)
+    var pick_track:u64=18446744073709551615
+    match pick.nearest(chosen,seconds,1.5){
+      some(sighting)=>{
+        var best:f64=0.25
+        var index:u64=0
+        loop {if index>=array.len(tracks){break}
+          if pick.present(array.borrow(tracks,index),frame){
+            let share=try pick.coverage(str.view(struct.borrow(array.borrow(tracks,index),field=raw)),
+              frame,width,height,chosen,sighting)
+            if share>=best{best=share
+              pick_track=index}
+          }
+          index=index+1}
+      },
+      none=>{},
+    }
+    if pick_track==18446744073709551615 and previous!=18446744073709551615 and
+       pick.present(array.borrow(tracks,previous),frame){pick_track=previous}
+    if pick_track==18446744073709551615{
+      var k:u64=0
+      loop {if k>=plane{break}
+        array.push(people,bv(0))
+        k=k+1}
+      array.push(entries,SelectionEntry{frame:frame,track_id:-1})
+    } else {
+      let data=match ranges.read_file_range(struct.borrow(array.borrow(tracks,pick_track),
+          field=raw),frame*plane,plane){ok(value)=>value,err(message)=>{return result.err(message)}}
+      if view.len(bytes.view(data))!=plane {
+        return result.err("SAM 3 track file is shorter than its frames")}
+      var k:u64=0
+      loop {if k>=plane{break}
+        array.push(people,view.get(bytes.view(data),k))
+        k=k+1}
+      previous=pick_track
+      array.set(counts,pick_track,array.get(counts,pick_track)+1)
+      array.push(entries,SelectionEntry{frame:frame,track_id:cast.wrap(
+        array.borrow(tracks,pick_track).id)})
+    }
+    frame=frame+1}
+  var dominant:i64=-1
+  var most:u64=0
+  t=0
+  loop {if t>=array.len(tracks){break}
+    if array.get(counts,t)>most {most=array.get(counts,t)
       dominant=cast.wrap(array.borrow(tracks,t).id)}
     t=t+1}
   result.ok(Selection{people:people,entries:entries,dominant:dominant})
@@ -1263,6 +1332,14 @@ pub fn track_sam3cpp(job:ref<Job>,prepared:ref<PartFiles>)
 // manifest, from any tracker's tracks for prepared.part_rgb.
 pub fn finish(job:ref<Job>,prepared:ref<PartFiles>,tracks:ref<array<sam_tracks.Track>>,
     tracker:str) -> result<Manifest,string> effects {alloc,fs.meta,fs.read,fs.write,gpu,process} {
+  let nobody=pick.none()
+  finish_pick(job,prepared,tracks,tracker,nobody)
+}
+
+// finish for a person chosen by face (an empty pick is the main-person choice of finish).
+pub fn finish_pick(job:ref<Job>,prepared:ref<PartFiles>,tracks:ref<array<sam_tracks.Track>>,
+    tracker:str,chosen_person:ref<pick.Pick>) -> result<Manifest,string>
+    effects {alloc,fs.meta,fs.read,fs.write,gpu,process} {
   let preset=struct.borrow(job,field=preset)
   let root=struct.borrow(prepared,field=root)
   let fps:u64=preset.fps
@@ -1285,9 +1362,14 @@ pub fn finish(job:ref<Job>,prepared:ref<PartFiles>,tracks:ref<array<sam_tracks.T
   loop {if index>=array.len(tracks){break}
     array.push(infos,track_info(array.borrow(tracks,index),width,height,frames))
     index=index+1}
-  var chosen_frames=try select_per_frame(tracks,frames,width,height,
-    preset.selection_switch_area_factor,preset.selection_min_iou)
-  if chosen_frames.dominant<0 {return result.err("SAM 3 found no instance to replace")}
+  var chosen_frames=if pick.chosen(chosen_person) {
+    try select_for_pick(tracks,frames,width,height,chosen_person,fps,prepared.part.first_frame)
+  } else {
+    try select_per_frame(tracks,frames,width,height,
+      preset.selection_switch_area_factor,preset.selection_min_iou)
+  }
+  if chosen_frames.dominant<0 {return result.err(if pick.chosen(chosen_person) {
+    "SAM 3.1 did not find the chosen person"} else {"SAM 3 found no instance to replace"})}
   let people_raw=path.join(root,"people-mask.gray")
   let _=try write_raw(str.view(people_raw),array.view(struct.borrow(chosen_frames,field=people)))
   let people=try read_exact(str.view(people_raw),frames*plane,
@@ -1491,6 +1573,16 @@ pub fn run_with_backend(job:ref<Job>,
   var prepared=try prepare_part(job)
   var tracks=try track_external(job,prepared,backend)
   finish(job,prepared,tracks,name)
+}
+
+// run_with_backend for a person chosen by face.
+pub fn run_with_backend_pick(job:ref<Job>,
+    backend:fn(ref<TrackRequest>) -> result<unit,string> effects {alloc,fs.meta,fs.read,fs.write,gpu},
+    name:str,chosen_person:ref<pick.Pick>) -> result<Manifest,string>
+    effects {alloc,fs.meta,fs.read,fs.write,gpu,process} {
+  var prepared=try prepare_part(job)
+  var tracks=try track_external(job,prepared,backend)
+  finish_pick(job,prepared,tracks,name,chosen_person)
 }
 
 // Run the job and write <output_dir>/manifest.json; returns the manifest path.
