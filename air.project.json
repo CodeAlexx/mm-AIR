@@ -294,7 +294,7 @@
       "version": ">=0.1.0"
     },
     "relayvsr": {
-      "path": "../AIR-relayvsr/toolkits/relayvsr",
+      "path": "../AIR/toolkits/relayvsr",
       "version": ">=0.1.0"
     },
     "qwenimage21": {

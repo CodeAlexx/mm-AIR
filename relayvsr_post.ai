@@ -96,13 +96,46 @@ pub fn metadata(report:ref<relay_media.Report>,model:ref<relay_session.Sources>,
     err(problem)=>result.err(codec.describe(problem))}
 }
 
+// Files beside the final output: "DONE TOTAL" per frame, and a cancel request.
+pub fn progress_path(output:str)->string effects {alloc} {
+  text.concat(output,".relayvsr.progress")
+}
+
+pub fn cancel_path(output:str)->string effects {alloc} {
+  text.concat(output,".relayvsr.cancel")
+}
+
+// "Upscaling frame 12 / 49" from a progress file's text, or empty when none.
+pub fn progress_text(contents:str)->string effects {alloc} {
+  var pieces=text.split(text.trim(contents)," ")
+  if array.len(pieces)!=2{return string.new()}
+  match text.parse_u64(array.borrow(pieces,0)){
+    some(done)=>match text.parse_u64(array.borrow(pieces,1)){
+      some(total)=>{if total==0{return string.new()}
+        text.concat("Upscaling frame ",text.concat(str.view(string.from_int(done)),
+          text.concat(" / ",str.view(string.from_int(total)))))},
+      none=>string.new()},
+    none=>string.new()}
+}
+
 pub fn run(source:str,output:str,work_root:str,value:Settings)
     ->result<Completed,string>
     effects {alloc,env,fs.meta,fs.read,fs.write,process,time,gpu} {
+  run_with(source,output,work_root,value,"","")
+}
+
+pub fn run_with(source:str,output:str,work_root:str,value:Settings,
+    progress:str,cancel:str)->result<Completed,string>
+    effects {alloc,env,fs.meta,fs.read,fs.write,process,time,gpu} {
   var recorded=try sources(value.variant)
   var model_sources=try sources(value.variant)
-  var restored=try relay_media.upscale_video(source,output,work_root,model_sources,
-    request(value))
+  let options=relay_media.Options {progress_path:string.copy(progress),
+    cancel_path:string.copy(cancel),capture:string.new()}
+  let finished=relay_media.upscale_video_with(source,output,work_root,model_sources,
+    request(value),options)
+  if str.len(progress)>0{let _=files.remove(progress)}
+  if str.len(cancel)>0{let _=files.remove(cancel)}
+  var restored=try finished
   var encoded=try metadata(restored,recorded,value)
   let sidecar=sidecar_path(output)
   match files.write_atomic(str.view(sidecar),text.concat(str.view(sidecar),".tmp"),

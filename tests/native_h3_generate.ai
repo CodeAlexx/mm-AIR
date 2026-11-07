@@ -2,6 +2,7 @@
 // Usage: native-h3-generate PARAMETERS.json; model roots use the app environment.
 module app.mm_air.tests.native_h3_generate
 import "../generate.ai" as generation
+import "../relayvsr_post.ai" as relayvsr_post
 import "../parameters.ai" as parameters
 import std.channel as channel
 import std.files as files
@@ -39,6 +40,12 @@ pub fn main(args:view<str>)->i32
     io.ewrite(p)
     let _=channel.close(receiver)
     return 2},}
+  // MM_AIR_RELAYVSR_POST=2x|4x runs the Generate tab's RelayVSR post-process (Native size, audio kept).
+  match env.get("MM_AIR_RELAYVSR_POST"){some(choice)=>{
+    match generation.enable_relayvsr(job,relayvsr_post.settings(if choice=="4x"{1}else{0},0,true,42)){
+      ok(_)=>{},err(problem)=>{io.ewrite(problem)
+        let _=channel.close(receiver)
+        return 2},}},none=>{},}
   match env.get("MM_AIR_H3_REFERENCE_MATCH"){some(_)=>{generation.enable_reference_video_match(job)},none=>{},}
   var code:i32=1
   if movie_mode{

@@ -579,6 +579,8 @@ pub type Job = struct {
   relayvsr_enabled:bool,
   relayvsr_settings:relayvsr_post.Settings,
   relayvsr_final_output:string,
+  relayvsr_progress_path:string,
+  relayvsr_cancel_path:string,
   // Long Ref2VA, Video Swap and guide edits: overlapping windows in one process (std.inference.h3.v2v).
   windows: v2v.Settings,
   progress: channel.Ticket
@@ -841,6 +843,8 @@ pub fn job_loras(configuration: ref<Configuration>, prompt: str,
     relayvsr_enabled:false,
     relayvsr_settings:relayvsr_post.settings(0,0,true,0),
     relayvsr_final_output:string.new(),
+    relayvsr_progress_path:string.new(),
+    relayvsr_cancel_path:string.new(),
     windows: v2v.Settings {window_frames: struct.borrow(configuration, field=presets).rolling_window_frames,
       overlap_frames: 22, min_final_frames: 0, carry: true, tile_width: 0, tile_height: 0, tile_overlap: 0,
       crop_pictures: false, tile_audio: v2v.TileAudio.FirstTile, tile_carry: v2v.TileCarry.OwnTile,
@@ -904,6 +908,10 @@ pub fn enable_relayvsr(job:ref<Job>,settings:relayvsr_post.Settings)
   let final_output=string.copy(struct.borrow(job,field=output))
   let source_output=text.concat(str.view(final_output),".pre-relayvsr.mp4")
   let _=ref.swap(struct.borrow(job,field=output),source_output)
+  let _=ref.swap(struct.borrow(job,field=relayvsr_progress_path),
+    relayvsr_post.progress_path(str.view(final_output)))
+  let _=ref.swap(struct.borrow(job,field=relayvsr_cancel_path),
+    relayvsr_post.cancel_path(str.view(final_output)))
   let _=ref.swap(struct.borrow(job,field=relayvsr_final_output),final_output)
   struct.set(job,settings,field=relayvsr_settings)
   struct.set(job,true,field=relayvsr_enabled)
@@ -1149,8 +1157,10 @@ fn apply_relayvsr(job:ref<Job>,generated:Outcome own,
   report(sender,if job.relayvsr_settings.variant==1{
     "Loading RelayVSR 4x"}else{"Loading RelayVSR 2x"})
   report(sender,"Upscaling generated video")
-  match relayvsr_post.run(str.view(source),str.view(final_output),
-      struct.borrow(job,field=scratch_root),job.relayvsr_settings){
+  match relayvsr_post.run_with(str.view(source),str.view(final_output),
+      struct.borrow(job,field=scratch_root),job.relayvsr_settings,
+      str.view(struct.borrow(job,field=relayvsr_progress_path)),
+      str.view(struct.borrow(job,field=relayvsr_cancel_path))){
     ok(completed)=>{
       var held=completed
       outcome(true,struct.borrow(held,field=final_output),

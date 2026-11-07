@@ -67,6 +67,8 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,fs.read,io.write,net,time} {
   require(job.relayvsr_enabled and not job.seedvr2_enabled,"only RelayVSR enabled")
   require(job.output=="/tmp/final.mp4.pre-relayvsr.mp4","retained pre-upscale MP4")
   require(job.relayvsr_final_output=="/tmp/final.mp4","final output kept")
+  require(job.relayvsr_cancel_path=="/tmp/final.mp4.relayvsr.cancel" and
+    job.relayvsr_progress_path=="/tmp/final.mp4.relayvsr.progress","job carries progress and cancel files")
   require(job.relayvsr_settings.variant==1 and job.relayvsr_settings.seed==12,
     "settings reach the job")
   let _=channel.close(receiver)
@@ -98,6 +100,11 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,fs.read,io.write,net,time} {
   require(text.contains(view_text,"\"runtime_ms\":1234"),"runtime")
   require(text.contains(view_text,"\"peak_vram_bytes\":5678"),"peak vram")
   require(relayvsr.sidecar_path("/a/b.mp4")=="/a/b.mp4.relayvsr.json","sidecar name")
+  require(relayvsr.progress_path("/a/b.mp4")=="/a/b.mp4.relayvsr.progress","progress file name")
+  require(relayvsr.cancel_path("/a/b.mp4")=="/a/b.mp4.relayvsr.cancel","cancel file name")
+  require(relayvsr.progress_text("12 49\n")=="Upscaling frame 12 / 49","progress text")
+  require(relayvsr.progress_text("")=="" and relayvsr.progress_text("3 0")=="" and
+    relayvsr.progress_text("x y")=="","bad progress text is empty")
   io.write("MM-Air RelayVSR adapter mapping, handoff and sidecar: PASS\n")
   0
 }

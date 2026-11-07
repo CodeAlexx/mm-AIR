@@ -1656,6 +1656,7 @@ pub fn main(args: view<str>) -> i32
   var seedvr2_memory:u32=0
   var seedvr2_fast:bool=false
   var relayvsr_active:bool=false
+  var relayvsr_progress_file:string=string.new()
   var relayvsr_variant:u32=0
   var relayvsr_size:u32=0
   var prompt_state = prompt_session.create(prompt_types.ModelChoice.Qwen3VL4B)
@@ -2333,8 +2334,18 @@ pub fn main(args: view<str>) -> i32
             if movie_generation_active{
               let _=desk.set_text(session,"movie_runtime",text.concat("H3 take · ",
                 text.concat(str.view(string.from_int(elapsed))," s")))}
+            if str.len(str.view(relayvsr_progress_file))>0{
+              match files.read_text(str.view(relayvsr_progress_file)){
+                ok(contents)=>{
+                  let line=relayvsr_post.progress_text(str.view(contents))
+                  if str.len(str.view(line))>0{
+                    generation_status(session,str.view(line))
+                    let _=desk.set_text(session,"gen_run_state",str.view(line))}},
+                err(_)=>{},}
+            }
             match task.wait_any(generations, 0) {
               some(_) => {
+                relayvsr_progress_file=string.new()
                 var completed: generation.Outcome = task.join(
                   option.unwrap(array.pop(generations)))
                 match array.pop(progress_receivers) {
@@ -7358,7 +7369,11 @@ pub fn main(args: view<str>) -> i32
                     let relay_settings=relayvsr_post.settings(relayvsr_variant,
                       relayvsr_size,seedvr2_audio,seedvr2_seed)
                     match generation.enable_relayvsr(job,relay_settings){
-                      ok(_)=>{},err(message)=>{generation_status(session,str.view(message))
+                      ok(_)=>{
+                        relayvsr_progress_file=string.copy(
+                          struct.borrow(job,field=relayvsr_progress_path))
+                        let _=files.remove(str.view(relayvsr_progress_file))
+                        let _=files.remove(str.view(struct.borrow(job,field=relayvsr_cancel_path)))},err(message)=>{generation_status(session,str.view(message))
                         continue},
                     }
                   } else if seedvr2_enabled and seedvr2_run_after {
