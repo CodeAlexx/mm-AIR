@@ -33,6 +33,8 @@ import "sam31_mask.ai" as sam31_mask
 import "masked_edit.ai" as masked_edit
 import "video_swap.ai" as video_swap
 import "face_fix.ai" as face_fix
+import "people.ai" as people
+import "pick.ai" as pick
 import "outpaint.ai" as outpaint
 import "outpaint_runtime.ai" as outpaint_runtime
 import "repair_runtime.ai" as repair_runtime
@@ -1510,6 +1512,9 @@ pub fn main(args: view<str>) -> i32
   var edit_mask_path: string = string.new()
   var edit_auto_mask_prompt:string=string.copy("person")
   var edit_auto_mask_started:u64=0
+  var edit_people_picks:array<pick.Pick> = array.new()
+  var edit_people_thumbs:array<string> = array.new()
+  var edit_person:u64=0
   var edit_manual_mask: bool = false
   var edit_mask_x: f64 = 0.0
   var edit_mask_y: f64 = 0.0
@@ -1703,6 +1708,7 @@ pub fn main(args: view<str>) -> i32
     var prompt_jobs: array<task<prompt_lab.Outcome>> = array.new()
     var auto_mask_jobs:array<task<auto_mask.Outcome>> = array.new()
     var video_swap_jobs:array<task<video_swap.Outcome>> = array.new()
+    var people_jobs:array<task<people.Found>> = array.new()
     var progress_receivers: array<channel.Receiver> = array.new()
     match desk.connect(session) {
       err(problem) => { result_code = fail(problem) },
@@ -2225,6 +2231,28 @@ pub fn main(args: view<str>) -> i32
                     struct.borrow(completed,field=manifest))
                 }else{generation_notification("MM-Air Video Swap masks failed",
                   struct.borrow(completed,field=message))}
+              },none=>{},
+            }
+          }
+          if array.len(people_jobs)!=0{
+            match task.wait_any(people_jobs,0){
+              some(_)=>{
+                var found=task.join(option.unwrap(array.pop(people_jobs)))
+                let _=desk.set_bool(session,"edit_find_people","sensitive",true)
+                edit_people_picks=array.new()
+                edit_people_thumbs=array.new()
+                edit_person=0
+                if found.succeeded and array.len(struct.borrow(found,field=picks))>=2{
+                  edit_people_picks=struct.replace(found,array.new(),field=picks)
+                  edit_people_thumbs=struct.replace(found,array.new(),field=thumbs)
+                  show_path_gallery(session,"edit_people",edit_people_thumbs)
+                  let _=desk.set_bool(session,"edit_people","visible",true)
+                  let _=desk.set_text(session,"edit_people_status",
+                    text.concat(struct.borrow(found,field=message)," · person 1"))
+                }else{
+                  let _=desk.set_bool(session,"edit_people","visible",false)
+                  let _=desk.set_text(session,"edit_people_status",struct.borrow(found,field=message))
+                }
               },none=>{},
             }
           }
@@ -2991,6 +3019,12 @@ pub fn main(args: view<str>) -> i32
                       }
                       edit_position=0.0
                       edit_playing=edit_source_video
+                      edit_people_picks=array.new()
+                      edit_people_thumbs=array.new()
+                      edit_person=0
+                      let _=desk.set_bool(session,"edit_people_box","visible",edit_source_video)
+                      let _=desk.set_bool(session,"edit_people","visible",false)
+                      let _=desk.set_text(session,"edit_people_status","")
                       edit_showing_result=false
                       edit_brush_points=[]
                       edit_manual_mask=false
@@ -3267,6 +3301,12 @@ pub fn main(args: view<str>) -> i32
             continue
           }
           if kind == "select" or kind == "activate" {
+            if id=="edit_people"{
+              edit_person=match text.parse_u64(desk.field(event,"value")){some(value)=>value,none=>0}
+              let _=desk.set_text(session,"edit_people_status",text.concat("Person ",
+                str.view(string.from_int(edit_person+1))))
+              continue
+            }
             if id=="qwen_edit_references"{
               qwen_edit_selected=match text.parse_u64(desk.field(event,"value")){
                 some(value)=>value,none=>0}
@@ -4980,6 +5020,20 @@ pub fn main(args: view<str>) -> i32
               }
               continue
             }
+            if id=="edit_find_people"{
+              if array.len(people_jobs)!=0{continue}
+              if str.len(str.view(edit_source))==0 or not edit_source_video{
+                let _=desk.set_text(session,"edit_people_status","Load a video first")
+                continue
+              }
+              let work=path.join(system.temp_directory(),text.concat("mm-air-people-",
+                str.view(string.from_int(time.monotonic_ns()))))
+              array.push(people_jobs,task.spawn(people.Request{source:string.copy(str.view(edit_source)),
+                work_dir:work},fn=people.find))
+              let _=desk.set_bool(session,"edit_find_people","sensitive",false)
+              let _=desk.set_text(session,"edit_people_status","Finding people")
+              continue
+            }
             if id=="edit_auto_mask" and video_swap.is_mode(edit_mode){
               if array.len(video_swap_jobs)!=0{
                 let _=desk.set_text(session,"edit_status","Video Swap masks are already being made")
@@ -5002,7 +5056,13 @@ pub fn main(args: view<str>) -> i32
                 offset_seconds:if vs_part==0 {0.0} else {vs_start},
                 motion_index:vs_motion_index,edit_source_index:vs_source_index}
               edit_auto_mask_started=time.monotonic_ns()
-              array.push(video_swap_jobs,task.spawn(request,fn=video_swap.run))
+              if edit_person<array.len(edit_people_picks){
+                var picked=video_swap.PickedRequest{request:request,
+                  person:pick.copy(array.borrow(edit_people_picks,edit_person))}
+                array.push(video_swap_jobs,task.spawn(picked,fn=video_swap.run_picked))
+              }else{
+                array.push(video_swap_jobs,task.spawn(request,fn=video_swap.run))
+              }
               let _=desk.set_bool(session,"edit_auto_mask","sensitive",false)
               let _=desk.set_text(session,"edit_status","Video Swap: tracking the main person, building the mask and the grey mannequin")
               continue
@@ -5032,12 +5092,23 @@ pub fn main(args: view<str>) -> i32
                 raw_output:raw,preview_output:preview,frames:mask_frames,
                 still:not edit_source_video}
               edit_auto_mask_started=time.monotonic_ns()
-              array.push(auto_mask_jobs,task.spawn(work,fn=sam31_mask.run))
+              if edit_source_video and edit_person<array.len(edit_people_picks){
+                var picked=sam31_mask.PickedJob{job:work,
+                  person:pick.copy(array.borrow(edit_people_picks,edit_person))}
+                array.push(auto_mask_jobs,task.spawn(picked,fn=sam31_mask.run_picked))
+              }else{
+                array.push(auto_mask_jobs,task.spawn(work,fn=sam31_mask.run))
+              }
               let _=desk.set_bool(session,"edit_auto_mask","sensitive",false)
               let _=desk.set_text(session,"edit_status","SAM 3.1 · finding the subject")
               continue
             }
             if id == "edit_clear" {
+              edit_people_picks=array.new()
+              edit_people_thumbs=array.new()
+              edit_person=0
+              let _=desk.set_bool(session,"edit_people_box","visible",false)
+              let _=desk.set_bool(session,"edit_people","visible",false)
               edit_source=string.new()
               edit_mask_path=string.new()
               edit_manual_mask=false

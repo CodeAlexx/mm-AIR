@@ -7,6 +7,7 @@ module app.mm_air.sam31_mask
 import ".air/deps/sam3/mask.ai" as auto_mask
 import ".air/deps/sam3/tracks.ai" as sam_tracks
 import ".air/deps/sam31/video.ai" as sam31
+import "pick.ai" as pick
 import std.files as files
 import std.media as media
 import std.path as path
@@ -65,6 +66,15 @@ fn read_plane(file:ref<File>,frame:u64,plane:u64)->result<bytes,string>
   result.ok(raw)
 }
 
+fn none_present(frames:u64)->array<bool> effects{alloc}{
+  var out:array<bool> = array.new()
+  var frame:u64=0
+  loop{if frame>=frames{break}
+    array.push(out,false)
+    frame=frame+1}
+  out
+}
+
 fn present_frames(track:ref<sam_tracks.Track>,frames:u64)->array<bool> effects{alloc}{
   var present:array<bool> = array.new()
   var frame:u64=0
@@ -82,8 +92,8 @@ fn present_frames(track:ref<sam_tracks.Track>,frames:u64)->array<bool> effects{a
 // Union of every track on every tracked frame, streamed to `sink` one plane per frame.
 // A still is tracked on a few repeated frames; only the last tracked plane is kept and
 // written `repeat` times.
-fn merge_tracks(tracks:ref<array<sam_tracks.Track>>,first:u64,frames:u64,plane:u64,repeat:u64,
-    raw_output:str)->result<unit,string> effects{alloc,fs.meta,fs.read,fs.write}{
+fn merge_tracks(tracks:ref<array<sam_tracks.Track>>,allow:ref<array<bool>>,first:u64,frames:u64,plane:u64,
+    repeat:u64,raw_output:str)->result<unit,string> effects{alloc,fs.meta,fs.read,fs.write}{
   var files_open:array<File> = array.new()
   var present:array<array<bool>> = array.new()
   var at:u64=0
@@ -92,7 +102,8 @@ fn merge_tracks(tracks:ref<array<sam_tracks.Track>>,first:u64,frames:u64,plane:u
     var file:File=match fs.open(str.view(track.raw),mode=read){ok(value)=>value,
       err(_)=>{return result.err("SAM 3.1 mask track could not be opened")}}
     array.push(files_open,file)
-    array.push(present,present_frames(track,frames))
+    array.push(present,if array.len(allow)==0 or array.get(allow,at){present_frames(track,frames)}
+      else{none_present(frames)})
     at=at+1}
   var zero_cells:array<byte> = array.new()
   var cell:u64=0
@@ -201,6 +212,27 @@ pub fn run(job:Job own)->auto_mask.Outcome
 // replacement need not be a person); fails only when every prompt finds nothing.
 pub fn run_prompts(job:Job own,fallbacks:array<string> own)->auto_mask.Outcome
     effects{alloc,fs.meta,fs.read,fs.write,gpu,process,time}{
+  let nobody=pick.none()
+  run_prompts_pick(job,fallbacks,nobody)
+}
+
+// A job and the person chosen by face (an empty pick masks every match, as run does).
+pub type PickedJob = struct { job:Job, person:pick.Pick }
+
+pub fn run_picked(work:PickedJob own)->auto_mask.Outcome
+    effects{alloc,fs.meta,fs.read,fs.write,gpu,process,time}{
+  var held=work
+  let person=ref.swap(struct.borrow(held,field=person),pick.none())
+  let job=ref.swap(struct.borrow(held,field=job),Job{plugin:string.new(),model:string.new(),
+    sam31_model:string.new(),source:string.new(),prompt:string.new(),raw_output:string.new(),
+    preview_output:string.new(),frames:0,still:false})
+  var none:array<string> = array.new()
+  run_prompts_pick(job,none,person)
+}
+
+// run_prompts, masking only the tracks that cover the chosen person's face when `person` is set.
+pub fn run_prompts_pick(job:Job own,fallbacks:array<string> own,person:ref<pick.Pick>)->auto_mask.Outcome
+    effects{alloc,fs.meta,fs.read,fs.write,gpu,process,time}{
   var owned=job
   var prompts:array<string> = [string.copy(struct.borrow(owned,field=prompt))]
   var more=fallbacks
@@ -273,7 +305,24 @@ pub fn run_prompts(job:Job own,fallbacks:array<string> own)->auto_mask.Outcome
   if array.len(found)==0{
     let _=clean(str.view(work))
     return failed("SAM 3.1 found no match")}
-  let merged=merge_tracks(found,if still{tracked-1}else{0},tracked,plane,if still{owned.frames}else{1},
+  var allow:array<bool> = array.new()
+  if pick.chosen(person) and not still{
+    let covering=match pick.tracks_for(found,person,24.0,tracked,width,height){ok(value)=>value,
+      err(message)=>{let _=clean(str.view(work))
+        return failed(str.view(message))}}
+    if array.len(covering)==0{
+      let _=clean(str.view(work))
+      return failed("SAM 3.1 did not find the chosen person")}
+    var t:u64=0
+    loop{if t>=array.len(found){break}
+      array.push(allow,false)
+      t=t+1}
+    var c:u64=0
+    loop{if c>=array.len(covering){break}
+      array.set(allow,array.get(covering,c),true)
+      c=c+1}
+  }
+  let merged=merge_tracks(found,allow,if still{tracked-1}else{0},tracked,plane,if still{owned.frames}else{1},
     str.view(struct.borrow(owned,field=raw_output)))
   let _=clean(str.view(work))
   match merged{ok(_)=>{},err(message)=>{return failed(str.view(message))}}

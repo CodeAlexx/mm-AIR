@@ -1,0 +1,84 @@
+// Find the distinct people of a source clip by face, for "pick who to replace": Twin's detector,
+// ArcFace and tracker clustering (twin src/face/people.ai) on every half second of the clip, one
+// face thumbnail per person (largest first) and the Pick that finds that person in a mask step.
+module app.mm_air.people
+
+import ".air/deps/twin/src/face/people.ai" as twin_people
+import ".air/deps/twin/src/face/pipeline.ai" as pl
+import ".air/deps/twin/src/onnx/exec_gpu.ai" as eg
+import ".air/deps/twin/src/io/settings.ai" as twin_settings
+import ".air/deps/twin/src/io/media.ai" as twin_media
+import std.gpu as agpu
+import std.path as path
+import std.text as text
+import "pick.ai" as pick
+
+pub type Request = struct { source:string, work_dir:string }
+
+pub type Found = struct {
+  succeeded:bool,
+  message:string,
+  thumbs:array<string>,     // person-<n>.png, largest face first
+  picks:array<pick.Pick>    // the same order
+}
+
+fn failed(message:str)->Found effects{alloc}{
+  Found{succeeded:false,message:string.copy(message),thumbs:array.new(),picks:array.new()}
+}
+
+// Half-second steps, widened so a long clip is sampled at most `limit` times.
+fn step_frames(fps:f64,frames:u64,limit:u64)->u64 effects{}{
+  var step:u64=cast.sat(fps*0.5+0.5)
+  if step==0{step=1}
+  if frames>0{
+    let wide:u64=frames/limit
+    if wide>step{step=wide}
+  }
+  step
+}
+
+pub fn find(request:Request own)->Found effects{alloc,env,gpu,fs.meta,fs.read,fs.write,process,time}{
+  var held=request
+  let source=string.copy(struct.borrow(held,field=source))
+  let info=match twin_media.probe(str.view(source)){ok(value)=>value,err(message)=>{
+    return failed(str.view(message))}}
+  let fps:f64=cast.float(info.fps_num)/cast.float(info.fps_den)
+  var context:GpuContext=match agpu.open(0){ok(c)=>c,err(e)=>{return failed(e.message)}}
+  var stream:GpuStream=match agpu.compute_stream(context){ok(s)=>s,err(e)=>{return failed(e.message)}}
+  var kz:eg.Kernels=match eg.kernels(context){ok(k)=>k,err(message)=>{return failed(str.view(message))}}
+  eg.set_fast(kz,false)
+  var g:pl.Gpu=pl.Gpu{context:context,stream:stream,kz:kz,round_half:true}
+  let models_dir=twin_settings.models_dir()
+  var models:pl.Models=match pl.load_models(g,str.view(models_dir),pl.swapper_hyperswap()){ok(m)=>m,
+    err(message)=>{return failed(text.concat("Face models: ",str.view(message)))}}
+  let scanned=twin_people.scan(g,models,str.view(source),step_frames(fps,info.frames,120),0,2)
+  let _=pl.unload_models(models)
+  var found=match scanned{ok(value)=>value,err(message)=>{return failed(str.view(message))}}
+  match twin_people.write_scan(str.view(struct.borrow(held,field=work_dir)),found){ok(_)=>{},
+    err(message)=>{return failed(str.view(message))}}
+  var thumbs:array<string> = array.new()
+  var picks:array<pick.Pick> = array.new()
+  var p:u64=0
+  loop{if p>=array.len(struct.borrow(found,field=people)){break}
+    let who=array.borrow(struct.borrow(found,field=people),p)
+    array.push(thumbs,path.join(str.view(struct.borrow(held,field=work_dir)),
+      text.concat("person-",text.concat(str.view(string.from_int(who.id)),".png"))))
+    var chosen=pick.none()
+    var s:u64=0
+    loop{if s>=array.len(struct.borrow(who,field=sightings)){break}
+      let seen=array.borrow(struct.borrow(who,field=sightings),s)
+      array.push(struct.borrow(chosen,field=seconds),seen.seconds)
+      var c:u64=0
+      loop{if c>=4{break}
+        array.push(struct.borrow(chosen,field=boxes),array.get(struct.borrow(seen,field=box),c))
+        c=c+1}
+      s=s+1}
+    array.push(picks,chosen)
+    p=p+1}
+  let count=array.len(thumbs)
+  Found{succeeded:true,
+    message:if count==0{string.copy("No face found")}
+      else if count==1{string.copy("1 person")}
+      else{text.concat(str.view(string.from_int(count))," people")},
+    thumbs:thumbs,picks:picks}
+}

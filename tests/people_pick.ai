@@ -1,0 +1,54 @@
+// Pick the person to mask by face: scan the people of a clip (Twin's detector, ArcFace, tracker), then
+// mask each person alone through the SAM 3.1 step with that person's pick, plus the old text-prompt
+// mask of everyone for comparison. Raw 8-bit planes land in OUT_DIR (all.gray, person-<n>.gray) with
+// the person thumbnails; tests/people_strip.sh turns them into the mask-over-frame PNG strip.
+// usage: people_pick SAM31_MODEL SOURCE FRAMES OUT_DIR
+module app.mm_air.tests.people_pick
+
+import "../people.ai" as people
+import "../sam31_mask.ai" as sam31_mask
+import "../pick.ai" as pick
+import std.files as files
+import std.path as path
+import std.text as text
+
+fn job(model:str,source:str,raw:string own,preview:string own,frames:u64)->sam31_mask.Job effects{alloc}{
+  sam31_mask.Job{plugin:string.new(),model:string.new(),sam31_model:string.copy(model),
+    source:string.copy(source),prompt:string.copy("person"),raw_output:raw,preview_output:preview,
+    frames:frames,still:false}
+}
+
+pub fn main(args:view<str>)->i32
+    effects{alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,process,time}{
+  if view.len(args)!=5{
+    io.ewrite("usage: people_pick SAM31_MODEL SOURCE FRAMES OUT_DIR\n")
+    return 2
+  }
+  let frames:u64=match text.parse_u64(view.get(args,3)){some(v)=>v,none=>0}
+  let out=view.get(args,4)
+  let _=files.mkdirs(out)
+  var found=people.find(people.Request{source:string.copy(view.get(args,2)),work_dir:string.copy(out)})
+  io.write(text.concat(str.view(struct.borrow(found,field=message)),"\n"))
+  if not found.succeeded{return 1}
+  var p:u64=0
+  loop{if p>=array.len(struct.borrow(found,field=picks)){break}
+    io.write(text.concat("person ",text.concat(str.view(string.from_int(p))," sightings ")))
+    io.write(text.concat(str.view(string.from_int(pick.sightings(array.borrow(
+      struct.borrow(found,field=picks),p)))),"\n"))
+    p=p+1}
+  var all=sam31_mask.run(job(view.get(args,1),view.get(args,2),path.join(out,"all.gray"),
+    path.join(out,"all.mp4"),frames))
+  io.write(text.concat("all: ",text.concat(str.view(struct.borrow(all,field=message)),"\n")))
+  p=0
+  loop{if p>=array.len(struct.borrow(found,field=picks)){break}
+    let name=text.concat("person-",str.view(string.from_int(p)))
+    var work=sam31_mask.PickedJob{
+      job:job(view.get(args,1),view.get(args,2),path.join(out,text.concat(name,".gray")),
+        path.join(out,text.concat(name,".mp4")),frames),
+      person:pick.copy(array.borrow(struct.borrow(found,field=picks),p))}
+    var outcome=sam31_mask.run_picked(work)
+    io.write(text.concat(name,text.concat(": ",text.concat(
+      str.view(struct.borrow(outcome,field=message)),"\n"))))
+    p=p+1}
+  0
+}

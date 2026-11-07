@@ -127,6 +127,7 @@
         "entry": "tests/movie_drift_ab_generate.ai"
       },
       {"name": "face-fix-video", "entry": "tests/face_fix_video.ai"},
+      {"name": "people-pick", "entry": "tests/people_pick.ai"},
       {"name": "native-h3-twice", "entry": "tests/native_h3_twice.ai"},
       {"name": "native-h3-generate", "entry": "tests/native_h3_generate.ai"}
     ],
@@ -236,7 +237,7 @@
     "character_swap.ai",
     "masked_edit.ai",
     "face_fix.ai", "masked_runtime.ai", "mask_gpu.ai", "mask_kernels.ai",
-    "swap_masks.ai",
+    "swap_masks.ai", "pick.ai", "people.ai",
     "presets",
     "outpaint.ai",
     "outpaint_runtime.ai",

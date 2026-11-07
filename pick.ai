@@ -1,0 +1,123 @@
+// Pick the person to replace by face. A Pick is what the face scan (people.ai, Twin's detector,
+// ArcFace and tracker) found for one person: every time the face was seen and where, as fractions of
+// the frame. The mask steps then take the SAM 3.1 track(s) that cover that face instead of whoever
+// the text prompt "person" finds first. An empty Pick keeps the old behaviour.
+module app.mm_air.pick
+
+import std.safetensors_index as ranges
+import ".air/deps/sam3/tracks.ai" as sam_tracks
+
+pub type Pick = struct { seconds:array<f64>, boxes:array<f64> }   // boxes: x0, y0, x1, y1 per sighting
+
+pub fn none()->Pick effects{alloc}{ Pick{seconds:array.new(),boxes:array.new()} }
+
+pub fn chosen(value:ref<Pick>)->bool effects{}{ array.len(struct.borrow(value,field=seconds))!=0 }
+
+pub fn sightings(value:ref<Pick>)->u64 effects{}{ array.len(struct.borrow(value,field=seconds)) }
+
+// The sighting closest in time to `seconds`, within `tolerance` seconds.
+pub fn nearest(value:ref<Pick>,seconds:f64,tolerance:f64)->option<u64> effects{}{
+  var best:u64=0
+  var gap:f64=tolerance+1.0
+  var index:u64=0
+  loop{if index>=array.len(struct.borrow(value,field=seconds)){break}
+    let at:f64=array.get(struct.borrow(value,field=seconds),index)
+    let d:f64=if at>seconds{at-seconds}else{seconds-at}
+    if d<gap{gap=d
+      best=index}
+    index=index+1}
+  if gap<=tolerance{option.some(best)}else{option.none()}
+}
+
+pub fn present(track:ref<sam_tracks.Track>,frame:u64)->bool effects{}{
+  var index:u64=0
+  loop{if index>=array.len(struct.borrow(track,field=appearances)){break}
+    let seen=array.borrow(struct.borrow(track,field=appearances),index).frame
+    if seen==frame{return array.borrow(struct.borrow(track,field=appearances),index).area>0}
+    if seen>frame{return false}
+    index=index+1}
+  false
+}
+
+fn clamp_px(fraction:f64,size:u64)->u64 effects{}{
+  if fraction<=0.0{return 0}
+  let value:u64=cast.sat(fraction*cast.float(size))
+  if value>size{size}else{value}
+}
+
+// Share of the middle of sighting `index`'s face box (the inner 60%: box edges take in hair and
+// background) that the mask turns on at `frame`; only the box's rows are read from the track file.
+pub fn coverage(raw:str,frame:u64,width:u64,height:u64,value:ref<Pick>,index:u64)
+    ->result<f64,string> effects{alloc,fs.read}{
+  let b=struct.borrow(value,field=boxes)
+  let fx0:f64=array.get(b,index*4)
+  let fy0:f64=array.get(b,index*4+1)
+  let fx1:f64=array.get(b,index*4+2)
+  let fy1:f64=array.get(b,index*4+3)
+  let mx:f64=(fx1-fx0)*0.2
+  let my:f64=(fy1-fy0)*0.2
+  let x0=clamp_px(fx0+mx,width)
+  let x1=clamp_px(fx1-mx,width)
+  let y0=clamp_px(fy0+my,height)
+  let y1=clamp_px(fy1-my,height)
+  if x1<=x0 or y1<=y0{return result.ok(0.0)}
+  let plane:u64=width*height
+  let rows=y1-y0
+  let data=match ranges.read_file_range(raw,frame*plane+y0*width,rows*width){ok(v)=>v,
+    err(message)=>{return result.err(message)}}
+  let view_data=bytes.view(data)
+  if view.len(view_data)!=rows*width{return result.err("SAM track file is shorter than its frames")}
+  var on:u64=0
+  var row:u64=0
+  loop{if row>=rows{break}
+    var x:u64=x0
+    loop{if x>=x1{break}
+      let pixel:u8=cast.bits(view.get(view_data,row*width+x))
+      if pixel>=128{on=on+1}
+      x=x+1}
+    row=row+1}
+  result.ok(cast.float(on)/cast.float((x1-x0)*(y1-y0)))
+}
+
+// Indexes of the tracks that are the chosen person: a track's score is its summed coverage of the
+// face box over every sighting that falls on a frame it is present in (`fps` frames per second from
+// the start of the tracked frames); tracks scoring at least a third of the best are kept (SAM may
+// split one person over several ids). Empty when no track covers the face.
+pub fn tracks_for(tracks:ref<array<sam_tracks.Track>>,value:ref<Pick>,fps:f64,frames:u64,
+    width:u64,height:u64)->result<array<u64>,string> effects{alloc,fs.read}{
+  var scores:array<f64> = array.new()
+  var best:f64=0.0
+  var t:u64=0
+  loop{if t>=array.len(tracks){break}
+    var score:f64=0.0
+    var s:u64=0
+    loop{if s>=sightings(value){break}
+      let frame:u64=cast.sat(array.get(struct.borrow(value,field=seconds),s)*fps+0.5)
+      if frame<frames and present(array.borrow(tracks,t),frame){
+        score=score+(try coverage(str.view(struct.borrow(array.borrow(tracks,t),field=raw)),
+          frame,width,height,value,s))}
+      s=s+1}
+    array.push(scores,score)
+    if score>best{best=score}
+    t=t+1}
+  var out:array<u64> = array.new()
+  if best<=0.0{return result.ok(out)}
+  t=0
+  loop{if t>=array.len(scores){break}
+    if array.get(scores,t)*3.0>=best{array.push(out,t)}
+    t=t+1}
+  result.ok(out)
+}
+
+pub fn copy(value:ref<Pick>)->Pick effects{alloc}{
+  var out=none()
+  var index:u64=0
+  loop{if index>=array.len(struct.borrow(value,field=seconds)){break}
+    array.push(struct.borrow(out,field=seconds),array.get(struct.borrow(value,field=seconds),index))
+    index=index+1}
+  index=0
+  loop{if index>=array.len(struct.borrow(value,field=boxes)){break}
+    array.push(struct.borrow(out,field=boxes),array.get(struct.borrow(value,field=boxes),index))
+    index=index+1}
+  out
+}

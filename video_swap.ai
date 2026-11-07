@@ -5,6 +5,7 @@
 module app.mm_air.video_swap
 
 import "swap_masks.ai" as swap_masks
+import "pick.ai" as pick
 import ".air/deps/sam31/video.ai" as sam31
 import std.files as files
 import std.path as path
@@ -61,6 +62,26 @@ fn failed(message:str) -> Outcome effects {alloc} {
 // Runs on a worker task: tracking, masks, mannequin and preview, then the manifest.
 pub fn run(request:Request own) -> Outcome
     effects {alloc,ffi,fs.meta,fs.read,fs.write,gpu,process} {
+  let nobody=pick.none()
+  run_pick(request,nobody)
+}
+
+// A request and the person chosen by face (an empty pick tracks the main person as run does).
+pub type PickedRequest = struct { request:Request, person:pick.Pick }
+
+pub fn run_picked(job:PickedRequest own) -> Outcome
+    effects {alloc,ffi,fs.meta,fs.read,fs.write,gpu,process} {
+  var held=job
+  let moved=ref.swap(struct.borrow(held,field=person),pick.none())
+  let request=ref.swap(struct.borrow(held,field=request),Request{plugin:string.new(),model:string.new(),
+    preset_file:string.new(),sam31_model:string.new(),source:string.new(),output_dir:string.new(),
+    prompt:string.new(),margin_index:0,part_index:0,part_seconds:0.0,offset_seconds:0.0,
+    motion_index:0,edit_source_index:0})
+  run_pick(request,moved)
+}
+
+pub fn run_pick(request:Request own,person:ref<pick.Pick>) -> Outcome
+    effects {alloc,ffi,fs.meta,fs.read,fs.write,gpu,process} {
   var held=request
   var preset=match swap_masks.load_preset(str.view(struct.borrow(held,field=preset_file))) {
     ok(value)=>value, err(message)=>{return failed(str.view(message))},}
@@ -87,7 +108,7 @@ pub fn run(request:Request own) -> Outcome
   if use_sam31 {
     let _old_model=ref.swap(struct.borrow(job,field=model),string.copy(struct.borrow(held,field=sam31_model)))
   }
-  let manifest_path=match if use_sam31 {write_with_sam31(job)} else {swap_masks.run_and_write(job)} {
+  let manifest_path=match if use_sam31 {write_with_sam31_pick(job,person)} else {swap_masks.run_and_write(job)} {
     ok(value)=>value, err(message)=>{return failed(str.view(message))},}
   let source=match files.read_text(str.view(manifest_path)) {ok(value)=>value,
     err(_)=>{return failed("Cannot read the swap-mask manifest")},}
@@ -120,7 +141,13 @@ fn sam31_backend(request:ref<swap_masks.TrackRequest>) -> result<unit,string>
 
 pub fn write_with_sam31(job:ref<swap_masks.Job>) -> result<string,string>
     effects {alloc,fs.meta,fs.read,fs.write,gpu,process} {
-  var manifest=try swap_masks.run_with_backend(job,sam31_backend,swap_masks.sam31_tracker())
+  let nobody=pick.none()
+  write_with_sam31_pick(job,nobody)
+}
+
+pub fn write_with_sam31_pick(job:ref<swap_masks.Job>,person:ref<pick.Pick>) -> result<string,string>
+    effects {alloc,fs.meta,fs.read,fs.write,gpu,process} {
+  var manifest=try swap_masks.run_with_backend_pick(job,sam31_backend,swap_masks.sam31_tracker(),person)
   let encoded=try swap_masks.encode_manifest(manifest)
   let target=path.join(struct.borrow(job,field=output_dir),"manifest.json")
   match files.write_text(str.view(target),str.view(encoded)) {ok(_)=>{},
