@@ -20,7 +20,7 @@ fn fail(message:str)->i32 effects{io.write}{
 
 fn run_take(configuration:ref<generation.Configuration>,output:str,
             context_path:str)->generation.Outcome
-    effects{alloc,fs.meta,fs.read,fs.write,gpu,net,process,time}{
+    effects{alloc,env,fs.meta,fs.read,fs.write,gpu,net,process,time}{
   let geometry=match media.geometry(120,256,256){ok(value)=>value,
     err(problem)=>{var held=problem
       return generation.Outcome{succeeded:false,output:string.copy(output),

@@ -80,7 +80,7 @@ fn reorder() -> unit effects {alloc,io.write} {
 }
 
 pub fn main(args: view<str>) -> i32
-    effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process} {
+    effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
   if view.len(args) < 2 or view.len(args) > 4 {
     io.ewrite("usage: library TEST_DIR [EXISTING_VIDEO.mp4] [EXISTING_AUDIO]\n")
     return 2

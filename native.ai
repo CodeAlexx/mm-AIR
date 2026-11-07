@@ -733,7 +733,7 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write
           err(problem)=>{w.set_text(ui,w.find(ui,20),problem.message)
             continue},}
         var work=generation.QwenImageCancelableJob{
-          job:generation.QwenImageJob{request:proposed,progress:channel.ticket(receiver)},
+          job:generation.QwenImageJob{request:proposed,progress:channel.ticket(receiver),final_width:0,final_height:0},
           cancel_path:cancel_path}
         array.push(receivers,receiver)
         array.push(cancellations,cancellation)

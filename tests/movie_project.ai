@@ -4,7 +4,7 @@ import "h3_presets_fixture.ai" as fixture
 import std.inference.h3.request as h3
 import std.text as text
 
-pub fn main(args:view<str>)->i32 effects{alloc,env,fs.meta,fs.read,fs.write,process,time}{
+pub fn main(args:view<str>)->i32 effects{alloc,env,fs.meta,fs.read,fs.write,io.write,process,time}{
   var project=movie.create()
   var presets:h3.Presets=fixture.presets()
   if movie.resolution_for_aspect(presets,1161,2048)!=5 or

@@ -17,7 +17,7 @@ fn checked(arguments:array<string> own)->unit effects {process}{
 }
 
 pub fn main(args:view<str>)->i32
-    effects {alloc,env,fs.meta,fs.read,fs.write,io.write,process,time} {
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,process,time} {
   let root=path.join(system.temp_directory(),text.concat("mm-air-masked-runtime-test-",
     str.view(string.from_int(time.monotonic_ns()))))
   match files.create_dir(str.view(root)){ok(_)=>{},err(_)=>{panic "test root"}}

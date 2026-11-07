@@ -7,7 +7,7 @@ import std.draw as draw
 pub fn main(args:view<str>)->i32 effects {alloc,io.write} {
   var request=parameters.QwenImageRequest{prompt:"A robot in a garden",seed:18446744073709551615,
     width:2048,height:2048,steps:40,scheduler:0,sampler:0,
-    source:"first.png",references:[string.copy("second.png")],output:"result.png"}
+    source:"first.png",references:[string.copy("second.png")],output:"result.png",enhance:false,loras:[]}
   var ui=w.new(900,900)
   w.begin(ui)
   let root=w.panel(ui,1,0,true,0,1,8,8)

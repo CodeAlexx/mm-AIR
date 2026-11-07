@@ -23,7 +23,7 @@ fn render(ui:ref<w.Ui>,file:str)->bool effects {alloc,ffi,fs.write,ui} {
 }
 pub fn main(args:view<str>)->i32 effects {alloc,env,ffi,fs.read,fs.meta,fs.write,io.write,ui} {
   var qwen=parameters.QwenImageRequest{prompt:"Change the daylight to sunset, preserving the subject.",
-    seed:42,width:2048,height:2048,steps:40,scheduler:0,sampler:0,source:"",references:[],output:"edit.png"}
+    seed:42,width:2048,height:2048,steps:40,scheduler:0,sampler:0,source:"",references:[],output:"edit.png",enhance:false,loras:[]}
   var krea=parameters.KreaRequest{prompt:"",seed:42,width:1024,height:1024,output:"krea.png",loras:[]}
   var state=parameters.H3Parameters{request:h3.request("A cinematic landscape with natural motion and synchronized environmental audio.",0,0,3,1,2,3,42,6,[],"movie.mp4"),loras:[]}
   var presets:h3.Presets=fixture.presets()

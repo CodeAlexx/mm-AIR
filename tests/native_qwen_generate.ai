@@ -19,7 +19,7 @@ pub fn main(args:view<str>)->i32
   var receiver=match channel.open(128,1024){ok(value)=>value,
     err(_)=>{io.ewrite("Cannot open worker progress channel\n")
       return 2},}
-  var work=generation.QwenImageJob{request:request,progress:channel.ticket(receiver)}
+  var work=generation.QwenImageJob{request:request,progress:channel.ticket(receiver),final_width:0,final_height:0}
   var code:i32=1
   task.scope {
     var jobs:array<task<generation.Outcome>> = [task.spawn(work,fn=generation.run_qwen_image)]

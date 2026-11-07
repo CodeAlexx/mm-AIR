@@ -21,9 +21,9 @@ pub fn main(args:view<str>)->i32
     let _=tasks.release(token)
     return 3},}
   var request=parameters.QwenImageRequest{prompt:"A robot in a garden",seed:42,
-    width:2048,height:2048,steps:40,scheduler:0,sampler:0,source:"",references:[],output:string.copy(output)}
+    width:2048,height:2048,steps:40,scheduler:0,sampler:0,source:"",references:[],output:string.copy(output),enhance:false,loras:[]}
   var work=generation.QwenImageCancelableJob{
-    job:generation.QwenImageJob{request:request,progress:channel.ticket(receiver)},
+    job:generation.QwenImageJob{request:request,progress:channel.ticket(receiver),final_width:0,final_height:0},
     cancel_path:root}
   var code:i32=4
   var updates:u64=0
