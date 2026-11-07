@@ -4,6 +4,7 @@ import "runtime_config.ai" as config
 import "../AIR/toolkits/desktop/ui.ai" as desk
 import std.application_theme as themes
 import std.codec as codec
+import std.path as path
 import std.text as text
 
 pub type State=struct{paths:array<string>,theme:u64,accent:string,
@@ -24,7 +25,8 @@ pub fn keys()->array<string> effects{alloc}{
    "MM_AIR_H3_GUIDE_VFX_EDIT_LORA","MM_AIR_H3_GUIDE_STYLE_TRANSFER_LORA","MM_AIR_H3_GUIDE_SHARPEN_LORA",
    "MM_AIR_H3_GUIDE_MOTION_TRANSFER_LORA","MM_AIR_H3_TRAINING_ADAPTER_LORA",
    "MM_AIR_MOSS_BASE_ROOT","MM_AIR_MOSS_SFT_ROOT","MM_AIR_LORA_DIR",
-   "MM_AIR_FIBO_DEV_ROOT","MM_AIR_FIBO_EDIT_TURBO_ROOT","MM_AIR_FIBO_PIPELINE_PRESET"]
+   "MM_AIR_FIBO_DEV_ROOT","MM_AIR_FIBO_EDIT_TURBO_ROOT","MM_AIR_FIBO_PIPELINE_PRESET",
+   "MM_AIR_RELAYVSR_X2_DIR","MM_AIR_RELAYVSR_X4_DIR"]
 }
 pub fn index(id:str,browse:bool)->option<u64> effects{alloc}{
   var i:u64=0
@@ -46,6 +48,14 @@ fn configured(key:str,fallback:str)->result<string,string>
   match try config.value(key){some(value)=>result.ok(value),
     none=>result.ok(string.copy(fallback)),}
 }
+// Folder defaults for rows that ship with a known install location.
+fn default_for(index:u64)->string effects{alloc,env}{
+  match env.get("HOME"){
+    some(home)=>{if index==40{return path.join(home,"models/RelayVSR_X2")}
+      if index==41{return path.join(home,"models/RelayVSR_X4")}},
+    none=>{},}
+  string.new()
+}
 fn dimension(key:str,fallback:u64,minimum:u64,maximum:u64)->result<u64,string>
     effects{alloc,env,fs.read,fs.meta}{
   let source=try configured(key,string.from_int(fallback))
@@ -59,7 +69,7 @@ pub fn load(output:str)->result<State,string> effects{alloc,env,fs.read,fs.meta}
   var i:u64=0
   loop{if i>=array.len(names){break}
     let chosen=if i==6{try configured(array.borrow(names,i),output)}
-      else{try configured(array.borrow(names,i),"")}
+      else{try configured(array.borrow(names,i),str.view(default_for(i)))}
     array.push(paths,chosen)
     i=i+1}
   let selected=try configured("MM_AIR_THEME","0")

@@ -95,6 +95,10 @@
         "entry": "tests/seedvr2_existing_video.ai"
       },
       {
+        "name": "relayvsr-existing-video",
+        "entry": "tests/relayvsr_existing_video.ai"
+      },
+      {
         "name": "windowed-h3-generate",
         "entry": "tests/windowed_generate.ai"
       },
@@ -226,6 +230,10 @@
       {
         "name": "seedvr2-postprocess",
         "entry": "tests/seedvr2_postprocess.ai"
+      },
+      {
+        "name": "relayvsr-postprocess",
+        "entry": "tests/relayvsr_postprocess.ai"
       }
     ]
   },
@@ -243,6 +251,7 @@
     "outpaint_runtime.ai",
     "repair_runtime.ai",
     "seedvr2_post.ai",
+    "relayvsr_post.ai",
     "prompt_lab.ai",
     "library.ai",
     "parameters.ai",
@@ -282,6 +291,10 @@
     },
     "seedvr2": {
       "path": "../AIR/toolkits/seedvr2",
+      "version": ">=0.1.0"
+    },
+    "relayvsr": {
+      "path": "../AIR-relayvsr/toolkits/relayvsr",
       "version": ">=0.1.0"
     },
     "qwenimage21": {

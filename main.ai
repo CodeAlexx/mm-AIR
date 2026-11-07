@@ -42,6 +42,7 @@ import ".air/deps/h3_repair/plan.ai" as repair_plan
 import ".air/deps/h3_repair/motion.ai" as repair_motion
 import ".air/deps/h3_repair/analyze.ai" as repair_analysis
 import "seedvr2_post.ai" as seedvr2_post
+import "relayvsr_post.ai" as relayvsr_post
 import "parameters.ai" as parameters
 import "face_swap.ai" as face_swap
 import "library.ai" as library
@@ -275,6 +276,14 @@ fn show_gallery_items(session:ref<desk.Session>,id:str,
   }
   codec.end_array(command)
   let _=desk.submit(session,command)
+}
+
+// Restore / Upscale: RelayVSR shows only size, audio and seed.
+fn relayvsr_controls(session:ref<desk.Session>,relay:bool)->unit effects{alloc,net,time}{
+  let _=desk.set_bool(session,"gen_seedvr2_sizebox","visible",not relay)
+  let _=desk.set_bool(session,"gen_relayvsr_sizebox","visible",relay)
+  let _=desk.set_bool(session,"gen_seedvr2_advanced","visible",not relay)
+  ()
 }
 
 fn show_path_gallery(session:ref<desk.Session>,id:str,paths:ref<array<string>>)
@@ -1646,6 +1655,9 @@ pub fn main(args: view<str>) -> i32
   var seedvr2_quality:u32=0
   var seedvr2_memory:u32=0
   var seedvr2_fast:bool=false
+  var relayvsr_active:bool=false
+  var relayvsr_variant:u32=0
+  var relayvsr_size:u32=0
   var prompt_state = prompt_session.create(prompt_types.ModelChoice.Qwen3VL4B)
   var prompt_instruction: string = string.copy("Expand this into a cinematic H3 prompt.")
   var prompt_model_index: u32 = 0
@@ -2342,6 +2354,11 @@ pub fn main(args: view<str>) -> i32
                   var completed_postprocess=match files.read_text(
                       str.view(seedvr2_sidecar)){
                     ok(value)=>value,err(_)=>string.new(),}
+                  if str.len(str.view(completed_postprocess))==0{
+                    completed_postprocess=match files.read_text(str.view(
+                        relayvsr_post.sidecar_path(struct.borrow(completed,field=output)))){
+                      ok(value)=>value,err(_)=>string.new(),}
+                  }
                   let sidecar = text.concat(struct.borrow(completed,field=output),".json")
                   match files.write_atomic(sidecar,text.concat(sidecar,text.concat(".tmp-",
                       string.from_int(time.monotonic_ns()))),running_parameters) {
@@ -3564,7 +3581,11 @@ pub fn main(args: view<str>) -> i32
               continue
             }
             if id=="gen_seedvr2_method"{
-              seedvr2_variant=cast.sat(desk.number(event,"value"))
+              let method:u32=cast.sat(desk.number(event,"value"))
+              relayvsr_active=method>=2
+              relayvsr_variant=if method>=3{1}else{0}
+              let _=relayvsr_controls(session,relayvsr_active)
+              seedvr2_variant=if relayvsr_active{0}else{method}
               if seedvr2_variant==1{
                 match seedvr2_post.sources(1){
                   ok(_)=>{},
@@ -3581,6 +3602,10 @@ pub fn main(args: view<str>) -> i32
               seedvr2_size=cast.sat(desk.number(event,"value"))
               let _=desk.set_bool(session,"gen_seedvr2_custom","sensitive",
                 seedvr2_size==2)
+              continue
+            }
+            if id=="gen_relayvsr_size"{
+              relayvsr_size=cast.sat(desk.number(event,"value"))
               continue
             }
             if id=="gen_seedvr2_width"{
@@ -3601,7 +3626,7 @@ pub fn main(args: view<str>) -> i32
                   seedvr2_seed_valid=true},
                 none=>{seedvr2_seed_valid=false
                   let _=desk.set_text(session,"status",
-                    "SeedVR2 seed must be a nonnegative integer")},
+                    "Seed must be a nonnegative integer")},
               }
               continue
             }
@@ -5881,6 +5906,11 @@ pub fn main(args: view<str>) -> i32
               seedvr2_quality=0
               seedvr2_memory=0
               seedvr2_fast=false
+              relayvsr_active=false
+              relayvsr_variant=0
+              relayvsr_size=0
+              let _=relayvsr_controls(session,false)
+              let _=desk.set_number(session,"gen_relayvsr_size","selected",0.0)
               let _=desk.set_bool(session,"gen_seedvr2_fast","active",false)
               let _=desk.set_bool(session,"gen_seedvr2_enabled","active",false)
               let _=desk.set_bool(session,"gen_seedvr2_fields","sensitive",false)
@@ -5974,7 +6004,8 @@ pub fn main(args: view<str>) -> i32
                 ok(_)=>{},
               }
               var sidecars:array<string> = [text.concat(str.view(deleting),".json"),
-                text.concat(str.view(deleting),".seedvr2.json")]
+                text.concat(str.view(deleting),".seedvr2.json"),
+                text.concat(str.view(deleting),".relayvsr.json")]
               var sidecar_index:u64=0
               loop {
                 if sidecar_index >= array.len(sidecars){break}
@@ -6669,7 +6700,7 @@ pub fn main(args: view<str>) -> i32
                 continue
               }
               if seedvr2_enabled and seedvr2_run_after and not seedvr2_seed_valid{
-                generation_status(session,"SeedVR2 seed must be a nonnegative integer")
+                generation_status(session,"Seed must be a nonnegative integer")
                 continue
               }
               if array.len(generations) != 0 and
@@ -6684,12 +6715,12 @@ pub fn main(args: view<str>) -> i32
               if seedvr2_enabled and seedvr2_run_after and
                   parameters.image_model(model_index){
                 generation_status(session,
-                  "SeedVR2 post-processing requires a generated video; the selected model outputs PNG")
+                  "Restore / Upscale requires a generated video; the selected model outputs PNG")
                 continue
               }
               if seedvr2_enabled and seedvr2_run_after and sheet{
                 generation_status(session,
-                  "Disable the character-sheet PNG preset before using SeedVR2 video post-processing")
+                  "Disable the character-sheet PNG preset before using Restore / Upscale")
                 continue
               }
               let outpaint_active:bool=(id=="edit_run" or
@@ -7323,7 +7354,14 @@ pub fn main(args: view<str>) -> i32
                     }
                     generation.enable_timing(job,timing_settings)
                   }
-                  if seedvr2_enabled and seedvr2_run_after {
+                  if seedvr2_enabled and seedvr2_run_after and relayvsr_active {
+                    let relay_settings=relayvsr_post.settings(relayvsr_variant,
+                      relayvsr_size,seedvr2_audio,seedvr2_seed)
+                    match generation.enable_relayvsr(job,relay_settings){
+                      ok(_)=>{},err(message)=>{generation_status(session,str.view(message))
+                        continue},
+                    }
+                  } else if seedvr2_enabled and seedvr2_run_after {
                     var post_settings=seedvr2_post.with_fast(seedvr2_post.settings(
                       seedvr2_variant,seedvr2_size,
                       seedvr2_width,seedvr2_height,seedvr2_audio,seedvr2_seed,

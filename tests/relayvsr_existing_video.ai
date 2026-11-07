@@ -1,0 +1,28 @@
+// Run an already-finished MM-Air video through the same native RelayVSR
+// adapter used by Generate, including its durable receipt sidecar.
+module app.mm_air.tests.relayvsr_existing_video
+
+import "../relayvsr_post.ai" as relayvsr
+import std.system as system
+
+pub fn main(args:view<str>)->i32
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,process,time} {
+  if view.len(args)<3 or view.len(args)>5 {
+    io.ewrite("usage: relayvsr-existing-video SOURCE OUTPUT [2x|4x] [same]\n")
+    return 2
+  }
+  let variant:u32=if view.len(args)>=4 and view.get(args,3)=="4x"{1}else{0}
+  let size:u32=if view.len(args)==5 and view.get(args,4)=="same"{1}else{0}
+  let selected=relayvsr.settings(variant,size,true,42)
+  match relayvsr.run(view.get(args,1),view.get(args,2),system.temp_directory(),selected) {
+    ok(value)=>{var completed=value
+      io.write("MM-Air RelayVSR existing-video delivery: PASS\n")
+      io.write(struct.borrow(completed,field=metadata))
+      io.write("\n")
+      0
+    },
+    err(message)=>{io.ewrite(str.view(message))
+      io.ewrite("\n")
+      1},
+  }
+}

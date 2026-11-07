@@ -1,0 +1,115 @@
+// Thin MM-Air adapter for the reusable AIR RelayVSR toolkit. Model execution,
+// media geometry and muxing remain in the toolkit; this file owns app settings
+// and durable sidecar spelling only.
+module app.mm_air.relayvsr_post
+import ".air/deps/relayvsr/config.ai" as config
+import ".air/deps/relayvsr/session.ai" as relay_session
+import ".air/deps/relayvsr/media.ai" as relay_media
+import "runtime_config.ai" as runtime_config
+import std.codec as codec
+import std.files as files
+import std.path as path
+import std.text as text
+
+// variant: 0 = 2x, 1 = 4x. size_mode: 0 = native scale, 1 = same size.
+pub type Settings=struct {variant:u32,size_mode:u32,preserve_audio:bool,seed:u64}
+
+pub type Completed=struct {metadata:string,source_output:string,final_output:string,
+  runtime_ms:u64,peak_vram_bytes:u64}
+
+pub fn settings(variant:u32,size_mode:u32,preserve_audio:bool,seed:u64)
+    ->Settings effects {} {
+  Settings {variant:if variant==1{1}else{0},size_mode:if size_mode==1{1}else{0},
+    preserve_audio:preserve_audio,seed:seed}
+}
+
+fn variant_of(value:u32)->config.Variant effects {} {
+  if value==1{config.Variant.X4}else{config.Variant.X2}
+}
+
+fn key_name(variant:u32)->str effects {} {
+  if variant==1{"MM_AIR_RELAYVSR_X4_DIR"}else{"MM_AIR_RELAYVSR_X2_DIR"}
+}
+
+// The configured folder, else ~/models/RelayVSR_X2 or ~/models/RelayVSR_X4.
+pub fn directory(variant:u32)->result<string,string> effects {alloc,env,fs.read,fs.meta} {
+  match try runtime_config.value(key_name(variant)){
+    some(value)=>{if str.len(str.view(value))>0{return result.ok(value)}},
+    none=>{},}
+  match env.get("HOME"){
+    some(home)=>result.ok(path.join(home,if variant==1{"models/RelayVSR_X4"}
+      else{"models/RelayVSR_X2"})),
+    none=>result.err(text.concat("Set ",key_name(variant)))}
+}
+
+pub fn sources(variant:u32)->result<relay_session.Sources,string>
+    effects {alloc,env,fs.read,fs.meta} {
+  var found=relay_session.sources_in(str.view(try directory(variant)),variant_of(variant))
+  let _=try relay_session.validate_sources(found,variant_of(variant))
+  result.ok(found)
+}
+
+// sr_ratio_milli is the output scale in thousandths of the input.
+pub fn ratio_milli(value:Settings)->u64 effects {} {
+  if value.size_mode==1{1000}else{config.native_scale(variant_of(value.variant))*1000}
+}
+
+pub fn request(value:Settings)->config.Request effects {} {
+  config.Request {variant:variant_of(value.variant),sr_ratio_milli:ratio_milli(value),
+    seed:value.seed,preserve_audio:value.preserve_audio}
+}
+
+fn size_name(value:u32)->string effects {alloc} {
+  string.copy(if value==1{"same-size"}else{"native"})
+}
+
+pub fn sidecar_path(output:str)->string effects {alloc} {
+  text.concat(output,".relayvsr.json")
+}
+
+pub fn metadata(report:ref<relay_media.Report>,model:ref<relay_session.Sources>,
+                value:Settings)->result<string,string> effects {alloc} {
+  var writer=codec.writer()
+  codec.begin_object(writer)
+  codec.field_text(writer,"schema","mm-air.relayvsr.postprocess")
+  codec.field_u64(writer,"version",1)
+  codec.field_bool(writer,"enabled",true)
+  codec.field_text(writer,"model_variant",if value.variant==1{"RelayVSR 4x"}
+    else{"RelayVSR 2x"})
+  codec.field_text(writer,"model_file",struct.borrow(model,field=wan_checkpoint))
+  codec.field_text(writer,"flash_file",struct.borrow(model,field=flash_checkpoint))
+  codec.field_text(writer,"output_size",size_name(value.size_mode))
+  codec.field_u64(writer,"scale_milli",ratio_milli(value))
+  codec.field_u64(writer,"target_width",report.width)
+  codec.field_u64(writer,"target_height",report.height)
+  codec.field_u64(writer,"frames",report.frames)
+  codec.field_u64(writer,"fps_numerator",report.fps_numerator)
+  codec.field_u64(writer,"fps_denominator",report.fps_denominator)
+  codec.field_u64(writer,"seed",report.seed)
+  codec.field_bool(writer,"preserve_audio",report.preserve_audio)
+  codec.field_text(writer,"source_generated_file",struct.borrow(report,field=source))
+  codec.field_text(writer,"final_restored_file",struct.borrow(report,field=output))
+  codec.field_u64(writer,"runtime_ms",report.runtime_ms)
+  codec.field_u64(writer,"peak_vram_bytes",report.peak_vram_bytes)
+  codec.end_object(writer)
+  match codec.finish(writer){ok(found)=>result.ok(found),
+    err(problem)=>result.err(codec.describe(problem))}
+}
+
+pub fn run(source:str,output:str,work_root:str,value:Settings)
+    ->result<Completed,string>
+    effects {alloc,env,fs.meta,fs.read,fs.write,process,time,gpu} {
+  var recorded=try sources(value.variant)
+  var model_sources=try sources(value.variant)
+  var restored=try relay_media.upscale_video(source,output,work_root,model_sources,
+    request(value))
+  var encoded=try metadata(restored,recorded,value)
+  let sidecar=sidecar_path(output)
+  match files.write_atomic(str.view(sidecar),text.concat(str.view(sidecar),".tmp"),
+      str.view(encoded)){ok(_)=>{},err(problem)=>{
+    return result.err(text.concat("RelayVSR media saved but sidecar failed: ",
+      problem.message))},}
+  result.ok(Completed {metadata:encoded,source_output:string.copy(source),
+    final_output:string.copy(output),runtime_ms:restored.runtime_ms,
+    peak_vram_bytes:restored.peak_vram_bytes})
+}

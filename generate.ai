@@ -67,6 +67,7 @@ import "outpaint.ai" as outpaint
 import "outpaint_runtime.ai" as outpaint_runtime
 import "repair_runtime.ai" as repair_runtime
 import "seedvr2_post.ai" as seedvr2_post
+import "relayvsr_post.ai" as relayvsr_post
 import "parameters.ai" as parameters
 
 fn projection_id(value:session.Projection)->u64 effects{}{
@@ -575,6 +576,9 @@ pub type Job = struct {
   seedvr2_enabled:bool,
   seedvr2_settings:seedvr2_post.Settings,
   seedvr2_final_output:string,
+  relayvsr_enabled:bool,
+  relayvsr_settings:relayvsr_post.Settings,
+  relayvsr_final_output:string,
   // Long Ref2VA, Video Swap and guide edits: overlapping windows in one process (std.inference.h3.v2v).
   windows: v2v.Settings,
   progress: channel.Ticket
@@ -834,6 +838,9 @@ pub fn job_loras(configuration: ref<Configuration>, prompt: str,
     seedvr2_enabled:false,
     seedvr2_settings:seedvr2_post.settings(0,0,0,0,true,0,0,0),
     seedvr2_final_output:string.new(),
+    relayvsr_enabled:false,
+    relayvsr_settings:relayvsr_post.settings(0,0,true,0),
+    relayvsr_final_output:string.new(),
     windows: v2v.Settings {window_frames: struct.borrow(configuration, field=presets).rolling_window_frames,
       overlap_frames: 22, min_final_frames: 0, carry: true, tile_width: 0, tile_height: 0, tile_overlap: 0,
       crop_pictures: false, tile_audio: v2v.TileAudio.FirstTile, tile_carry: v2v.TileCarry.OwnTile,
@@ -886,6 +893,20 @@ pub fn enable_seedvr2(job:ref<Job>,settings:seedvr2_post.Settings)
   let _=ref.swap(struct.borrow(job,field=seedvr2_final_output),final_output)
   struct.set(job,settings,field=seedvr2_settings)
   struct.set(job,true,field=seedvr2_enabled)
+  result.ok(())
+}
+
+pub fn enable_relayvsr(job:ref<Job>,settings:relayvsr_post.Settings)
+    ->result<unit,string> effects {alloc} {
+  if character_sheet.valid(job.character_sheet_mode){
+    return result.err("Restore / Upscale requires a video result, not a character-sheet PNG")
+  }
+  let final_output=string.copy(struct.borrow(job,field=output))
+  let source_output=text.concat(str.view(final_output),".pre-relayvsr.mp4")
+  let _=ref.swap(struct.borrow(job,field=output),source_output)
+  let _=ref.swap(struct.borrow(job,field=relayvsr_final_output),final_output)
+  struct.set(job,settings,field=relayvsr_settings)
+  struct.set(job,true,field=relayvsr_enabled)
   result.ok(())
 }
 
@@ -1115,6 +1136,36 @@ fn apply_seedvr2(job:ref<Job>,generated:Outcome own,
       "H3 generation completed and is displayed without SeedVR2; optional post-process failed: ",
       str.view(message))),
   }
+}
+
+fn apply_relayvsr(job:ref<Job>,generated:Outcome own,
+                  sender:ref<option<channel.Sender>>)->Outcome
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,net,process,time} {
+  var finished=generated
+  if not job.relayvsr_enabled or not finished.succeeded{return finished}
+  let source=string.copy(struct.borrow(finished,field=output))
+  let final_output=string.copy(struct.borrow(job,field=relayvsr_final_output))
+  report(sender,"Unloading the generation model and reclaiming its GPU context")
+  report(sender,if job.relayvsr_settings.variant==1{
+    "Loading RelayVSR 4x"}else{"Loading RelayVSR 2x"})
+  report(sender,"Upscaling generated video")
+  match relayvsr_post.run(str.view(source),str.view(final_output),
+      struct.borrow(job,field=scratch_root),job.relayvsr_settings){
+    ok(completed)=>{
+      var held=completed
+      outcome(true,struct.borrow(held,field=final_output),
+        "RelayVSR upscale completed; pre-upscale generation retained")},
+    err(message)=>outcome(true,str.view(source),text.concat(
+      "H3 generation completed and is displayed without upscaling; optional post-process failed: ",
+      str.view(message))),
+  }
+}
+
+fn apply_post(job:ref<Job>,generated:Outcome own,
+              sender:ref<option<channel.Sender>>)->Outcome
+    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,net,process,time} {
+  let restored=apply_seedvr2(job,generated,sender)
+  apply_relayvsr(job,restored,sender)
 }
 
 fn no_progress() -> channel.Ticket effects {alloc} {
@@ -2552,7 +2603,7 @@ pub fn run(source: Job own) -> Outcome
   var sender: option<channel.Sender> = option.some(connection)
   if job.outpaint {
     var finished=run_outpaint(job,sender)
-    finished=apply_seedvr2(job,finished,sender)
+    finished=apply_post(job,finished,sender)
     finish_progress(sender,finished)
     return finished
   }
@@ -2586,7 +2637,7 @@ pub fn run(source: Job own) -> Outcome
       struct.set(job,session.Projection.ConvRotI8Streaming,
         field=transformer_projection)
       var finished=run_rolling_repair(job,made,sender)
-      finished=apply_seedvr2(job,finished,sender)
+      finished=apply_post(job,finished,sender)
       finish_progress(sender,finished)
       return finished
     }
@@ -2790,7 +2841,7 @@ pub fn run(source: Job own) -> Outcome
     },
     none=>{},
   }
-  finished=apply_seedvr2(job,finished,sender)
+  finished=apply_post(job,finished,sender)
   finish_progress(sender,finished)
   finished
 }
