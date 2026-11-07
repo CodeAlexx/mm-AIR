@@ -141,6 +141,8 @@
   </object>
   <object class="GtkStringList" id="crop_strategy_list"><items><item>Fixed / Combined</item><item>Tracked · constant size</item><item>Zoomed · scale tracked</item></items></object>
   <object class="GtkStringList" id="edit_mode_list"><items><item>Image Edit</item><item>Video Edit</item><item>Character Replace · no mask</item><item>Masked Character Replace</item><item>Prompt-guided Local Edit</item><item>Video Outpaint</item><item>Repair Frames</item><item>Motion Repair</item><item>Video Swap · auto person</item></items></object>
+  <object class="GtkStringList" id="v2v_window_list"><items><item>Window 3.6 s</item><item>Window 5.2 s</item><item>Window 7.3 s</item></items></object>
+  <object class="GtkStringList" id="v2v_overlap_list"><items><item>Overlap 0.2 s</item><item>Overlap 0.9 s</item><item>Overlap 1.6 s</item></items></object>
   <object class="GtkStringList" id="edit_swap_margin_list"><items><item>Mask margin · Tight</item><item>Mask margin · Normal</item><item>Mask margin · Loose</item></items></object>
   <object class="GtkStringList" id="edit_swap_part_list"><items><item>Part to use · Whole video</item><item>Part to use · Start</item><item>Part to use · Middle</item><item>Part to use · End</item></items></object>
   <object class="GtkStringList" id="edit_swap_motion_list"><items><item>Motion reference · 512 px</item><item>Motion reference · 768 px</item><item>Motion reference · 1376 px</item></items></object>
@@ -431,6 +433,10 @@
                       <child><object class="GtkCheckButton" id="gen_swap_preserve_environment"><property name="label">Preserve original environment (prompt instruction)</property><property name="active">true</property></object></child>
                       <child><object class="GtkCheckButton" id="gen_swap_preserve_camera"><property name="label">Preserve original camera motion (prompt instruction)</property><property name="active">true</property></object></child>
                       <child><object class="GtkCheckButton" id="gen_swap_strong_identity"><property name="label">Strong identity continuity (prompt instruction)</property><property name="active">true</property></object></child>
+                      <child><object class="GtkDropDown" id="gen_v2v_window"><property name="model">v2v_window_list</property><property name="selected">1</property></object></child>
+                      <child><object class="GtkDropDown" id="gen_v2v_overlap"><property name="model">v2v_overlap_list</property><property name="selected">1</property></object></child>
+                      <child><object class="GtkCheckButton" id="gen_v2v_short"><property name="label">Short last window</property></object></child>
+                      <child><object class="GtkCheckButton" id="gen_v2v_color"><property name="label">Match colour</property></object></child>
                       <child><object class="GtkBox" id="gen_masked_fields"><property name="visible">false</property><property name="orientation">vertical</property><property name="spacing">8</property>
                         <child><object class="GtkLabel"><property name="wrap">true</property><property name="label">Target Mask / subject selection</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child>
                         <child><object class="GtkButton" id="gen_mask_choose"><property name="label">＋ Import mask image or video</property><style><class name="dashed-button"/></style></object></child>
@@ -917,6 +923,10 @@
                       </object></child>
                       <child><object class="GtkDropDown" id="edit_swap_motion"><property name="model">edit_swap_motion_list</property><property name="selected">0</property><property name="tooltip-text">Short edge of the grey-mannequin motion reference (H3 uses at most 768x1344)</property></object></child>
                       <child><object class="GtkDropDown" id="edit_swap_source"><property name="model">edit_swap_source_list</property><property name="selected">0</property><property name="tooltip-text">What H3 sees as Video 1: the part with the whole edit area greyed, or only the person</property></object></child>
+                      <child><object class="GtkDropDown" id="edit_v2v_window"><property name="model">v2v_window_list</property><property name="selected">1</property></object></child>
+                      <child><object class="GtkDropDown" id="edit_v2v_overlap"><property name="model">v2v_overlap_list</property><property name="selected">1</property></object></child>
+                      <child><object class="GtkCheckButton" id="edit_v2v_short"><property name="label">Short last window</property></object></child>
+                      <child><object class="GtkCheckButton" id="edit_v2v_color"><property name="label">Match colour</property></object></child>
                     </object></child>
                     <child><object class="GtkButton" id="edit_auto_mask"><property name="label">Auto Mask with SAM 3.1</property><style><class name="primary-action"/></style></object></child>
                     <child><object class="GtkLabel"><property name="visible">false</property><property name="label">Text-prompted local detection + video tracking. You can paint corrections afterward.</property><property name="wrap">true</property><property name="xalign">0</property><style><class name="capability-note"/></style></object></child>

@@ -30,6 +30,9 @@ import std.inference.h3.media as h3_media
 import std.inference.h3.packing as packing
 import std.inference.h3.presentation as presentation
 import std.inference.h3.reference_images as reference_images
+import std.inference.h3.reference_media as reference_media
+import std.inference.h3.pieces as h3_pieces
+import std.inference.h3.v2v as v2v
 import std.inference.h3.session as session
 import std.inference.h3.request as h3_request
 import std.inference.h3.policy as h3_policy
@@ -570,6 +573,8 @@ pub type Job = struct {
   seedvr2_enabled:bool,
   seedvr2_settings:seedvr2_post.Settings,
   seedvr2_final_output:string,
+  // Long Ref2VA, Video Swap and guide edits: overlapping windows in one process (std.inference.h3.v2v).
+  windows: v2v.Settings,
   progress: channel.Ticket
 }
 
@@ -827,7 +832,22 @@ pub fn job_loras(configuration: ref<Configuration>, prompt: str,
     seedvr2_enabled:false,
     seedvr2_settings:seedvr2_post.settings(0,0,0,0,true,0,0,0),
     seedvr2_final_output:string.new(),
+    windows: v2v.Settings {window_frames: struct.borrow(configuration, field=presets).rolling_window_frames,
+      overlap_frames: 22, min_final_frames: 0, carry: true, tile_width: 0, tile_height: 0, tile_overlap: 0,
+      crop_pictures: false, tile_audio: v2v.TileAudio.FirstTile, tile_carry: v2v.TileCarry.OwnTile,
+      color_match: false, force_pieces: false},
     progress: progress}
+}
+
+// Window and overlap in frames (17n+5), the shortest last window (0 = full windows) and colour match.
+pub fn set_windows(job: ref<Job>, window_frames: u64, overlap_frames: u64, short_last: bool, color_match: bool)
+    -> unit effects {} {
+  let windows: ref<v2v.Settings> = struct.borrow(job, field=windows)
+  struct.set(windows, window_frames, field=window_frames)
+  struct.set(windows, overlap_frames, field=overlap_frames)
+  struct.set(windows, if short_last { 22 } else { 0 }, field=min_final_frames)
+  struct.set(windows, color_match, field=color_match)
+  ()
 }
 
 // Keep the established no-LoRA constructor source-compatible for edit,
@@ -1417,9 +1437,19 @@ fn append_video_vision(
     presentations: ref<array<presentation.Reference>>,
     patches: ref<array<presentation.VisionPatches>>,
     frames: ref<VideoFrames>, has_audio: bool, video_min: u64, video_max: u64,
-    pd: presentation.Dims) -> unit effects {alloc} {
+    pd: presentation.Dims, samples: ref<array<h3_pieces.Samples>>) -> unit effects {alloc} {
   let frame_bytes: u64 = frames.width * frames.height * 3
   let sampled: u64 = (frames.frames + 11) / 12
+  // the 2 fps samples, kept for per-window presentations
+  var kept: bytes = bytes.copy(b"")
+  var kept_index: u64 = 0
+  loop {
+    if kept_index >= sampled { break }
+    let first_byte: u64 = kept_index * 12 * frame_bytes
+    bytes.append(kept, view.slice(bytes.view(struct.borrow(frames, field=pixels)), first_byte, first_byte + frame_bytes))
+    kept_index = kept_index + 1
+  }
+  array.push(samples, h3_pieces.Samples {pixels: kept, frames: sampled, width: frames.width, height: frames.height})
   var grids: array<presentation.VisionGrid> = array.new()
   var timestamps: array<f64> = array.new()
   var sample: u64 = 0
@@ -1464,7 +1494,9 @@ pub type ReferenceInputs = struct {
   rows: array<session.ReferenceRows>,
   presentations: array<presentation.Reference>,
   patches: array<presentation.VisionPatches>,
-  has_audio: bool
+  has_audio: bool,
+  // each presentation reference's Qwen sample pixels, in order (std.inference.h3.pieces)
+  samples: array<h3_pieces.Samples>
 }
 
 fn intake_failure(phase: str, source: str, detail: str) -> string
@@ -1520,6 +1552,7 @@ pub fn prepare_ref2va_inputs(
   var rows: array<session.ReferenceRows> = array.new()
   var presentations: array<presentation.Reference> = array.new()
   var patches: array<presentation.VisionPatches> = array.new()
+  var samples: array<h3_pieces.Samples> = array.new()
   // Video soundtracks are encoded after the video VAE lease is released, but
   // their destination row stays attached to the corresponding video block.
   var audio_waveforms: array<audio_encode.Waveform> = array.new()
@@ -1627,6 +1660,10 @@ pub fn prepare_ref2va_inputs(
             kind: presentation.ReferenceKind.Image, has_audio: false,
             block_timestamps: [], grids: grids})
           array.push(patches, patch)
+          var picture: bytes = bytes.copy(b"")
+          bytes.append(picture, array.view(rgb))
+          array.push(samples, h3_pieces.Samples {pixels: picture, frames: 1, width: reference_geometry.width,
+            height: reference_geometry.height})
         },
         Video => {
           intake_report(sender, "visual", visual, visual_count, source_path,
@@ -1710,7 +1747,7 @@ pub fn prepare_ref2va_inputs(
                 "video encode", source_path, problem.message)) },
           }
           append_video_vision(presentations, patches, frames, has_audio, video_min, video_max,
-            presentation.dims_of(h3_config))
+            presentation.dims_of(h3_config), samples)
           array.push(rows, session.ReferenceRows {
             geometry: packing.ReferenceGeometry {
               kind: packing.ReferenceKind.Video, latent_frames: latent_frames,
@@ -1854,6 +1891,7 @@ pub fn prepare_ref2va_inputs(
         array.push(presentations, presentation.Reference {
           kind: presentation.ReferenceKind.Audio, has_audio: true,
           block_timestamps: [], grids: []})
+        array.push(samples, h3_pieces.Samples {pixels: bytes.copy(b""), frames: 0, width: 0, height: 0})
       }
       audio_index = audio_index + 1
     }
@@ -1874,7 +1912,7 @@ pub fn prepare_ref2va_inputs(
     }
   }
   result.ok(ReferenceInputs {rows: rows, presentations: presentations,
-    patches: patches, has_audio: audio_count != 0})
+    patches: patches, has_audio: audio_count != 0, samples: samples})
 }
 
 fn clean_scratch(scratch: str) -> unit effects {alloc,fs.write} {
@@ -2118,27 +2156,37 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
         field=modulation_checkpoint), audio_modulation)
     }
     report(sender, "Denoising MiniMax-H3 in AIR")
-    if job.masked_denoise {
-      session.run_ref2va_masked_to_mp4_geometry_loras(context, stream, sources, state,
-        str.view(struct.borrow(job, field=prompt)),
-        struct.borrow(inputs, field=rows),
-        struct.borrow(inputs, field=presentations),
-        struct.borrow(inputs, field=patches),
-        array.view(struct.borrow(job, field=masked_token_weights)),
-        job.geometry, job.seed, job.conditioner_projection,
-        job.transformer_projection, job.attention, job.evaluations,
-        str.view(scratch), str.view(output_path), job.schedule_kind,
-        adapter_requests, sender)
-    } else {
-      session.run_ref2va_to_mp4_geometry_loras(context, stream, sources, state,
-        str.view(struct.borrow(job, field=prompt)),
-        struct.borrow(inputs, field=rows),
-        struct.borrow(inputs, field=presentations),
-        struct.borrow(inputs, field=patches), job.geometry, job.seed,
-        job.conditioner_projection, job.transformer_projection, job.attention,
-        job.evaluations, str.view(scratch), str.view(output_path),
-        job.schedule_kind, adapter_requests, sender)
+    var h3_config: h3_model_config.Config = match session.load_config(sources) {
+      ok(value) => value,
+      err(problem) => { var held: session.Error = problem
+        return outcome(false, str.view(output_path), str.view(session.error_message(held))) },
     }
+    // Windows (one process, weights read once; one window runs today's executor). A guide edit keeps the
+    // guide clip's soundtrack; a masked edit's composite restores the source audio itself.
+    var piece_inputs: reference_media.PieceInputs = reference_media.PieceInputs {
+      inputs: reference_images.Inputs {rows: ref.swap(struct.borrow(inputs, field=rows), array.new()),
+        references: ref.swap(struct.borrow(inputs, field=presentations), array.new()),
+        patches: ref.swap(struct.borrow(inputs, field=patches), array.new())},
+      samples: ref.swap(struct.borrow(inputs, field=samples), array.new())}
+    var no_start: option<v2v.StartLatent> = option.none()
+    var weights: array<f32> = array.new()
+    if job.masked_denoise {
+      var at: u64 = 0
+      loop {
+        if at >= array.len(struct.borrow(job, field=masked_token_weights)) { break }
+        array.push(weights, array.get(struct.borrow(job, field=masked_token_weights), at))
+        at = at + 1
+      }
+    }
+    let keep_audio: string = if job.masked_denoise { string.new() }
+      else { string.copy(str.view(struct.borrow(job, field=guide_video))) }
+    let ran: result<v2v.Report, session.Error> = v2v.run_ref2va_pieces_to_mp4_config(context, stream, sources, state,
+      str.view(struct.borrow(job, field=prompt)), piece_inputs, job.geometry, job.seed, job.conditioner_projection,
+      job.transformer_projection, job.attention, job.evaluations, str.view(scratch), str.view(output_path),
+      job.schedule_kind, adapter_requests, struct.borrow(job, field=windows), no_start,
+      array.view(weights),
+      str.view(keep_audio), sender, h3_config)
+    match ran { ok(_) => result.ok(()), err(problem) => result.err(problem) }
   }
   // Provider diagnostics and counters belong to the live context. Snapshot
   // them before teardown so a UI failure reports the real allocation boundary.
@@ -2482,286 +2530,6 @@ fn is_video_path(source:str)->bool effects{alloc}{
 // The source is cut into consecutive 24 FPS windows, each runs as an ordinary
 // Ref2VA request with the same character references, prompt and seed, and the
 // window outputs are joined in order.
-fn run_rolling_reference(job:ref<Job>,sender:ref<option<channel.Sender>>)->Outcome
-    effects{alloc,env,fs.meta,fs.read,fs.write,gpu,net,process,time}{
-  let final_output=string.copy(struct.borrow(job,field=output))
-  let total=job.geometry.frames
-  let width=job.geometry.width
-  let height=job.geometry.height
-  let window=job.rolling_window_frames
-  let source=string.copy(array.borrow(struct.borrow(job,field=references),0))
-  let root=path.join(str.view(struct.borrow(job,field=scratch_root)),text.concat(
-    "mm-air-rolling-swap-",str.view(string.from_int(time.monotonic_ns()))))
-  match files.mkdirs(str.view(root)){ok(_)=>{},err(problem)=>{
-    return outcome(false,str.view(final_output),text.concat(
-      "Cannot create the rolling Ref2VA directory: ",problem.message))}}
-  let count=(total+window-1)/window
-  var list=string.new()
-  var total_runtime_ms:u64=0
-  var peak_vram_bytes:u64=0
-  var index:u64=0
-  loop{if index>=count{break}
-    let first=index*window
-    let frames=if total-first<window{total-first}else{window}
-    var message=string.copy("H3 rolling window ")
-    string.append(message,str.view(string.from_int(index+1)))
-    string.append(message,"/")
-    string.append(message,str.view(string.from_int(count)))
-    string.append(message,": source frames ")
-    string.append(message,str.view(string.from_int(first)))
-    string.append(message,"-")
-    string.append(message,str.view(string.from_int(first+frames)))
-    report(sender,str.view(message))
-    let segment=path.join(str.view(root),text.concat("source-",text.concat(
-      str.view(string.from_int(index)),".mp4")))
-    let window_output=path.join(str.view(root),text.concat("window-",text.concat(
-      str.view(string.from_int(index)),".mp4")))
-    let start_seconds:f64=cast.float(first)/24.0
-    let end_seconds:f64=cast.float(first+frames)/24.0
-    var video_filter=string.copy("fps=24,trim=start_frame=")
-    string.append(video_filter,str.view(string.from_int(first)))
-    string.append(video_filter,":end_frame=")
-    string.append(video_filter,str.view(string.from_int(first+frames)))
-    string.append(video_filter,",setpts=PTS-STARTPTS")
-    var audio_filter=string.copy("atrim=start=")
-    string.append(audio_filter,str.view(string.from_float(start_seconds)))
-    string.append(audio_filter,":end=")
-    string.append(audio_filter,str.view(string.from_float(end_seconds)))
-    string.append(audio_filter,",asetpts=PTS-STARTPTS")
-    match proc.check(["ffmpeg","-nostdin","-v","error","-y","-i",string.copy(str.view(source)),
-        "-map","0:v:0","-map","0:a:0?","-vf",string.copy(str.view(video_filter)),
-        "-af",string.copy(str.view(audio_filter)),"-c:v","libx264","-crf","12",
-        "-pix_fmt","yuv420p","-c:a","aac","-b:a","192k",string.copy(str.view(segment))]){
-      ok(_)=>{},
-      err(_)=>{return outcome(false,str.view(final_output),
-        "FFmpeg could not cut the rolling Ref2VA source window")},
-    }
-    var geometry=match h3_media.geometry(frames,width,height){
-      ok(value)=>value,
-      err(problem)=>{var held=problem
-        return outcome(false,str.view(final_output),
-          str.view(h3_media.error_message(held)))},
-    }
-    struct.set(job,geometry,field=geometry)
-    struct.set(job,geometry.frames,field=window_frames)
-    struct.set(job,0,field=window_overlap_frames)
-    let _=ref.swap(struct.borrow(job,field=output),string.copy(str.view(window_output)))
-    let _=ref.swap(array.borrow(struct.borrow(job,field=references),0),
-      string.copy(str.view(segment)))
-    var generated=execute(job,sender)
-    total_runtime_ms=total_runtime_ms+generated.runtime_ms
-    if generated.peak_vram_bytes>peak_vram_bytes{peak_vram_bytes=generated.peak_vram_bytes}
-    if not generated.succeeded{
-      return outcome(false,str.view(final_output),struct.borrow(generated,field=message))}
-    string.append(list,"file '")
-    string.append(list,str.view(text.replace(str.view(window_output),"\\","/")))
-    string.append(list,"'\n")
-    index=index+1
-  }
-  let list_path=path.join(str.view(root),"windows.txt")
-  match files.write_text(str.view(list_path),str.view(list)){ok(_)=>{},err(_)=>{
-    return outcome(false,str.view(final_output),"Cannot write the rolling window list")}}
-  report(sender,"H3 joining rolling windows")
-  match proc.check(["ffmpeg","-nostdin","-v","error","-y","-f","concat","-safe","0",
-      "-i",string.copy(str.view(list_path)),"-c","copy","-movflags","+faststart",
-      string.copy(str.view(final_output))]){
-    ok(_)=>{},
-    err(_)=>{return outcome(false,str.view(final_output),
-      "FFmpeg could not join the rolling Ref2VA windows")},
-  }
-  let _=ref.swap(struct.borrow(job,field=output),string.copy(str.view(final_output)))
-  var message=string.copy("H3 rolling Ref2VA completed: ")
-  string.append(message,str.view(string.from_int(count)))
-  string.append(message," windows joined")
-  outcome_metrics(true,str.view(final_output),str.view(message),total_runtime_ms,
-    peak_vram_bytes)
-}
-
-// One masked window (Video Swap / masked edit): prepare the crop, run H3, composite.
-fn run_masked_window(job:ref<Job>,sender:ref<option<channel.Sender>>)->Outcome
-    effects{alloc,env,fs.meta,fs.read,fs.write,gpu,net,process,time}{
-  let source_video:string=string.copy(array.borrow(struct.borrow(job,field=references),0))
-  let final_output=string.copy(struct.borrow(job,field=output))
-  let scratch_root=string.copy(struct.borrow(job,field=scratch_root))
-  let source_settings=struct.borrow(job,field=masked_settings)
-  var settings=masked_runtime.settings(struct.borrow(source_settings,field=mask_path),
-    source_settings.manual,source_settings.manual_x,source_settings.manual_y,
-    source_settings.manual_width,source_settings.manual_height,
-    source_settings.cleanup,source_settings.feather,source_settings.expand,
-    source_settings.crop_strategy,source_settings.padding,source_settings.preserve_outside)
-  var made=match masked_runtime.prepare_bounded(str.view(source_video),str.view(final_output),
-      str.view(scratch_root),job.geometry.frames,settings,job.geometry.width*job.geometry.height){
-    ok(value)=>value,err(message)=>{return outcome(false,str.view(final_output),message)},}
-  if str.len(struct.borrow(job,field=masked_composite_source))!=0{
-    match masked_runtime.use_composite_source(made,
-        str.view(struct.borrow(job,field=masked_composite_source))){
-      ok(_)=>{},err(message)=>{return outcome(false,str.view(final_output),message)},}
-  }
-  report(sender,str.view(masked_runtime.description(made)))
-  struct.set(job,masked_runtime.working_geometry(made),field=geometry)
-  var token_weights:array<f32> = array.new()
-  var token_index:u64=0
-  loop{if token_index>=array.len(struct.borrow(struct.borrow(made,field=latent),field=token_weights)){break}
-    array.push(token_weights,array.get(struct.borrow(struct.borrow(made,field=latent),field=token_weights),token_index))
-    token_index=token_index+1}
-  let _=ref.swap(struct.borrow(job,field=masked_token_weights),token_weights)
-  let _=ref.swap(struct.borrow(job,field=output),string.copy(struct.borrow(made,field=h3_output)))
-  let _=ref.swap(array.borrow(struct.borrow(job,field=references),0),
-    string.copy(struct.borrow(made,field=cropped_source)))
-  var finished=execute(job,sender)
-  if finished.succeeded{
-    report(sender,"Compositing the localized H3 crop under the authored soft mask")
-    finished=match masked_runtime.finish(made){
-      ok(_)=>outcome_metrics(true,str.view(final_output),"window done",finished.runtime_ms,finished.peak_vram_bytes),
-      err(message)=>outcome(false,str.view(final_output),message),}
-  }
-  masked_runtime.discard(made)
-  finished
-}
-
-fn cut_window(source:str,output:str,first:u64,frames:u64,codec:str,keep_audio:bool)->result<unit,string>
-    effects{alloc,process}{
-  var filter=string.copy("trim=start_frame=")
-  string.append(filter,str.view(string.from_int(first)))
-  string.append(filter,":end_frame=")
-  string.append(filter,str.view(string.from_int(first+frames)))
-  string.append(filter,",setpts=PTS-STARTPTS")
-  var args:array<string> = ["ffmpeg","-nostdin","-v","error","-y","-i",string.copy(source),
-    "-map","0:v:0","-vf",string.copy(str.view(filter))]
-  if codec=="rgb"{
-    array.push(args,"-c:v")
-    array.push(args,"libx264rgb")
-    array.push(args,"-crf")
-    array.push(args,"0")
-    array.push(args,"-pix_fmt")
-    array.push(args,"rgb24")
-  }else{
-    array.push(args,"-c:v")
-    array.push(args,"libx264")
-    array.push(args,"-qp")
-    array.push(args,"0")
-    array.push(args,"-pix_fmt")
-    array.push(args,"yuvj420p")
-  }
-  if keep_audio{
-    var audio=string.copy("atrim=start=")
-    string.append(audio,str.view(string.from_float(cast.float(first)/24.0)))
-    string.append(audio,":end=")
-    string.append(audio,str.view(string.from_float(cast.float(first+frames)/24.0)))
-    string.append(audio,",asetpts=PTS-STARTPTS")
-    array.push(args,"-map")
-    array.push(args,"0:a:0?")
-    array.push(args,"-af")
-    array.push(args,audio)
-    array.push(args,"-c:a")
-    array.push(args,"aac")
-    array.push(args,"-b:a")
-    array.push(args,"192k")
-  }
-  array.push(args,string.copy(output))
-  match proc.check(args){ok(_)=>result.ok(()),err(_)=>result.err(text.concat("FFmpeg could not cut window from ",source))}
-}
-
-// Window sizes for a long masked edit: equal windows of at most `limit` frames, each rounded up
-// to H3's 17n+5 frame count; the last takes the remainder.
-fn masked_windows(total:u64,limit:u64)->array<u64> effects{alloc}{
-  var out:array<u64> = array.new()
-  let count=(total+limit-1)/limit
-  var size=(total+count-1)/count
-  if size>5 {size=((size-5+16)/17)*17+5}
-  if size>limit {size=limit}
-  var used:u64=0
-  loop{if used>=total{break}
-    let take=if total-used<size{total-used}else{size}
-    array.push(out,take)
-    used=used+take}
-  out
-}
-
-// Video Swap / masked edit longer than one H3 window: every input video (Video 1, the grey
-// figure, the mask, the composite source) is cut into the same windows, each window is a full
-// masked edit with the same character, seed and prompt, and the windows are joined in order.
-fn run_rolling_masked(job:ref<Job>,sender:ref<option<channel.Sender>>)->Outcome
-    effects{alloc,env,fs.meta,fs.read,fs.write,gpu,net,process,time}{
-  let final_output=string.copy(struct.borrow(job,field=output))
-  let total=job.geometry.frames
-  let width=job.geometry.width
-  let height=job.geometry.height
-  let edit_source=string.copy(array.borrow(struct.borrow(job,field=references),0))
-  let has_figure=array.len(struct.borrow(job,field=references))>1 and
-    is_video_path(str.view(array.borrow(struct.borrow(job,field=references),1)))
-  let figure=if has_figure{string.copy(array.borrow(struct.borrow(job,field=references),1))}else{string.new()}
-  let mask=string.copy(struct.borrow(struct.borrow(job,field=masked_settings),field=mask_path))
-  let composite=string.copy(struct.borrow(job,field=masked_composite_source))
-  let root=path.join(str.view(struct.borrow(job,field=scratch_root)),text.concat(
-    "mm-air-rolling-masked-",str.view(string.from_int(time.monotonic_ns()))))
-  match files.mkdirs(str.view(root)){ok(_)=>{},err(problem)=>{
-    return outcome(false,str.view(final_output),text.concat("Cannot create the window directory: ",problem.message))}}
-  var sizes=masked_windows(total,job.rolling_window_frames)
-  let count=array.len(sizes)
-  var list=string.new()
-  var total_runtime_ms:u64=0
-  var peak_vram_bytes:u64=0
-  var first:u64=0
-  var index:u64=0
-  loop{if index>=count{break}
-    let frames=array.get(sizes,index)
-    var message=string.copy("Video window ")
-    string.append(message,str.view(string.from_int(index+1)))
-    string.append(message,"/")
-    string.append(message,str.view(string.from_int(count)))
-    report(sender,str.view(message))
-    let tag=str.view(string.from_int(index))
-    let seg_source=path.join(str.view(root),text.concat("source-",text.concat(tag,".mp4")))
-    let seg_mask=path.join(str.view(root),text.concat("mask-",text.concat(tag,".mp4")))
-    let seg_figure=path.join(str.view(root),text.concat("figure-",text.concat(tag,".mp4")))
-    let seg_composite=path.join(str.view(root),text.concat("composite-",text.concat(tag,".mp4")))
-    let window_output=path.join(str.view(root),text.concat("window-",text.concat(tag,".mp4")))
-    match cut_window(str.view(edit_source),str.view(seg_source),first,frames,"rgb",true){
-      ok(_)=>{},err(m)=>{return outcome(false,str.view(final_output),m)},}
-    match cut_window(str.view(mask),str.view(seg_mask),first,frames,"gray",false){
-      ok(_)=>{},err(m)=>{return outcome(false,str.view(final_output),m)},}
-    if has_figure{match cut_window(str.view(figure),str.view(seg_figure),first,frames,"rgb",false){
-      ok(_)=>{},err(m)=>{return outcome(false,str.view(final_output),m)},}}
-    if str.len(str.view(composite))!=0{match cut_window(str.view(composite),str.view(seg_composite),first,frames,"rgb",true){
-      ok(_)=>{},err(m)=>{return outcome(false,str.view(final_output),m)},}}
-    var geometry=match h3_media.geometry(frames,width,height){ok(value)=>value,
-      err(problem)=>{var held=problem
-        return outcome(false,str.view(final_output),str.view(h3_media.error_message(held)))},}
-    struct.set(job,geometry,field=geometry)
-    struct.set(job,geometry.frames,field=window_frames)
-    struct.set(job,0,field=window_overlap_frames)
-    let _=ref.swap(struct.borrow(job,field=output),string.copy(str.view(window_output)))
-    let _=ref.swap(array.borrow(struct.borrow(job,field=references),0),string.copy(str.view(seg_source)))
-    if has_figure{let _=ref.swap(array.borrow(struct.borrow(job,field=references),1),string.copy(str.view(seg_figure)))}
-    let _=ref.swap(struct.borrow(struct.borrow(job,field=masked_settings),field=mask_path),string.copy(str.view(seg_mask)))
-    if str.len(str.view(composite))!=0{
-      let _=ref.swap(struct.borrow(job,field=masked_composite_source),string.copy(str.view(seg_composite)))}
-    var generated=run_masked_window(job,sender)
-    total_runtime_ms=total_runtime_ms+generated.runtime_ms
-    if generated.peak_vram_bytes>peak_vram_bytes{peak_vram_bytes=generated.peak_vram_bytes}
-    if not generated.succeeded{return outcome(false,str.view(final_output),struct.borrow(generated,field=message))}
-    string.append(list,"file '")
-    string.append(list,str.view(text.replace(str.view(window_output),"\\","/")))
-    string.append(list,"'\n")
-    first=first+frames
-    index=index+1
-  }
-  let list_path=path.join(str.view(root),"windows.txt")
-  match files.write_text(str.view(list_path),str.view(list)){ok(_)=>{},err(_)=>{
-    return outcome(false,str.view(final_output),"Cannot write the window list")}}
-  report(sender,"Joining video windows")
-  match proc.check(["ffmpeg","-nostdin","-v","error","-y","-f","concat","-safe","0",
-      "-i",string.copy(str.view(list_path)),"-c","copy","-movflags","+faststart",
-      string.copy(str.view(final_output))]){
-    ok(_)=>{},err(_)=>{return outcome(false,str.view(final_output),"FFmpeg could not join the video windows")},}
-  let _=ref.swap(struct.borrow(job,field=output),string.copy(str.view(final_output)))
-  var done=string.copy("Video completed: ")
-  string.append(done,str.view(string.from_int(count)))
-  string.append(done," windows joined")
-  outcome_metrics(true,str.view(final_output),str.view(done),total_runtime_ms,peak_vram_bytes)
-}
-
 pub fn run(source: Job own) -> Outcome
     effects {alloc,env,fs.meta,fs.read,fs.write,gpu,net,process,time} {
   var job: Job = source
@@ -2814,23 +2582,6 @@ pub fn run(source: Job own) -> Outcome
       finish_progress(sender,finished)
       return finished
     }
-  }
-  if not job.repair and not job.masked and job.model==session.Model.Reference and
-      job.task==session.Task.Ref2VA and job.geometry.frames>job.rolling_window_frames and
-      array.len(struct.borrow(job,field=references))!=0 and
-      is_video_path(str.view(array.borrow(struct.borrow(job,field=references),0))){
-    var finished=run_rolling_reference(job,sender)
-    finished=apply_seedvr2(job,finished,sender)
-    finish_progress(sender,finished)
-    return finished
-  }
-  if job.masked and not job.repair and not job.two_matte and
-      not struct.borrow(job,field=masked_settings).painted and
-      job.geometry.frames>job.rolling_window_frames {
-    var finished=run_rolling_masked(job,sender)
-    finished=apply_seedvr2(job,finished,sender)
-    finish_progress(sender,finished)
-    return finished
   }
   var repaired:option<repair_runtime.Prepared> = option.none()
   if job.repair {

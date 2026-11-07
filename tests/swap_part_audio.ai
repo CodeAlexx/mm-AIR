@@ -1,0 +1,33 @@
+// The Video Swap part files alone (swap_masks.prepare_part, CPU): part.rgb, part.wav and part.mp4 for one source
+// and part choice; prints the part span and its audio samples so its soundtrack can be checked against the source.
+// usage: swap-part-audio PRESET SOURCE OUTPUT_DIR PART SECONDS OFFSET_SECONDS
+module app.mm_air.tests.swap_part_audio
+
+import std.text as text
+import "../swap_masks.ai" as swap
+
+pub fn main(args:view<str>)->i32 effects{alloc,fs.meta,fs.read,fs.write,io.write,process}{
+  if view.len(args)!=7 {io.ewrite("usage: swap-part-audio PRESET SOURCE OUTPUT_DIR PART SECONDS OFFSET_SECONDS\n")
+    return 2}
+  var preset=match swap.load_preset(view.get(args,1)){ok(value)=>value,
+    err(message)=>{io.ewrite(text.concat(str.view(message),"\n"))
+      return 2}}
+  let seconds:f64=match text.parse_f64(view.get(args,5)){some(v)=>v,none=>0.0}
+  let offset:f64=match text.parse_f64(view.get(args,6)){some(v)=>v,none=>0.0}
+  let short_edge:u64=preset.motion_reference_default
+  var job=swap.Job{plugin:string.new(),model:string.new(),preset:preset,source:string.copy(view.get(args,2)),
+    output_dir:string.copy(view.get(args,3)),prompt:string.copy("person"),margin:string.copy("normal"),
+    part_mode:string.copy(view.get(args,4)),part_seconds:seconds,offset_seconds:offset,motion_short_edge:short_edge}
+  match swap.prepare_part(job){
+    ok(files)=>{
+      io.write(text.concat("part first_frame ",str.view(string.from_int(files.part.first_frame))))
+      io.write(text.concat(" frames ",str.view(string.from_int(files.part.frames))))
+      io.write(text.concat(" sample_rate ",str.view(string.from_int(files.sample_rate))))
+      io.write(text.concat(" audio_samples ",str.view(string.from_int(files.audio_samples))))
+      io.write(text.concat(" video ",str.view(struct.borrow(files,field=part_video))))
+      io.write("\n")
+      0},
+    err(message)=>{io.ewrite(text.concat(str.view(message),"\n"))
+      3},
+  }
+}

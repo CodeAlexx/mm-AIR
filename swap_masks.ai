@@ -1060,6 +1060,12 @@ pub fn encode_gray(raw:str,output:str,width:u64,height:u64,frames:u64,fps:u64)
 
 fn encode_rgb(raw:str,output:str,width:u64,height:u64,frames:u64,fps:u64,
     audio:str) -> result<unit,string> effects {alloc,fs.meta,fs.read,fs.write,process} {
+  encode_rgb_audio(raw,output,width,height,frames,fps,audio,false)
+}
+
+// encode_rgb; with `copy` the audio input's packets are muxed as they are (the source soundtrack, never re-encoded).
+fn encode_rgb_audio(raw:str,output:str,width:u64,height:u64,frames:u64,fps:u64,
+    audio:str,copy:bool) -> result<unit,string> effects {alloc,fs.meta,fs.read,fs.write,process} {
   var arguments:array<string> = ["ffmpeg","-nostdin","-v","error","-y","-f",
     "rawvideo","-pixel_format","rgb24","-video_size",size_text(width,height),
     "-framerate",n(fps),"-i",string.copy(raw)]
@@ -1070,11 +1076,14 @@ fn encode_rgb(raw:str,output:str,width:u64,height:u64,frames:u64,fps:u64,
   if str.len(audio)!=0 {array.push(arguments,"-map")
     array.push(arguments,"1:a:0")
     array.push(arguments,"-c:a")
-    array.push(arguments,"aac")
-    array.push(arguments,"-b:a")
-    array.push(arguments,"192k")}
-  array.push(arguments,"-frames:v")
-  array.push(arguments,n(frames))
+    if copy {array.push(arguments,"copy")} else {
+      array.push(arguments,"aac")
+      array.push(arguments,"-b:a")
+      array.push(arguments,"192k")}}
+  // A copied soundtrack keeps its full span: the raw input holds exactly `frames` frames, so no frame cap
+  // (which would stop the audio with the last video frame).
+  if not copy {array.push(arguments,"-frames:v")
+    array.push(arguments,n(frames))}
   array.push(arguments,"-c:v")
   array.push(arguments,"libx264rgb")
   array.push(arguments,"-preset")
@@ -1134,6 +1143,33 @@ fn cut_audio(source:str,output:str,part:ref<Part>,fps:u64,sample_rate:u64)
   result.ok(last-first)
 }
 
+// The source's own audio packets over the part's span (stream copy, never re-encoded),
+// for part.mp4, whose soundtrack the final edit keeps.
+fn copy_audio(source:str,output:str,part:ref<Part>,fps:u64,sample_rate:u64)
+    -> result<unit,string> effects {alloc,fs.meta,fs.read,fs.write,process} {
+  let first:u64=audio_sample_at(part.first_frame,fps,sample_rate)
+  let last:u64=audio_sample_at(part.first_frame+part.frames,fps,sample_rate)
+  // Input-side seek with a stream copy keeps the packets the decoder needs before the span and an edit list
+  // that starts playback on the span's first sample.
+  check(["ffmpeg","-nostdin","-v","error","-y","-ss",seconds_text(first,sample_rate),"-i",string.copy(source),
+    "-map","0:a:0","-c:a","copy","-t",seconds_text(last-first,sample_rate),string.copy(output)],
+    "FFmpeg could not copy the part's audio")
+}
+
+fn seconds_text(samples:u64,sample_rate:u64) -> string effects {alloc} {
+  let micros:u64=(samples*1000000+sample_rate/2)/sample_rate
+  var out:string=n(micros/1000000)
+  string.append(out,".")
+  let fraction:u64=rem(micros,1000000)
+  var digits:string=n(fraction)
+  var pad:u64=str.len(str.view(digits))
+  loop {if pad>=6{break}
+    string.append(out,"0")
+    pad=pad+1}
+  string.append(out,str.view(digits))
+  out
+}
+
 fn plane_view(data:view<byte>,frame:u64,size:u64) -> view<byte> from data effects {} {
   view.slice(data,frame*size,frame*size+size)
 }
@@ -1187,8 +1223,13 @@ pub fn prepare_part(job:ref<Job>) -> result<PartFiles,string>
   if info.has_audio {audio_samples=try cut_audio(struct.borrow(job,field=source),
     str.view(part_audio),part,fps,info.sample_rate)}
   let part_video=path.join(root,"part.mp4")
-  let _=try encode_rgb(str.view(part_rgb),str.view(part_video),width,height,frames,fps,
-    str.view(part_audio))
+  // part.mp4 carries the source's own audio packets (the final edit copies them), part.wav the exact samples.
+  let part_packets:string=if info.has_audio {path.join(root,"part-audio.m4a")} else {string.new()}
+  if info.has_audio {let _=try copy_audio(struct.borrow(job,field=source),str.view(part_packets),part,fps,
+    info.sample_rate)}
+  let _=try encode_rgb_audio(str.view(part_rgb),str.view(part_video),width,height,frames,fps,
+    str.view(part_packets),true)
+  if info.has_audio {let _=files.remove(str.view(part_packets))}
   result.ok(PartFiles{root:string.copy(root),width:width,height:height,
     has_audio:info.has_audio,sample_rate:info.sample_rate,part:part,part_rgb:part_rgb,
     part_video:part_video,part_audio:part_audio,audio_samples:audio_samples})

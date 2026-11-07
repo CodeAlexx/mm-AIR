@@ -1557,6 +1557,11 @@ pub fn main(args: view<str>) -> i32
   var edit_repair_cuts=string.new()
   var edit_repair_memory:u32=0
   var edit_repair_window:u64=124
+  // windows of long Video Swap / guide edits / Ref2VA (shared by the Edit and Generate panels)
+  var v2v_window_frames:u64=124
+  var v2v_overlap_frames:u64=22
+  var v2v_short_last:bool=false
+  var v2v_color_match:bool=false
   var edit_repair_overlap:u64=22
   var edit_motion_plan=repair_motion.create(1)
   var edit_motion_plan_ready:bool=false
@@ -3817,6 +3822,18 @@ pub fn main(args: view<str>) -> i32
             if id=="edit_repair_cuts"{edit_repair_cuts=desk.field(event,"value")}
             if id=="edit_repair_memory"{edit_repair_memory=cast.sat(
               desk.number(event,"value"))}
+            if id=="edit_v2v_window" or id=="gen_v2v_window"{
+              let choice:u64=cast.sat(desk.number(event,"value"))
+              v2v_window_frames=if choice==0{90}else if choice==2{175}else{124}
+              let _=desk.set_number(session,if id=="edit_v2v_window"{"gen_v2v_window"}else{"edit_v2v_window"},"selected",
+                cast.float(choice))}
+            if id=="edit_v2v_overlap" or id=="gen_v2v_overlap"{
+              let choice:u64=cast.sat(desk.number(event,"value"))
+              v2v_overlap_frames=if choice==0{5}else if choice==2{39}else{22}
+              let _=desk.set_number(session,if id=="edit_v2v_overlap"{"gen_v2v_overlap"}else{"edit_v2v_overlap"},"selected",
+                cast.float(choice))}
+            if id=="edit_v2v_short" or id=="gen_v2v_short"{v2v_short_last=desk.boolean(event,"value")}
+            if id=="edit_v2v_color" or id=="gen_v2v_color"{v2v_color_match=desk.boolean(event,"value")}
             if id=="edit_repair_window"{edit_repair_window=cast.sat(
               desk.number(event,"value"))}
             if id=="edit_repair_overlap"{edit_repair_overlap=cast.sat(
@@ -7062,6 +7079,7 @@ pub fn main(args: view<str>) -> i32
                     generation.enable_reference_video_match(job)
                   }
                   if guided { generation.enable_guide_video(job,str.view(swap_source_video)) }
+                  generation.set_windows(job,v2v_window_frames,v2v_overlap_frames,v2v_short_last,v2v_color_match)
                   if swap and masked and str.len(str.view(swap_motion_reference))!=0 {
                     generation.set_masked_composite_source(job,str.view(vs_part_video))
                   }
