@@ -1,0 +1,25 @@
+// The two-matte generated-subject mask step alone (generate.ai): SAM 3.1 on a finished H3 clip with "person",
+// then the fallback prompts on the same frames. usage: sam31_subject_mask SAM31_MODEL SOURCE.mp4 FRAMES OUT_PREFIX
+module app.mm_air.tests.sam31_subject_mask
+
+import "../sam31_mask.ai" as sam31_mask
+import std.text as text
+
+pub fn main(args:view<str>)->i32
+    effects{alloc,fs.meta,fs.read,fs.write,gpu,io.write,process,time}{
+  if view.len(args)!=5{
+    io.ewrite("usage: sam31_subject_mask SAM31_MODEL SOURCE FRAMES OUT_PREFIX\n")
+    return 2
+  }
+  let frames:u64=match text.parse_u64(view.get(args,3)){some(v)=>v,none=>0}
+  var job=sam31_mask.Job{plugin:string.new(),model:string.new(),sam31_model:string.copy(view.get(args,1)),
+    source:string.copy(view.get(args,2)),prompt:string.copy("person"),
+    raw_output:text.concat(view.get(args,4),".gray"),preview_output:text.concat(view.get(args,4),".mp4"),
+    frames:frames,still:false}
+  var outcome=sam31_mask.run_prompts(job,["character","cartoon character","animal"])
+  io.write(str.view(struct.borrow(outcome,field=message)))
+  io.write("\n")
+  if outcome.succeeded{io.write(text.concat("preview=",text.concat(str.view(struct.borrow(outcome,field=mask_path)),"\n")))
+    return 0}
+  1
+}

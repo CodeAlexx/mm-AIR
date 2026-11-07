@@ -2332,7 +2332,7 @@ fn track_repair_target(job:ref<Job>,prepared:ref<repair_runtime.Prepared>)
     raw_output:repair_runtime.target_mask_raw(prepared),
     preview_output:repair_runtime.target_mask_preview(prepared),
     frames:repair_runtime.generated_frames(prepared),still:false}
-  var tracked=sam31_mask.run(target_job)
+  var tracked=sam31_mask.run_prompts(target_job,["character","cartoon character","animal"])
   if not tracked.succeeded{return result.err(text.concat(
     "Generated repair subject mask failed: ",
     struct.borrow(tracked,field=message)))}
@@ -2979,7 +2979,8 @@ pub fn run(source: Job own) -> Outcome
           raw_output:string.copy(struct.borrow(held,field=target_mask_raw)),
           preview_output:string.copy(struct.borrow(held,field=target_mask_preview)),
           frames:held.frames,still:false}
-        var target=sam31_mask.run(target_job)
+        // The replacement need not be a person (a cartoon or an animal character): retried on the same frames.
+        var target=sam31_mask.run_prompts(target_job,["character","cartoon character","animal"])
         if not target.succeeded {
           finished=outcome(false,struct.borrow(held,field=final_output),
             text.concat("Generated-subject mask failed: ",

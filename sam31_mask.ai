@@ -170,13 +170,48 @@ fn fallback(job:Job own)->auto_mask.Outcome
   outcome
 }
 
-pub fn run(job:Job own)->auto_mask.Outcome
+// The SAM 3 runner for each prompt in turn while one finds nothing.
+fn fallback_prompts(job:Job own,prompts:ref<array<string>>)->auto_mask.Outcome
     effects{alloc,fs.meta,fs.read,fs.write,gpu,process,time}{
   var owned=job
+  var outcome=failed("SAM 3 found no match")
+  var p:u64=0
+  loop{if p>=array.len(prompts){break}
+    var attempt=Job{plugin:string.copy(struct.borrow(owned,field=plugin)),
+      model:string.copy(struct.borrow(owned,field=model)),
+      sam31_model:string.copy(struct.borrow(owned,field=sam31_model)),
+      source:string.copy(struct.borrow(owned,field=source)),
+      prompt:string.copy(array.borrow(prompts,p)),
+      raw_output:string.copy(struct.borrow(owned,field=raw_output)),
+      preview_output:string.copy(struct.borrow(owned,field=preview_output)),
+      frames:owned.frames,still:owned.still}
+    outcome=fallback(attempt)
+    if outcome.succeeded{break}
+    p=p+1}
+  outcome
+}
+
+pub fn run(job:Job own)->auto_mask.Outcome
+    effects{alloc,fs.meta,fs.read,fs.write,gpu,process,time}{
+  var none:array<string> = array.new()
+  run_prompts(job,none)
+}
+
+// run, then each of `fallbacks` in turn on the same decoded frames while a prompt finds nothing (a generated
+// replacement need not be a person); fails only when every prompt finds nothing.
+pub fn run_prompts(job:Job own,fallbacks:array<string> own)->auto_mask.Outcome
+    effects{alloc,fs.meta,fs.read,fs.write,gpu,process,time}{
+  var owned=job
+  var prompts:array<string> = [string.copy(struct.borrow(owned,field=prompt))]
+  var more=fallbacks
+  var m:u64=0
+  loop{if m>=array.len(more){break}
+    array.push(prompts,string.copy(array.borrow(more,m)))
+    m=m+1}
   if owned.frames==0{return failed("Automatic masking needs at least one frame")}
   match files.exists(struct.borrow(owned,field=sam31_model)){
-    ok(present)=>{if not present{return fallback(owned)}},
-    err(_)=>{return fallback(owned)}}
+    ok(present)=>{if not present{return fallback_prompts(owned,prompts)}},
+    err(_)=>{return fallback_prompts(owned,prompts)}}
   let started=time.monotonic_ns()
 
   let token=str.view(string.from_int(time.monotonic_ns()))
@@ -213,20 +248,28 @@ pub fn run(job:Job own)->auto_mask.Outcome
   match check(decode,"Could not decode source for SAM 3.1"){
     ok(_)=>{},err(message)=>{return failed(str.view(message))}}
 
-  var request=sam31.Job{model:string.copy(struct.borrow(owned,field=sam31_model)),
-    source_rgb:string.copy(str.view(rgb)),prompt:string.copy(struct.borrow(owned,field=prompt)),
-    output_dir:string.copy(str.view(work)),frames:tracked,width:width,height:height}
-  let tracking=sam31.track(request)
-  let _=files.remove(str.view(rgb))
-  match tracking{ok(_)=>{},err(message)=>{let _=clean(str.view(work))
-    return failed(str.view(message))}}
-
-  let index=match files.read_text(str.view(path.join(str.view(work),"tracks.tsv"))){
-    ok(value)=>value,err(_)=>{let _=clean(str.view(work))
-      return failed("SAM 3.1 wrote no track index")}}
-  var found=match sam_tracks.parse_index(str.view(index),str.view(work),tracked){
-    ok(value)=>value,err(message)=>{let _=clean(str.view(work))
+  var found:array<sam_tracks.Track> = array.new()
+  var p:u64=0
+  loop{if p>=array.len(prompts){break}
+    let _=clean(str.view(work))
+    var request=sam31.Job{model:string.copy(struct.borrow(owned,field=sam31_model)),
+      source_rgb:string.copy(str.view(rgb)),prompt:string.copy(array.borrow(prompts,p)),
+      output_dir:string.copy(str.view(work)),frames:tracked,width:width,height:height}
+    let tracking=sam31.track(request)
+    match tracking{ok(_)=>{},err(message)=>{let _=files.remove(str.view(rgb))
+      let _=clean(str.view(work))
       return failed(str.view(message))}}
+    let index=match files.read_text(str.view(path.join(str.view(work),"tracks.tsv"))){
+      ok(value)=>value,err(_)=>{let _=files.remove(str.view(rgb))
+        let _=clean(str.view(work))
+        return failed("SAM 3.1 wrote no track index")}}
+    found=match sam_tracks.parse_index(str.view(index),str.view(work),tracked){
+      ok(value)=>value,err(message)=>{let _=files.remove(str.view(rgb))
+        let _=clean(str.view(work))
+        return failed(str.view(message))}}
+    if array.len(found)!=0{break}
+    p=p+1}
+  let _=files.remove(str.view(rgb))
   if array.len(found)==0{
     let _=clean(str.view(work))
     return failed("SAM 3.1 found no match")}
@@ -246,10 +289,13 @@ pub fn run(job:Job own)->auto_mask.Outcome
       "Could not encode the automatic-mask preview"){
     err(message)=>{return failed(str.view(message))},ok(_)=>{}}
   let seconds=(time.monotonic_ns()-started)/1000000000
+  var matched:string=string.new()
+  if p>0{matched=text.concat(str.view(array.borrow(prompts,p))," · ")}
   auto_mask.Outcome{succeeded:true,
     mask_path:string.copy(struct.borrow(owned,field=preview_output)),
     message:text.concat("SAM 3.1 mask ready · ",text.concat(
       str.view(string.from_int(owned.frames)),text.concat(" frames · ",
-      text.concat(str.view(string.from_int(seconds))," s")))),
+      text.concat(str.view(matched),
+      text.concat(str.view(string.from_int(seconds))," s"))))),
     width:width,height:height,frames:owned.frames}
 }
