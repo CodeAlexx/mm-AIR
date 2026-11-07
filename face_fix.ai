@@ -1,6 +1,6 @@
 // Face fix (Video Swap, optional): after the final composite, Twin's face pipeline restores the
-// faces of the generated subject, per frame: detect, align, face enhancer, paste back with Twin's
-// face mask. It runs only inside the generated subject's region and never swaps a face.
+// faces of the generated subject: detect, align, face enhancer, paste back with Twin's face mask,
+// only for faces tracked 5+ consecutive frames (faded in and out over 3 frames). It runs only inside the generated subject's region and never swaps a face.
 // Twin's models are read once per run (twin.face.fixup.open) and released at the end.
 module app.mm_air.face_fix
 
@@ -25,22 +25,9 @@ pub fn apply(video:ref<array<byte>>,region:view<byte>,frames:u64,width:u64,heigh
     return result.err("Face fix region does not match its frame size")}
   let models=twin_settings.models_dir()
   var session=try fixup.open(str.view(models),enhancer,80.0,0.5,width,height)
-  var frame:u64=0
-  loop {if frame>=frames{break}
-    var fixed:array<byte> = array.new()
-    array.reserve(fixed,pixels*3)
-    let rgb=view.slice(array.view(video),frame*pixels*3,(frame+1)*pixels*3)
-    let area=if view.len(region)==0 {region} else {view.slice(region,frame*pixels,(frame+1)*pixels)}
-    let done=match fixup.restore_frame(session,rgb,area,fixed) {ok(value)=>value,
-      err(message)=>{let _=fixup.close(session)
-        return result.err(message)},}
-    if done>0 {
-      var at:u64=0
-      loop {if at>=pixels*3{break}
-        array.set(video,frame*pixels*3+at,array.get(fixed,at))
-        at=at+1}
-    }
-    frame=frame+1}
+  match fixup.restore_video(session,video,region,frames) {ok(_)=>{},
+    err(message)=>{let _=fixup.close(session)
+      return result.err(message)},}
   let line=fixup.summary(session)
   let _=fixup.close(session)
   result.ok(line)
