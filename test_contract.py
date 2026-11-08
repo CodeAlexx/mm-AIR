@@ -51,7 +51,20 @@ assert [item.text for item in tree.findall(
     "Creator Dynamic Flow", "Linear Flow"]
 assert [item.text for item in tree.findall(
     ".//object[@id='qwen_image_sampler_list']/items/item")] == [
-    "Euler", "DPM++ 2M"]
+    "Euler", "RES 2M", "RES 3M", "RES 2S", "RES 3S", "RES 5S", "DEIS 2M",
+    "DEIS 3M", "DPM++ 2M", "DPM++ 2S", "DDIM"]
+assert [item.text for item in tree.findall(
+    ".//object[@id='image_sampler_list']/items/item")] == [
+    "Default", "RES 2M", "RES 3M", "RES 2S", "RES 3S", "RES 5S", "DEIS 2M",
+    "DEIS 3M", "DPM++ 2M", "DPM++ 2S", "DDIM", "Euler"]
+assert [item.text for item in tree.findall(
+    ".//object[@id='sampler_schedule_list']/items/item")] == [
+    "Default", "Beta 57", "Bong tangent"]
+for control in ("qwen_image_schedule", "qwen_image_eta", "qwen_image_bongmath",
+                "qwen_edit_schedule", "qwen_edit_eta", "qwen_edit_bongmath",
+                "gen_image_sampler", "gen_image_schedule", "gen_image_eta",
+                "gen_image_bongmath"):
+    assert tree.find(f".//object[@id='{control}']") is not None, control
 
 for control in ("gen_qwen_sampling", "qwen_image_resolution",
                 "qwen_image_scheduler", "qwen_image_sampler",

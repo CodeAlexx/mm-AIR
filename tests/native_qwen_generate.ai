@@ -7,7 +7,7 @@ import std.channel as channel
 import std.files as files
 
 pub fn main(args:view<str>)->i32
-    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
+    effects {alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
   if view.len(args)!=2{io.ewrite("Usage: native-qwen-generate PARAMETERS.json\n")
     return 2}
   let source=match files.read_text(view.get(args,1)){ok(value)=>value,

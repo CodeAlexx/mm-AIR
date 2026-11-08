@@ -6,19 +6,45 @@ import std.text as text
 
 // One real MM-Air image generation through the application's own workers (generation.run_moss,
 // generation.run_fibo) with the deployment's runtime configuration (folders from Settings):
-//   image-generate MODEL OUTPUT.png PROMPT SEED [STEPS [SOURCE...]]
+//   image-generate MODEL OUTPUT.png PROMPT SEED [STEPS [SOURCE...]] [--sampler NAME] [--schedule NAME]
+//                  [--eta F] [--bongmath on|off]
 // MODEL: moss-image-base | moss-image-sft | fibo-2.0-dev | fibo-2.0-edit-turbo (SOURCEs: the
 // picture to change, then references). STEPS 0 or absent keeps the Generate / Image Edit default;
+// the sampler flags are Generate's Sampler / Schedule / Noise / Bong math (absent: Default);
 // every other value is the app's default too.
 pub fn main(args:view<str>)->i32
     effects {alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
-  if view.len(args)<5 {
-    io.ewrite("usage: image-generate MODEL OUTPUT.png PROMPT SEED [STEPS [SOURCE...]]\n")
+  // The sampler flags follow the positional arguments; `count` is the number of positional ones.
+  var count:u64=view.len(args)
+  var sampler:string=string.copy("default")
+  var schedule:string=string.copy("default")
+  var eta:f64=0.5
+  var bongmath:bool=true
+  var at:u64=1
+  loop{
+    if at>=view.len(args){break}
+    let arg=view.get(args,at)
+    if arg=="--sampler" or arg=="--schedule" or arg=="--eta" or arg=="--bongmath"{
+      if at+1>=view.len(args){return 9}
+      if at<count{count=at}
+      let value=view.get(args,at+1)
+      if arg=="--sampler"{sampler=string.copy(value)}
+      if arg=="--schedule"{schedule=string.copy(value)}
+      if arg=="--eta"{eta=match text.parse_f64(value){some(v)=>v,none=>{return 9},}}
+      if arg=="--bongmath"{bongmath=value=="on" or value=="true"}
+      at=at+2
+      continue
+    }
+    if at>count{return 9}
+    at=at+1
+  }
+  if count<5 {
+    io.ewrite("usage: image-generate MODEL OUTPUT.png PROMPT SEED [STEPS [SOURCE...]] [--sampler NAME] [--schedule NAME] [--eta F] [--bongmath on|off]\n")
     return 1
   }
   let model=view.get(args,1)
   let seed=match text.parse_u64(view.get(args,4)){some(value)=>value,none=>{return 2},}
-  let steps:u64=if view.len(args)>5{match text.parse_u64(view.get(args,5)){some(value)=>value,none=>{return 4},}}else{0}
+  let steps:u64=if count>5{match text.parse_u64(view.get(args,5)){some(value)=>value,none=>{return 4},}}else{0}
   var receiver=match channel.open(128,1024){ok(value)=>value,err(_)=>{return 5},}
   var outcome=if model=="fibo-2.0-dev" or model=="fibo-2.0-edit-turbo" {
     var request=parameters.fibo_defaults_for(model=="fibo-2.0-edit-turbo")
@@ -26,8 +52,12 @@ pub fn main(args:view<str>)->i32
     let _=ref.swap(struct.borrow(request,field=output),string.copy(view.get(args,2)))
     struct.set(request,seed,field=seed)
     if steps!=0{struct.set(request,steps,field=steps)}
+    let _=ref.swap(struct.borrow(request,field=sampler),string.copy(str.view(sampler)))
+    let _=ref.swap(struct.borrow(request,field=schedule),string.copy(str.view(schedule)))
+    struct.set(request,eta,field=eta)
+    struct.set(request,bongmath,field=bongmath)
     var index:u64=6
-    loop{if index>=view.len(args){break}
+    loop{if index>=count{break}
       array.push(struct.borrow(request,field=images),string.copy(view.get(args,index)))
       index=index+1}
     // The saved-settings round trip the History sidecar uses.
@@ -41,13 +71,17 @@ pub fn main(args:view<str>)->i32
     let index=match parameters.moss_model_index_of(model){some(value)=>value,none=>{
       io.ewrite("unknown MODEL\n")
       return 3},}
-    if view.len(args)>6{io.ewrite("MOSS-Image takes no source images\n")
+    if count>6{io.ewrite("MOSS-Image takes no source images\n")
       return 3}
     var request=parameters.moss_defaults(index)
     let _=ref.swap(struct.borrow(request,field=prompt),string.copy(view.get(args,3)))
     let _=ref.swap(struct.borrow(request,field=output),string.copy(view.get(args,2)))
     struct.set(request,seed,field=seed)
     if steps!=0{struct.set(request,steps,field=steps)}
+    let _=ref.swap(struct.borrow(request,field=sampler),string.copy(str.view(sampler)))
+    let _=ref.swap(struct.borrow(request,field=schedule),string.copy(str.view(schedule)))
+    struct.set(request,eta,field=eta)
+    struct.set(request,bongmath,field=bongmath)
     let saved=match parameters.encode_moss(request){ok(value)=>value,err(message)=>{
       io.ewrite(message)
       return 6},}

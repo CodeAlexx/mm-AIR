@@ -11,7 +11,7 @@ import std.files as files
 // Execute the real worker and its channel/task lifetime. A pre-raised signal
 // must finish before model intake, without requiring or producing model assets.
 pub fn main(args:view<str>)->i32
-    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
+    effects {alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
   let root=path.join(system.temp_directory(),text.concat("mm-air-worker-cancel-",
     string.from_int(time.monotonic_ns())))
   let output=text.concat(root,".png")

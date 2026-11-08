@@ -550,6 +550,7 @@ fn show_edit_model(session:ref<desk.Session>,fibo:bool)->unit effects{alloc,net,
   var qwen_only:array<string> = ["qwen_edit_turbo","qwen_edit_enhance","qwen_edit_swap_label",
     "qwen_edit_swap","qwen_edit_swap_strength_row","qwen_edit_resolution","qwen_edit_resolution_label",
     "qwen_edit_scheduler","qwen_edit_scheduler_label","qwen_edit_sampler","qwen_edit_sampler_label",
+    "qwen_edit_schedule","qwen_edit_schedule_label","qwen_edit_eta","qwen_edit_eta_label","qwen_edit_bongmath",
     "qwen_edit_steps","qwen_edit_steps_label"]
   var index:u64=0
   loop{if index>=array.len(qwen_only){break}
@@ -558,6 +559,44 @@ fn show_edit_model(session:ref<desk.Session>,fibo:bool)->unit effects{alloc,net,
   let _=desk.set_bool(session,"qwen_edit_match_source","visible",fibo)
   let _=desk.set_text(session,"qwen_edit_chip",if fibo{"FIBO 2.0 EDIT TURBO"}else{"QWEN-IMAGE-2.1"})
   ()
+}
+
+// Sampler, Schedule, Noise and Bong math for Qwen-Image-2.1 on Generate and Image Edit (one
+// shared state). Turbo keeps its own sampler: the four are hidden. Schedule, Noise and Bong math
+// are greyed out unless the Sampler is a shared one (Euler and DPM++ 2M are the model's own).
+fn show_qwen_sampling(session:ref<desk.Session>,turbo:bool,edit_fibo:bool,sampler:u32,schedule:u32,eta:f64,
+    bongmath:bool)->unit effects{alloc,net,time}{
+  let index:f64=cast.float(parameters.qwen_sampler_index(sampler))
+  let active:bool=qwen_image_contract.is_clownshark_sampler(sampler)
+  let _=desk.set_number(session,"qwen_image_sampler","selected",index)
+  let _=desk.set_number(session,"qwen_edit_sampler","selected",index)
+  let _=desk.set_number(session,"qwen_image_schedule","selected",cast.float(schedule))
+  let _=desk.set_number(session,"qwen_edit_schedule","selected",cast.float(schedule))
+  let _=desk.set_number(session,"qwen_image_eta","value",eta)
+  let _=desk.set_number(session,"qwen_edit_eta","value",eta)
+  let _=desk.set_bool(session,"qwen_image_bongmath","active",bongmath)
+  let _=desk.set_bool(session,"qwen_edit_bongmath","active",bongmath)
+  let _=desk.set_bool(session,"qwen_image_cs_box","sensitive",active)
+  var generate_ids:array<string> = ["qwen_image_sampler_label","qwen_image_sampler","qwen_image_cs_box"]
+  var index_g:u64=0
+  loop{if index_g>=array.len(generate_ids){break}
+    let _=desk.set_bool(session,array.borrow(generate_ids,index_g),"visible",not turbo)
+    index_g=index_g+1}
+  var edit_ids:array<string> = ["qwen_edit_sampler_label","qwen_edit_sampler","qwen_edit_schedule_label",
+    "qwen_edit_schedule","qwen_edit_eta_label","qwen_edit_eta","qwen_edit_bongmath"]
+  var index_e:u64=0
+  loop{if index_e>=array.len(edit_ids){break}
+    let _=desk.set_bool(session,array.borrow(edit_ids,index_e),"visible",not turbo and not edit_fibo)
+    index_e=index_e+1}
+  let _=desk.set_bool(session,"qwen_edit_schedule","sensitive",active)
+  let _=desk.set_bool(session,"qwen_edit_eta","sensitive",active)
+  let _=desk.set_bool(session,"qwen_edit_bongmath","sensitive",active)
+  ()
+}
+
+// Turbo runs its own sampler: a shared sampler chosen for the base model falls back to Euler.
+fn qwen_effective_sampler(turbo:bool,sampler:u32)->u32{
+  if turbo and qwen_image_contract.is_clownshark_sampler(sampler){qwen_image_contract.sampler_euler()}else{sampler}
 }
 
 fn show_qwen_recipe(session:ref<desk.Session>,scheduler:u32,sampler:u32)
@@ -594,15 +633,31 @@ fn show_prompt_pictures(session:ref<desk.Session>,moss:ref<parameters.MossReques
   ()
 }
 
+// Sampler, Schedule, Noise and Bong math in Generate's Sampling panel (MOSS, Fibo 2.0 Dev). Schedule,
+// Noise and Bong math are greyed out unless the Sampler is a shared one.
+fn show_image_sampler(session:ref<desk.Session>,sampler:str,schedule:str,eta:f64,bongmath:bool,active:bool)
+    ->unit effects{alloc,net,time}{
+  let _=desk.set_number(session,"gen_image_sampler","selected",cast.float(parameters.image_sampler_index(sampler)))
+  let _=desk.set_number(session,"gen_image_schedule","selected",cast.float(parameters.sampler_schedule_index(schedule)))
+  let _=desk.set_number(session,"gen_image_eta","value",eta)
+  let _=desk.set_bool(session,"gen_image_bongmath","active",bongmath)
+  let _=desk.set_bool(session,"gen_image_cs_box","sensitive",active)
+  ()
+}
+
 // Generate's Sampling panel shows the selected MOSS model's remembered values.
 fn show_image_sampling(session:ref<desk.Session>,model:u32,moss:ref<parameters.MossRequest>,
     fibo:ref<parameters.FiboRequest>)->unit effects{alloc,net,time}{
   if model==parameters.fibo_dev_model_index(){
+    show_image_sampler(session,str.view(struct.borrow(fibo,field=sampler)),str.view(struct.borrow(fibo,field=schedule)),
+      fibo.eta,fibo.bongmath,parameters.fibo_uses_stepper(str.view(struct.borrow(fibo,field=sampler))))
     let _=desk.set_number(session,"gen_image_steps","value",cast.float(fibo.steps))
     let _=desk.set_number(session,"gen_image_cfg","value",fibo.guidance)
     let _=desk.set_text(session,"gen_image_negative",struct.borrow(fibo,field=negative))
   }
   if parameters.is_moss_model(model){
+    show_image_sampler(session,str.view(struct.borrow(moss,field=sampler)),str.view(struct.borrow(moss,field=schedule)),
+      moss.eta,moss.bongmath,parameters.moss_uses_stepper(str.view(struct.borrow(moss,field=sampler))))
     let _=desk.set_number(session,"gen_image_steps","value",cast.float(moss.steps))
     let _=desk.set_number(session,"gen_image_cfg","value",moss.cfg)
     let _=desk.set_number(session,"gen_image_shift","value",moss.shift)
@@ -677,7 +732,7 @@ fn filter_parameters(session:ref<desk.Session>,query:str,model:u32,swap_mode:u32
   let _ = desk.set_bool(session,"gen_lora_group","visible",(krea or moss or fibo or qwen_image or not image_model) and
     (wanted == "" or text.contains("krea h3 moss fibo qwen lora overlay strength",wanted)))
   let _=desk.set_bool(session,"gen_image_sampling","visible",(moss or fibo) and
-    (wanted=="" or text.contains("sampling steps cfg guidance shift speed fast negative prompt",wanted)))
+    (wanted=="" or text.contains("sampling sampler schedule noise bong math steps cfg guidance shift speed fast negative prompt",wanted)))
   let _=desk.set_bool(session,"gen_prompt_images","visible",moss and
     (wanted=="" or text.contains("image prompt picture pictures reference strength vision text",wanted)))
   let _=desk.set_bool(session,"gen_image_shift_row","visible",moss)
@@ -692,7 +747,7 @@ fn filter_parameters(session:ref<desk.Session>,query:str,model:u32,swap_mode:u32
     (wanted == "" or text.contains("h3 task profile schedule evaluations",wanted)))
   let _ = desk.set_bool(session,"gen_qwen_sampling","visible",qwen_image and
     (wanted == "" or text.contains(
-      "qwen resolution schedule scheduler solver sampler steps cfg",wanted)))
+      "qwen resolution schedule scheduler solver sampler noise bong math steps cfg",wanted)))
   let _ = desk.set_bool(session,"gen_h3_geometry_group","visible",
     (wanted == "" or
     text.contains("resolution width height duration seconds frames fps size geometry custom",wanted)))
@@ -1452,6 +1507,9 @@ pub fn main(args: view<str>) -> i32
     else{qwen_image_contract.default_steps()}
   var qwen_image_scheduler:u32=qwen_image_contract.scheduler_creator_dynamic()
   var qwen_image_sampler:u32=qwen_image_contract.sampler_euler()
+  var qwen_image_schedule:u32=qwen_image_contract.schedule_default()
+  var qwen_image_eta:f64=0.5
+  var qwen_image_bongmath:bool=true
   var width: u64 = 832
   var height: u64 = 480
   var seconds: f64 = 5.0
@@ -1759,6 +1817,7 @@ pub fn main(args: view<str>) -> i32
         let _=desk.set_number(session,"qwen_edit_steps","value",cast.float(qwen_image_steps))
         layout_memory.restore(session)
         show_edit_model(session,qwen_edit_fibo)
+        show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
         update_qwen_edit_sources(session,qwen_edit_references)
         select_mode(session, "generate")
         source_widgets(session, task_index)
@@ -1829,19 +1888,22 @@ pub fn main(args: view<str>) -> i32
                     qwen_image_scheduler=if qwen_turbo{qwen_image_contract.scheduler_creator_dynamic()}
                       else{request.scheduler}
                     qwen_image_sampler=request.sampler
+                    qwen_image_schedule=request.schedule
+                    qwen_image_eta=request.eta
+                    qwen_image_bongmath=request.bongmath
                     qwen_edit_seed=request.seed
                     let _=desk.set_number(session,"qwen_edit_resolution","selected",
                       cast.float(qwen_edit_resolution_index))
                     let _=desk.set_number(session,"qwen_edit_steps","value",cast.float(request.steps))
                     let _=desk.set_number(session,"qwen_edit_scheduler","selected",cast.float(qwen_image_scheduler))
                     show_qwen_turbo(session,qwen_turbo)
-                    let _=desk.set_number(session,"qwen_edit_sampler","selected",cast.float(request.sampler))
                     let restored_seed:i64=cast.sat(request.seed)
                     let _=desk.set_text(session,"qwen_edit_seed",str.view(string.from_int(restored_seed)))
                     update_qwen_edit_sources(session,qwen_edit_references)
                     qwen_edit_fibo=false
                     let _=desk.set_number(session,"qwen_edit_model","selected",0.0)
                     show_edit_model(session,false)
+                    show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
                     select_mode(session,"image_edit")
                     let _=desk.set_text(session,"status","Qwen Image Edit parameters restored")
                   }else{
@@ -1867,6 +1929,9 @@ pub fn main(args: view<str>) -> i32
                     qwen_image_scheduler=if qwen_turbo{qwen_image_contract.scheduler_creator_dynamic()}
                       else{request.scheduler}
                     qwen_image_sampler=request.sampler
+                    qwen_image_schedule=request.schedule
+                    qwen_image_eta=request.eta
+                    qwen_image_bongmath=request.bongmath
                     qwen_image_resolution_index=match qwen_image_contract.resolution_index(
                         request.width,request.height){
                       some(index)=>index,
@@ -1882,9 +1947,8 @@ pub fn main(args: view<str>) -> i32
                       cast.float(qwen_image_steps))
                     let _=desk.set_number(session,"qwen_image_scheduler","selected",
                       cast.float(qwen_image_scheduler))
-                    let _=desk.set_number(session,"qwen_image_sampler","selected",
-                      cast.float(qwen_image_sampler))
                     show_qwen_turbo(session,qwen_turbo)
+                    show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
                     let _=desk.set_text(session,"gen_seed",string.from_int(seed))
                     show_qwen_recipe(session,qwen_image_scheduler,qwen_image_sampler)
                     let _=desk.set_text(session,"gen_prompt_buffer",str.view(prompt))
@@ -3816,7 +3880,23 @@ pub fn main(args: view<str>) -> i32
               continue
             }
             if id=="qwen_edit_sampler"{
-              qwen_image_sampler=cast.sat(desk.number(event,"value"))
+              qwen_image_sampler=parameters.qwen_sampler_code(cast.sat(desk.number(event,"value")))
+              show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
+              continue
+            }
+            if id=="qwen_edit_schedule" or id=="qwen_image_schedule"{
+              qwen_image_schedule=cast.sat(desk.number(event,"value"))
+              show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
+              continue
+            }
+            if id=="qwen_edit_eta" or id=="qwen_image_eta"{
+              qwen_image_eta=desk.number(event,"value")
+              show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
+              continue
+            }
+            if id=="qwen_edit_bongmath" or id=="qwen_image_bongmath"{
+              qwen_image_bongmath=desk.boolean(event,"value")
+              show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
               continue
             }
             if id=="qwen_edit_steps"{
@@ -4321,6 +4401,7 @@ pub fn main(args: view<str>) -> i32
                   err(message)=>{io.ewrite(text.concat("Turbo preference: ",text.concat(message,"\n")))}}}
               qwen_turbo=chosen
               show_qwen_turbo(session,qwen_turbo)
+              show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
               qwen_image_steps=qwen_turbo_steps(session,
                 qwen_effective_scheduler(qwen_turbo,qwen_image_scheduler),qwen_image_steps)
               continue
@@ -4373,6 +4454,7 @@ pub fn main(args: view<str>) -> i32
             if id=="qwen_edit_model"{
               qwen_edit_fibo=desk.number(event,"value")==1.0
               show_edit_model(session,qwen_edit_fibo)
+              show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
               let _=desk.set_text(session,"qwen_edit_status",
                 if qwen_edit_fibo{"Fibo 2.0 Edit Turbo: image 1 is the picture to change; up to four more images can guide it"}
                 else{"Qwen-Image-2.1 edit selected"})
@@ -4396,7 +4478,8 @@ pub fn main(args: view<str>) -> i32
               show_qwen_recipe(session,qwen_image_scheduler,qwen_image_sampler)
             }
             if id=="qwen_image_sampler"{
-              qwen_image_sampler=cast.sat(desk.number(event,"value"))
+              qwen_image_sampler=parameters.qwen_sampler_code(cast.sat(desk.number(event,"value")))
+              show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
               show_qwen_recipe(session,qwen_image_scheduler,qwen_image_sampler)
             }
             if id=="gen_pp_text" or id=="gen_pp_vision" or id=="gen_pp_strength1" or id=="gen_pp_strength2" or
@@ -4413,6 +4496,29 @@ pub fn main(args: view<str>) -> i32
                   }
                   which = which + 1
                 }
+              }
+              continue
+            }
+            if id=="gen_image_sampler" or id=="gen_image_schedule" or id=="gen_image_eta" or id=="gen_image_bongmath"{
+              if parameters.is_moss_model(model_index){
+                if id=="gen_image_sampler"{let _=ref.swap(struct.borrow(moss_settings,field=sampler),
+                  parameters.image_sampler_name(cast.sat(desk.number(event,"value"))))}
+                if id=="gen_image_schedule"{let _=ref.swap(struct.borrow(moss_settings,field=schedule),
+                  parameters.sampler_schedule_name(cast.sat(desk.number(event,"value"))))}
+                if id=="gen_image_eta"{struct.set(moss_settings,desk.number(event,"value"),field=eta)}
+                if id=="gen_image_bongmath"{struct.set(moss_settings,desk.boolean(event,"value"),field=bongmath)}
+                let _=desk.set_bool(session,"gen_image_cs_box","sensitive",
+                  parameters.moss_uses_stepper(str.view(struct.borrow(moss_settings,field=sampler))))
+              }
+              if model_index==parameters.fibo_dev_model_index(){
+                if id=="gen_image_sampler"{let _=ref.swap(struct.borrow(fibo_settings,field=sampler),
+                  parameters.image_sampler_name(cast.sat(desk.number(event,"value"))))}
+                if id=="gen_image_schedule"{let _=ref.swap(struct.borrow(fibo_settings,field=schedule),
+                  parameters.sampler_schedule_name(cast.sat(desk.number(event,"value"))))}
+                if id=="gen_image_eta"{struct.set(fibo_settings,desk.number(event,"value"),field=eta)}
+                if id=="gen_image_bongmath"{struct.set(fibo_settings,desk.boolean(event,"value"),field=bongmath)}
+                let _=desk.set_bool(session,"gen_image_cs_box","sensitive",
+                  parameters.fibo_uses_stepper(str.view(struct.borrow(fibo_settings,field=sampler))))
               }
               continue
             }
@@ -4728,7 +4834,9 @@ pub fn main(args: view<str>) -> i32
                 steps:if qwen_turbo{
                   qwen_image_contract.turbo_steps()}else{qwen_image_steps},seed:qwen_edit_seed,
                 scheduler:qwen_effective_scheduler(qwen_turbo,qwen_image_scheduler),
-                sampler:qwen_image_sampler,enhance:qwen_edit_enhance,loras:swap_loras}
+                sampler:qwen_effective_sampler(qwen_turbo,qwen_image_sampler),
+                schedule:qwen_image_schedule,eta:qwen_image_eta,bongmath:qwen_image_bongmath,
+                enhance:qwen_edit_enhance,loras:swap_loras}
               let folder=path.join(output_directory,"qwen-image-2.1/edit")
               let stem=text.concat("qwen-edit-",string.from_int(time.monotonic_ns()))
               let allocated=match library.unused_output(str.view(folder),str.view(stem),".png"){
@@ -5899,11 +6007,14 @@ pub fn main(args: view<str>) -> i32
               qwen_turbo=true
               show_qwen_turbo(session,qwen_turbo)
               qwen_image_sampler=qwen_image_contract.sampler_euler()
+              qwen_image_schedule=qwen_image_contract.schedule_default()
+              qwen_image_eta=0.5
+              qwen_image_bongmath=true
+              show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
               let _=desk.set_number(session,"qwen_image_resolution","selected",0.0)
               let _=desk.set_number(session,"qwen_image_steps","value",
                 cast.float(qwen_image_steps))
               let _=desk.set_number(session,"qwen_image_scheduler","selected",0.0)
-              let _=desk.set_number(session,"qwen_image_sampler","selected",0.0)
               show_qwen_recipe(session,qwen_image_scheduler,qwen_image_sampler)
               seedvr2_enabled=false
               seedvr2_run_after=true
@@ -6918,7 +7029,9 @@ pub fn main(args: view<str>) -> i32
                     qwen_image_contract.turbo_steps()}else{qwen_image_steps},
                   seed:if seed<0{time.monotonic_ns()}else{cast.wrap(seed)},
                   scheduler:qwen_effective_scheduler(qwen_turbo,qwen_image_scheduler),
-                  sampler:qwen_image_sampler,enhance:enhance_prompt,
+                  sampler:qwen_effective_sampler(qwen_turbo,qwen_image_sampler),
+                  schedule:qwen_image_schedule,eta:qwen_image_eta,bongmath:qwen_image_bongmath,
+                  enhance:enhance_prompt,
                   loras:parameters.clone_loras(generate_loras)}
                 if id=="gen_save_parameters"{
                   match parameters.encode_qwen_image(request){

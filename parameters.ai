@@ -11,6 +11,7 @@ import std.inference.krea2.config as krea_config
 import std.draw as draw
 import "./.air/deps/flux1/latent.ai" as flux1_latent
 import "./.air/deps/fibo2/defaults.ai" as fibo_defaults
+import std.inference.clownshark_request as csr
 
 pub fn krea_model_index() -> u32 effects {} { 2 }
 pub fn qwen_image_model_index() -> u32 effects {} { 3 }
@@ -81,6 +82,63 @@ pub fn retired_flux3_message()->str effects {} {
 
 pub type LoraEntry = struct {path:string,strength:f64,enabled:bool} derive codec(strict)
 
+// Sampler controls (AIR std.inference.clownshark_request), the same on every wired model:
+// Sampler, Schedule, Noise (eta), Bong math. "default" is the model's own path. The Generate
+// Sampling list for MOSS and Fibo Dev, in display order (MOSS's Euler is its own Euler):
+pub fn image_sampler_names()->array<string> effects{alloc}{
+  ["default","res_2m","res_3m","res_2s","res_3s","res_5s","deis_2m","deis_3m","dpmpp_2m","dpmpp_2s","ddim","euler"]
+}
+pub fn sampler_schedule_names()->array<string> effects{alloc}{["default","beta57","bong_tangent"]}
+fn index_in(names:array<string> own,name:str)->u64 effects{alloc}{
+  var held=names
+  var index:u64=0
+  loop{
+    if index>=array.len(held){break}
+    if str.view(array.borrow(held,index))==name{return index}
+    index=index+1
+  }
+  0
+}
+fn name_at(names:array<string> own,index:u64)->string effects{alloc}{
+  var held=names
+  if index>=array.len(held){return string.copy("default")}
+  string.copy(str.view(array.borrow(held,index)))
+}
+pub fn image_sampler_index(name:str)->u64 effects{alloc}{index_in(image_sampler_names(),name)}
+pub fn image_sampler_name(index:u64)->string effects{alloc}{name_at(image_sampler_names(),index)}
+pub fn sampler_schedule_index(name:str)->u64 effects{alloc}{index_in(sampler_schedule_names(),name)}
+pub fn sampler_schedule_name(index:u64)->string effects{alloc}{name_at(sampler_schedule_names(),index)}
+// Schedule, Noise and Bong math take effect only with a shared sampler (MOSS: not ER-SDE or its Euler).
+pub fn moss_uses_stepper(name:str)->bool effects{}{
+  not (csr.is_default(name) or name=="er_sde" or name=="euler")
+}
+pub fn fibo_uses_stepper(name:str)->bool effects{}{ not csr.is_default(name) }
+fn check_sampling(sampler:str,schedule:str,eta:f64)->result<unit,string> effects{alloc}{
+  if not (csr.is_default(sampler) or sampler=="er_sde" or index_in(image_sampler_names(),sampler)!=0) {
+    return result.err("Choose a listed sampler")
+  }
+  let checked=if sampler=="er_sde"{csr.check("default",schedule,eta)}else{csr.check(sampler,schedule,eta)}
+  match checked{ok(_)=>result.ok(()),err(message)=>result.err(message),}
+}
+// Qwen-Image-2.1's Sampler list: its own Euler (the default) and DPM++ 2M in the places of the
+// shared methods of those names, the shared methods as contract codes 3..11.
+fn qwen_sampler_codes()->array<u64> effects{alloc}{[0,3,4,5,6,7,8,9,1,10,11]}
+pub fn qwen_sampler_index(code:u32)->u64 effects{alloc}{
+  var codes=qwen_sampler_codes()
+  var index:u64=0
+  loop{
+    if index>=array.len(codes){break}
+    if array.get(codes,index)==cast.wrap(code){return index}
+    index=index+1
+  }
+  0
+}
+pub fn qwen_sampler_code(index:u64)->u32 effects{alloc}{
+  var codes=qwen_sampler_codes()
+  if index>=array.len(codes){return qwen_contract.sampler_euler()}
+  cast.sat(array.get(codes,index))
+}
+
 // MOSS-Image Base or SFT text-to-image. Creator defaults (models/moss_image/scheduler.ai,
 // OpenMOSS README): 50 steps, CFG 3, shift 5, empty negative prompt, block-22 negative skip.
 // `fast` runs the INT8 projections (about twice as fast; fine detail differs).
@@ -91,7 +149,9 @@ pub type MossRequest = struct {
   model:string,prompt:string,negative:string,output:string,
   width:u64,height:u64,steps:u64,cfg:f64,shift:f64,seed:u64,fast:bool,
   loras:array<LoraEntry>,
-  prompt_images:array<string>,prompt_strength_percent:array<u64>,text_strength:f64,vision_size:u64
+  prompt_images:array<string>,prompt_strength_percent:array<u64>,text_strength:f64,vision_size:u64,
+  // Sampler controls (absent in older files: the model's own ER-SDE path)
+  sampler:string="default",schedule:string="default",eta:f64=0.5,bongmath:bool=true
 } derive codec(strict)
 type MossFile=struct {schema:string,request:MossRequest} derive codec(strict)
 // Parameter files saved before the image prompt existed (same schema name, no picture fields).
@@ -107,7 +167,9 @@ type MossFileV1=struct {schema:string,request:MossRequestV1} derive codec(strict
 // width/height 0 (edits only) keep the first picture's size.
 pub type FiboRequest = struct {
   model:string,prompt:string,negative:string,output:string,images:array<string>,
-  width:u64,height:u64,steps:u64,guidance:f64,seed:u64,loras:array<LoraEntry>
+  width:u64,height:u64,steps:u64,guidance:f64,seed:u64,loras:array<LoraEntry>,
+  // Sampler controls, Dev only (absent in older files: the model's own sampler); Edit Turbo keeps "default"
+  sampler:string="default",schedule:string="default",eta:f64=0.5,bongmath:bool=true
 } derive codec(strict)
 type FiboFile=struct {schema:string,request:FiboRequest} derive codec(strict)
 pub fn fibo_schema() -> str effects {} { "mm-air.fibo2.parameters.v1" }
@@ -154,6 +216,10 @@ pub fn validate_fibo(request:ref<FiboRequest>) -> result<unit,string> effects {a
   if not math.is_finite(request.guidance) or request.guidance<1.0 or request.guidance>20.0 {
     return result.err("Fibo 2.0 guidance must be 1 to 20")
   }
+  try check_sampling(str.view(struct.borrow(request,field=sampler)),str.view(struct.borrow(request,field=schedule)),request.eta)
+  if edit and not csr.is_default(str.view(struct.borrow(request,field=sampler))) {
+    return result.err("Fibo 2.0 Edit Turbo keeps its own sampler")
+  }
   if not path.is_absolute(struct.borrow(request,field=output)) or
       text.lower_ascii(path.extension(struct.borrow(request,field=output)))!=".png" {
     return result.err("Fibo 2.0 output must be an absolute PNG path")
@@ -171,7 +237,9 @@ pub fn copy_fibo(request:ref<FiboRequest>) -> FiboRequest effects {alloc} {
   FiboRequest {model:string.copy(struct.borrow(request,field=model)),prompt:string.copy(struct.borrow(request,field=prompt)),
     negative:string.copy(struct.borrow(request,field=negative)),output:string.copy(struct.borrow(request,field=output)),
     images:images,width:request.width,height:request.height,steps:request.steps,guidance:request.guidance,
-    seed:request.seed,loras:clone_loras(struct.borrow(request,field=loras))}
+    seed:request.seed,loras:clone_loras(struct.borrow(request,field=loras)),
+    sampler:string.copy(struct.borrow(request,field=sampler)),schedule:string.copy(struct.borrow(request,field=schedule)),
+    eta:request.eta,bongmath:request.bongmath}
 }
 pub fn encode_fibo(request:ref<FiboRequest>) -> result<string,string> effects {alloc} {
   let _=try validate_fibo(request)
@@ -273,6 +341,7 @@ pub fn validate_moss(request:ref<MossRequest>) -> result<unit,string> effects {a
   if not math.is_finite(request.text_strength) or request.text_strength<0.0 or request.text_strength>10.0 {
     return result.err("Text strength must be 0 to 10")}
   if request.vision_size<256 or request.vision_size>1024 {return result.err("Vision size must be 256 to 1024")}
+  try check_sampling(str.view(struct.borrow(request,field=sampler)),str.view(struct.borrow(request,field=schedule)),request.eta)
   validate_loras(struct.borrow(request,field=loras))
 }
 pub fn copy_moss(request:ref<MossRequest>) -> MossRequest effects {alloc} {
@@ -282,7 +351,9 @@ pub fn copy_moss(request:ref<MossRequest>) -> MossRequest effects {alloc} {
     seed:request.seed,fast:request.fast,loras:clone_loras(struct.borrow(request,field=loras)),
     prompt_images:copy_strings(struct.borrow(request,field=prompt_images)),
     prompt_strength_percent:copy_numbers(struct.borrow(request,field=prompt_strength_percent)),
-    text_strength:request.text_strength,vision_size:request.vision_size}
+    text_strength:request.text_strength,vision_size:request.vision_size,
+    sampler:string.copy(struct.borrow(request,field=sampler)),schedule:string.copy(struct.borrow(request,field=schedule)),
+    eta:request.eta,bongmath:request.bongmath}
 }
 fn copy_strings(values:ref<array<string>>) -> array<string> effects {alloc} {
   var out:array<string>=[]
@@ -350,6 +421,9 @@ pub type QwenImageRequest = struct {
   prompt:string,output:string,source:string,references:array<string>,
   width:u64,height:u64,steps:u64,seed:u64,
   scheduler:u32,sampler:u32,
+  // Sampler controls with a shared sampler (codes 3..11): schedule 0 Default / 1 Beta 57 /
+  // 2 Bong tangent, Noise (eta) and Bong math. Absent in older files: their defaults.
+  schedule:u32=0,eta:f64=0.5,bongmath:bool=true,
   // Text-to-image: rewrite the prompt first with Qwen-Image-2.1-PE-T2I, which
   // also picks the aspect ratio (width/height follow it, as in its model card).
   enhance:bool,
@@ -395,6 +469,16 @@ pub fn validate_qwen_image(request:ref<QwenImageRequest>)->result<unit,string>
   }
   if not qwen_contract.supported_sampler(request.sampler){
     return result.err("Choose a supported Qwen-Image-2.1 sampler")
+  }
+  if request.schedule>qwen_contract.schedule_bong_tangent(){
+    return result.err("Choose a supported Qwen-Image-2.1 schedule")
+  }
+  if not math.is_finite(request.eta) or request.eta<0.0 or request.eta>1.0{
+    return result.err("Noise must be 0 to 1")
+  }
+  if qwen_contract.is_clownshark_sampler(request.sampler) and
+      request.scheduler==qwen_contract.scheduler_turbo(){
+    return result.err("Qwen-Image-2.1-Turbo keeps its own sampler")
   }
   if not text.ends_with(text.lower_ascii(struct.borrow(request,field=output)),".png"){
     return result.err("Choose a .png output for Qwen-Image-2.1")
@@ -450,6 +534,10 @@ pub fn encode_qwen_image(request:ref<QwenImageRequest>)->result<string,string>
   var solver_name=qwen_contract.sampler_name(request.sampler)
   codec.field_text(out,"noise_schedule",str.view(schedule_name))
   codec.field_text(out,"solver",str.view(solver_name))
+  codec.field_u64(out,"schedule",cast.wrap(request.schedule))
+  codec.field_text(out,"schedule_name",qwen_contract.schedule_label(request.schedule))
+  codec.field_f64(out,"eta",request.eta)
+  codec.field_bool(out,"bongmath",request.bongmath)
   codec.field_u64(out,"seed",request.seed)
   codec.field_bool(out,"enhance",request.enhance)
   codec.key(out,"loras")
@@ -522,6 +610,14 @@ pub fn decode_qwen_image(source:str)->result<QwenImageRequest,string>
     output:try string_field(document,"output"),
     width:width,height:height,steps:steps,seed:seed,
     scheduler:cast.sat(scheduler),sampler:cast.sat(sampler),
+    schedule:match json.get(document,json.root(),"schedule"){
+      some(_)=>cast.sat(try count(document,"schedule")),none=>qwen_contract.schedule_default()},
+    eta:match json.get(document,json.root(),"eta"){
+      some(node)=>match json.as_f64(document,node){some(value)=>value,none=>{return result.err("eta must be a number")}},
+      none=>csr.default_eta()},
+    bongmath:match json.get(document,json.root(),"bongmath"){
+      some(node)=>match json.as_bool(document,node){some(value)=>value,none=>{return result.err("bongmath must be true or false")}},
+      none=>csr.default_bongmath()},
     enhance:match json.get(document,json.root(),"enhance"){
       some(node)=>match json.as_bool(document,node){some(value)=>value,none=>false},none=>false},
     loras:try decode_loras(document)}

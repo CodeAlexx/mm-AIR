@@ -104,7 +104,7 @@ pub type QwenImageCancelableJob = struct {job:QwenImageJob,cancel_path:string}
 // The model folder comes from Settings (MM_AIR_MOSS_BASE_ROOT / MM_AIR_MOSS_SFT_ROOT).
 // LoRAs run beside the DiT weights at their strength; nothing is merged.
 pub fn run_moss(job:MossJob own)->Outcome
-    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+    effects {alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
   var owned=job
   var ticket=ref.swap(struct.borrow(owned,field=progress),no_progress())
   var connection=match channel.connect(ticket,time.monotonic_ns()+30000000000){
@@ -119,7 +119,7 @@ pub fn run_moss(job:MossJob own)->Outcome
 }
 
 fn run_moss_inner(request:ref<parameters.MossRequest>,sender:ref<option<channel.Sender>>)->Outcome
-    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+    effects {alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
   let started=time.monotonic_ns()
   let output=string.copy(struct.borrow(request,field=output))
   match parameters.validate_moss(request){
@@ -159,7 +159,12 @@ fn run_moss_inner(request:ref<parameters.MossRequest>,sender:ref<option<channel.
     shift:request.shift,train_shift:moss_scheduler.training_shift(),
     grid:moss_scheduler.Grid.Oracle,guidance:cast.float(request.cfg),seed:request.seed,
     skip_uncond:skip,max_tokens:4096,output:string.copy(output),scratch:string.copy(str.view(scratch)),
-    fast:if request.fast{string.copy(moss_generate.fast_modes())}else{string.new()}}
+    fast:if request.fast{string.copy(moss_generate.fast_modes())}else{string.new()},
+    // Default is MOSS's own ER-SDE; Schedule applies only with a shared sampler.
+    sampler:string.copy(struct.borrow(request,field=sampler)),
+    schedule:if parameters.moss_uses_stepper(str.view(struct.borrow(request,field=sampler))){
+      string.copy(struct.borrow(request,field=schedule))}else{string.copy("default")},
+    eta:request.eta,bongmath:request.bongmath}
   report(sender,str.view(text.concat("Loading ",label)))
   // Image prompt: pictures read by the text encoder beside the prompt (strength 0 leaves one out).
   var prompting=moss_prompt.none()
@@ -252,7 +257,11 @@ fn run_fibo_inner(request:ref<parameters.FiboRequest>,sender:ref<option<channel.
     prompt:string.copy(struct.borrow(request,field=prompt)),negative:negative,has_negative:has_negative,
     images:images,mask:string.new(),width:request.width,height:request.height,steps:request.steps,
     guidance:cast.float(request.guidance),seed:request.seed,output:string.copy(str.view(output)),
-    pinned_resident_gib:0,pinned_slots:3,text_images:true,fonts:[],dump_dir:string.new(),loras:loras}
+    pinned_resident_gib:0,pinned_slots:3,text_images:true,fonts:[],dump_dir:string.new(),loras:loras,
+    sampler:string.copy(struct.borrow(request,field=sampler)),
+    schedule:if parameters.fibo_uses_stepper(str.view(struct.borrow(request,field=sampler))){
+      string.copy(struct.borrow(request,field=schedule))}else{string.copy("default")},
+    eta:request.eta,bongmath:request.bongmath}
   report(sender,str.view(text.concat(label,": reading the model and generating")))
   match fibo_generate.run(job){
     ok(_)=>outcome_metrics(true,output,str.view(text.concat(label,
@@ -272,7 +281,7 @@ fn scale_png(file:str,width:u64,height:u64)->result<unit,string> effects {alloc,
 }
 
 pub fn run_qwen_image(job:QwenImageJob own)->Outcome
-    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+    effects {alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
   var owned=job
   run_qwen_image_policy(owned,qwen_image_attention.Policy.Exact,"")
 }
@@ -280,14 +289,14 @@ pub fn run_qwen_image(job:QwenImageJob own)->Outcome
 // Both operating systems use the same request handling, progress and
 // generation policy.
 pub fn run_qwen_image_cancelable(work:QwenImageCancelableJob own)->Outcome
-    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+    effects {alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
   var owned=work
   run_qwen_image_policy(struct.borrow(owned,field=job),qwen_image_attention.Policy.Exact,
     struct.borrow(owned,field=cancel_path))
 }
 
 fn run_qwen_image_policy(owned:ref<QwenImageJob>,policy:qwen_image_attention.Policy,cancel_path:str)->Outcome
-    effects {alloc,env,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+    effects {alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
   var ticket=ref.swap(struct.borrow(owned,field=progress),no_progress())
   var connection=match channel.connect(ticket,time.monotonic_ns()+30000000000){
     ok(value)=>value,
@@ -368,7 +377,11 @@ fn run_qwen_image_policy(owned:ref<QwenImageJob>,policy:qwen_image_attention.Pol
           steps:request.steps,seed:request.seed,
           true_cfg_scale:qwen_image_contract.default_true_cfg_scale(),
           condition_images:condition_count,
-          scheduler:request.scheduler,sampler:request.sampler},policy){
+          scheduler:request.scheduler,sampler:request.sampler,
+          // Schedule applies only with a shared sampler (Euler and DPM++ 2M are the model's own).
+          schedule:if qwen_image_contract.is_clownshark_sampler(request.sampler){request.schedule}
+            else{qwen_image_contract.schedule_default()},
+          eta:request.eta,bongmath:request.bongmath},policy){
         ok(value)=>value,
         err(message)=>{var failed=outcome(false,struct.borrow(request,field=output),message)
           finish_progress(sender,failed)

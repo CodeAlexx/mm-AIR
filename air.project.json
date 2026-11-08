@@ -27,6 +27,10 @@
         "entry": "tests/native_image_generate.ai"
       },
       {
+        "name": "native-qwen-generate",
+        "entry": "tests/native_qwen_generate.ai"
+      },
+      {
         "name": "mm-air-native-view-test",
         "entry": "tests/native_view.ai"
       },

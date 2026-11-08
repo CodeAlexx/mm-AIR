@@ -356,6 +356,58 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.read,io.write} {
   if not parameters.fibo_is_edit(edit_back) or array.len(struct.borrow(edit_back,field=images))!=2 or edit_back.width!=0 { return 1 }
   array.push(struct.borrow(fibo_edit,field=images),"/tmp/c.webp")
   match parameters.validate_fibo(fibo_edit){ok(_)=>{return 1},err(_)=>{},}
+  // Sampler controls (Sampler / Schedule / Noise / Bong math). Codes 41+ name the failing check.
+  // A MOSS file saved before the fields reads as Default (ER-SDE) with the field defaults.
+  let moss_old="{\"schema\":\"mm-air.moss-image.parameters.v1\",\"request\":{\"model\":\"moss-image-base\",\"prompt\":\"a cat\",\"negative\":\"\",\"output\":\"/tmp/m.png\",\"width\":1024,\"height\":1024,\"steps\":50,\"cfg\":3.0,\"shift\":5.0,\"seed\":42,\"fast\":false,\"loras\":[],\"prompt_images\":[],\"prompt_strength_percent\":[],\"text_strength\":1.0,\"vision_size\":384}}"
+  var moss_old_back=match parameters.decode_moss(moss_old){ok(value)=>value,err(_)=>{return 41},}
+  if moss_old_back.sampler!="default" or moss_old_back.schedule!="default" or moss_old_back.eta!=0.5 or not moss_old_back.bongmath { return 42 }
+  var moss_cs=parameters.copy_moss(moss_back)
+  let _=ref.swap(struct.borrow(moss_cs,field=sampler),string.copy("res_2m"))
+  let _=ref.swap(struct.borrow(moss_cs,field=schedule),string.copy("beta57"))
+  struct.set(moss_cs,0.25,field=eta)
+  struct.set(moss_cs,false,field=bongmath)
+  let moss_cs_json=match parameters.encode_moss(moss_cs){ok(value)=>value,err(_)=>{return 43},}
+  var moss_cs_back=match parameters.decode_moss(moss_cs_json){ok(value)=>value,err(_)=>{return 44},}
+  if moss_cs_back.sampler!="res_2m" or moss_cs_back.schedule!="beta57" or moss_cs_back.eta!=0.25 or moss_cs_back.bongmath { return 45 }
+  if not parameters.moss_uses_stepper("res_2m") or parameters.moss_uses_stepper("euler") or parameters.moss_uses_stepper("default") { return 46 }
+  struct.set(moss_cs,1.5,field=eta)
+  match parameters.validate_moss(moss_cs){ok(_)=>{return 47},err(_)=>{},}
+  struct.set(moss_cs,0.5,field=eta)
+  let _=ref.swap(struct.borrow(moss_cs,field=sampler),string.copy("nope"))
+  match parameters.validate_moss(moss_cs){ok(_)=>{return 48},err(_)=>{},}
+  // Fibo: a file without the fields reads as Default; Edit Turbo keeps its own sampler.
+  let fibo_old="{\"schema\":\"mm-air.fibo2.parameters.v1\",\"request\":{\"model\":\"fibo-2.0-dev\",\"prompt\":\"a fox\",\"negative\":\"\",\"output\":\"/tmp/f.png\",\"images\":[],\"width\":1024,\"height\":1024,\"steps\":50,\"guidance\":5.0,\"seed\":42,\"loras\":[]}}"
+  var fibo_old_back=match parameters.decode_fibo(fibo_old){ok(value)=>value,err(_)=>{return 49},}
+  if fibo_old_back.sampler!="default" or not parameters.fibo_uses_stepper("euler") or parameters.fibo_uses_stepper("default") { return 50 }
+  var fibo_turbo_cs=parameters.copy_fibo(edit_back)
+  let _=ref.swap(struct.borrow(fibo_turbo_cs,field=sampler),string.copy("res_2m"))
+  match parameters.validate_fibo(fibo_turbo_cs){ok(_)=>{return 51},err(_)=>{},}
+  // Qwen: a version-2 file without the fields (the shape History saved) reads with their defaults.
+  let qwen_old="{\"schema\":\"mm-air.qwen-image-2.1.parameters\",\"version\":2,\"model\":\"qwen-image-2.1\",\"mode\":\"edit\",\"prompt\":\"swap\",\"source\":\"/tmp/source.jpg\",\"references\":[\"/tmp/ref.jpg\"],\"output\":\"qwen-image-2.1/edit/qwen-edit-1.png\",\"width\":608,\"height\":896,\"steps\":40,\"scheduler\":0,\"sampler\":0,\"noise_schedule\":\"Dynamic shifted Flow\",\"solver\":\"Euler\",\"seed\":44462283733756777,\"enhance\":false,\"loras\":[{\"path\":\"/tmp/head.safetensors\",\"strength\":1,\"enabled\":true}]}"
+  var qwen_old_back=match parameters.decode_qwen_image(qwen_old){ok(value)=>value,err(_)=>{return 52},}
+  if qwen_old_back.sampler!=0 or qwen_old_back.schedule!=0 or qwen_old_back.eta!=0.5 or not qwen_old_back.bongmath { return 53 }
+  struct.set(qwen_old_back,3,field=sampler)
+  struct.set(qwen_old_back,1,field=schedule)
+  struct.set(qwen_old_back,0.75,field=eta)
+  struct.set(qwen_old_back,false,field=bongmath)
+  let _=ref.swap(struct.borrow(qwen_old_back,field=output),string.copy("/tmp/q.png"))
+  let qwen_cs_json=match parameters.encode_qwen_image(qwen_old_back){ok(value)=>value,err(_)=>{return 54},}
+  if not text.contains(qwen_cs_json,"\"solver\":\"res_2m\"") or not text.contains(qwen_cs_json,"\"schedule_name\":\"beta57\"") { return 55 }
+  var qwen_cs_back=match parameters.decode_qwen_image(qwen_cs_json){ok(value)=>value,err(_)=>{return 56},}
+  if qwen_cs_back.sampler!=3 or qwen_cs_back.schedule!=1 or qwen_cs_back.eta!=0.75 or qwen_cs_back.bongmath { return 57 }
+  struct.set(qwen_cs_back,2,field=scheduler)  // Turbo
+  struct.set(qwen_cs_back,8,field=steps)
+  match parameters.validate_qwen_image(qwen_cs_back){ok(_)=>{return 58},err(_)=>{},}
+  // The Sampler list order maps to the contract codes and back (Euler 0, DPM++ 2M 1, shared 3..11).
+  var code:u32=0
+  loop{
+    if code>11{break}
+    if code!=2 and parameters.qwen_sampler_code(parameters.qwen_sampler_index(code))!=code { return 59 }
+    code=code+1
+  }
+  if parameters.qwen_sampler_index(0)!=0 or parameters.qwen_sampler_index(1)!=8 or parameters.qwen_sampler_index(3)!=1 { return 60 }
+  if parameters.image_sampler_name(0)!="default" or parameters.image_sampler_name(11)!="euler" or
+     parameters.image_sampler_index("dpmpp_2s")!=9 or parameters.sampler_schedule_name(2)!="bong_tangent" { return 61 }
   if not expect_error("{\"schema\":\"mm-air.generate.parameters\",\"version\":99}") { return 1 }
   // Persist the requested fractional seconds, recomputing delivery frames on
   // the native 24 FPS clock when parameters are loaded or reused.
