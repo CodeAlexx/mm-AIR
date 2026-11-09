@@ -1120,6 +1120,7 @@
                     <child><object class="GtkLabel"><property name="label">Height</property><property name="xalign">0</property><layout><property name="column">0</property><property name="row">9</property></layout></object></child><child><object class="GtkSpinButton" id="qwen_edit_height"><property name="adjustment">qwen_edit_height_adjustment</property><property name="numeric">true</property><layout><property name="column">1</property><property name="row">9</property></layout></object></child>
                   </object></child></object></child>
                   <child><object class="GtkButton" id="qwen_edit_run"><property name="label">Generate Edit</property><property name="sensitive">false</property><style><class name="primary-action"/></style></object></child>
+                  <child><object class="GtkButton" id="qwen_edit_download"><property name="label">Download</property><property name="sensitive">false</property></object></child>
                   <child><object class="GtkLabel" id="qwen_edit_status"><property name="label">Add 1–10 PNG, JPEG, or WebP source images to begin</property><property name="wrap">true</property><property name="selectable">true</property><property name="xalign">0</property><style><class name="capability-note"/></style></object></child>
                   <layout><property name="column">0</property><property name="row">0</property></layout>
                 </object></child></object></child>
@@ -1210,7 +1211,7 @@
       <child><object class="GtkStackPage"><property name="name">image</property><property name="child">
         <object class="GtkBox" id="result_fullscreen"><property name="orientation">vertical</property><property name="spacing">8</property><property name="hexpand">true</property><property name="vexpand">true</property><property name="margin-start">10</property><property name="margin-end">10</property><property name="margin-top">10</property><property name="margin-bottom">10</property><style><class name="fullscreen-preview"/></style>
           <child><object class="GtkBox"><property name="spacing">12</property>
-            <child><object class="GtkButton" id="result_fullscreen_close"><property name="label">Back</property><property name="tooltip-text">Close expanded image · Escape</property><style><class name="quiet-button"/></style></object></child>
+            <child><object class="GtkButton" id="result_fullscreen_close"><property name="label">Back</property><property name="tooltip-text">Close expanded image · Escape</property><style><class name="quiet-button"/></style></object></child><child><object class="GtkButton" id="result_fullscreen_download"><property name="label">Download</property><style><class name="quiet-button"/></style></object></child>
             <child><object class="GtkLabel" id="image_view_name"><property name="hexpand">true</property><property name="xalign">0</property><property name="ellipsize">middle</property><style><class name="muted"/></style></object></child>
             <child><object class="GtkLabel"><property name="label">Escape or double-click to return</property><style><class name="muted"/></style></object></child>
           </object></child>

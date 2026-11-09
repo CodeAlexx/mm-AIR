@@ -112,6 +112,31 @@ target asks that AIR toolchain to verify the locked package graph before every
 application build; there is no copied H3 implementation or H3 native wrapper in
 MM-Air.
 
+### Safe mode, downloads, output folder (2026-11-09)
+
+**Safe mode** (Settings, Safe mode column) keeps adult pictures and videos away from younger
+users: On, PIN (Unlock / Lock, Set PIN), Adult items Hide or Blur, Relock after (minutes, default
+30; a restart relocks), Adult LoRAs (from the LoRA library) and Adult words. The **Adult** toggle
+in History marks one item; the owner's mark wins over the automatic rule both ways. While on and
+locked, adult items are kept out of every gallery, preview and player (`safe_mode.ai`); anything
+made from an adult picture or video counts as adult, and side-by-side or stitched movies made from
+adult results are marked adult. Images and videos only. The logic and store
+(`~/.config/air/safe-media`) are AIR's `std.safe_media`, shared with SerenityAir. Test:
+`mm-air-safe-mode-check SCRATCH PICTURE.png` with `AIR_SAFE_MEDIA_DIR` and `XDG_DATA_HOME` set to
+scratch folders.
+
+**Download** copies the shown picture to the desktop Downloads folder from History, from the
+**Image Edit** screen (under Generate Edit; Qwen and Fibo edits) and from the fullscreen view.
+
+An empty **Output folder** setting (`MM_AIR_OUTPUT_ROOT` = "") means the home folder, as an
+absolute path, so outputs keep landing in `~/h3`, `~/qwen-image-2.1`, `~/fibo2`, ...
+(the relative empty path made Fibo and MOSS refuse their output with "must be an absolute PNG
+path").
+
+**H3 always encodes the prompt with the ConvRot INT8 conditioner** (24 GB, held in RAM). The
+exact BF16 conditioner streams 49 GB from disk and AIR allows that once per process, so a second
+BF16 run was refused; the Encoder choice is hidden and reused settings use ConvRot too.
+
 ### Qwen-Image-2.1 generation and image edit
 
 Generate's model picker includes **Qwen-Image-2.1** for native text-to-image

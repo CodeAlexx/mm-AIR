@@ -1052,11 +1052,12 @@ fn show_source(session:ref<desk.Session>,safe:ref<safe_mode.State>,filename: str
   }
 }
 
-fn open_image_view(session:ref<desk.Session>,safe:ref<safe_mode.State>,filename: str) -> unit
+fn open_image_view(session:ref<desk.Session>,safe:ref<safe_mode.State>,filename: str,shown:ref<string>) -> unit
     effects {alloc,fs.meta,fs.read,net,time} {
   if safe_mode.blocked(safe,filename) { return () }
   match media.inspect(filename, 68719476736) {
     ok(info) => { if info.kind == media.Kind.Image {
+      let _ = ref.swap(shown,string.copy(filename))
       let _ = safe_mode.picture(session,safe,"result_fullscreen_picture",filename)
       let _ = desk.set_text(session,"image_view_name",path.basename(filename))
       let _ = desk.set_string(session,"app_surface","visible-child-name","image")
@@ -1758,6 +1759,8 @@ pub fn main(args: view<str>) -> i32
   var qwen_edit_height:u64=qwen_image_contract.default_height()
   var qwen_edit_resolution_index:u32=0
   var qwen_edit_result:string=string.new()
+  // the picture the fullscreen view shows (its Download copies it)
+  var image_view_file:string=string.new()
   var history: array<library.Item> = match library.load_history() {
     ok(value) => value,
     err(message) => { io.ewrite(text.concat(message, "\n"))
@@ -1967,6 +1970,8 @@ pub fn main(args: view<str>) -> i32
                     }
                     qwen_edit_source=string.copy(str.view(array.borrow(qwen_edit_references,0)))
                     qwen_edit_result=string.copy(struct.borrow(request,field=output))
+                    let _=desk.set_bool(session,"qwen_edit_download","sensitive",
+                      match files.exists(str.view(qwen_edit_result)){ok(v)=>v,err(_)=>false})
                     let _=desk.set_text(session,"qwen_edit_prompt_buffer",str.view(qwen_edit_prompt))
                     qwen_edit_width=request.width
                     qwen_edit_height=request.height
@@ -2330,6 +2335,7 @@ pub fn main(args: view<str>) -> i32
                 match task.join(option.unwrap(array.pop(copies))) {
                   ok(destination) => {
                     let _ = desk.set_text(session, "status", text.concat("Copied to: ", destination))
+                    let _ = desk.set_text(session, "qwen_edit_status", text.concat("Copied to: ", destination))
                     io.write(text.concat("mm-air copied=", text.concat(destination, "\n")))
                   },
                   err(message) => { let _ = desk.set_text(session, "status", message)
@@ -2563,6 +2569,7 @@ pub fn main(args: view<str>) -> i32
                   show_result(session,safe,str.view(struct.borrow(completed, field=output)))
                   if qwen_edit_active{
                     qwen_edit_result=string.copy(struct.borrow(completed,field=output))
+                    let _=desk.set_bool(session,"qwen_edit_download","sensitive",true)
                     let _=safe_mode.picture(session,safe,"qwen_edit_result_picture",
                       struct.borrow(completed,field=output))
                     let _=desk.set_bool(session,"qwen_edit_result_empty","visible",false)
@@ -3632,7 +3639,7 @@ pub fn main(args: view<str>) -> i32
           if kind == "activate" and (id == "result_picture" or
              id == "qwen_edit_source_picture" or id == "qwen_edit_result_picture" or
              id == "edit_source_picture" or id == "edit_crop_preview") {
-            open_image_view(session,safe,desk.field(event,"value"))
+            open_image_view(session,safe,desk.field(event,"value"),image_view_file)
             continue
           }
           if kind == "select" or kind == "activate" {
@@ -3650,7 +3657,7 @@ pub fn main(args: view<str>) -> i32
                   array.borrow(qwen_edit_references,qwen_edit_selected)))}
                 let _=desk.set_bool(session,"qwen_edit_remove_source","sensitive",true)
                 if kind == "activate" { open_image_view(session,safe,str.view(
-                  array.borrow(qwen_edit_references,qwen_edit_selected))) }
+                  array.borrow(qwen_edit_references,qwen_edit_selected)),image_view_file) }
               }
               continue
             }
@@ -3748,13 +3755,13 @@ pub fn main(args: view<str>) -> i32
                 str.len(key) != 0)
               let filename = selected_path(swap_character_references,key)
               if filename != "" { show_source(session,safe,filename)
-                if kind == "activate" { open_image_view(session,safe,filename) } }
+                if kind == "activate" { open_image_view(session,safe,filename,image_view_file) } }
             }
             if key != "" and (id == "gen_visual_refs" or id == "gen_audio_refs") {
               let filename = if id == "gen_visual_refs" { selected_path(visual_references, key) }
                              else { selected_path(audio_references, key) }
               if filename != "" { show_source(session,safe,filename)
-                if kind == "activate" { open_image_view(session,safe,filename) } }
+                if kind == "activate" { open_image_view(session,safe,filename,image_view_file) } }
             }
             if id == "gen_history" or id == "gen_current" {
               // Safe mode: a blurred tile can be selected but never opened or used.
@@ -3775,7 +3782,7 @@ pub fn main(args: view<str>) -> i32
                                  else { selected_path(history, key) }
                   selected_result = string.copy(filename)
                   show_result(session,safe,filename)
-                  if kind == "activate" { open_image_view(session,safe,filename) }
+                  if kind == "activate" { open_image_view(session,safe,filename,image_view_file) }
                   let post=if id=="gen_current"{selected_postprocess(current,key)}
                     else{selected_postprocess(history,key)}
                 },
@@ -6427,6 +6434,19 @@ pub fn main(args: view<str>) -> i32
               let _ = desk.set_bool(session, "gen_side_by_side", "sensitive", false)
               side_by_side_from = string.copy(str.view(selected_result))
               array.push(side_jobs, task.spawn(string.copy(selected_result), fn=make_side_by_side))
+              continue
+            }
+            if id == "qwen_edit_download" or id == "result_fullscreen_download" {
+              let file: string = if id == "qwen_edit_download" { string.copy(str.view(qwen_edit_result)) }
+                                 else { string.copy(str.view(image_view_file)) }
+              if str.len(str.view(file)) == 0 or safe_mode.blocked(safe,str.view(file)) { continue }
+              if array.len(copies) != 0 {
+                let _ = desk.set_text(session, "status", "Copy to Downloads is still running")
+                continue
+              }
+              let _ = desk.set_text(session, "status", "Copying to Downloads…")
+              if id == "qwen_edit_download" { let _ = desk.set_text(session, "qwen_edit_status", "Copying to Downloads…") }
+              array.push(copies, task.spawn(file, fn=copy_result))
               continue
             }
             if id == "gen_copy_downloads" {
