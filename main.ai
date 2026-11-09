@@ -1537,9 +1537,14 @@ pub fn main(args: view<str>) -> i32
   let bindir: string = path.dirname(program)
   let configured_output=match runtime_config.value("MM_AIR_OUTPUT_ROOT"){
     ok(value)=>value,err(problem)=>{return fail(problem)},}
-  var output_directory:string=match configured_output{
-    some(value)=>path.normalize(value),none=>path.join(
+  // An empty Output folder setting resolved to "" (relative: outputs landed under the working folder, and
+  // Fibo/MOSS refused the relative path). Empty now means the home folder, absolute, so outputs stay where
+  // they have been landing (~/h3, ~/qwen-image-2.1, ~/fibo2 ...).
+  let home_output:string=match system.home_directory(){some(home)=>home,none=>path.join(
       match library.data_directory(){ok(value)=>value,err(problem)=>{return fail(problem)}},"Output")}
+  var output_directory:string=match configured_output{
+    some(value)=>if str.len(str.view(text.trim(str.view(value))))==0 {string.copy(str.view(home_output))} else {path.normalize(value)},
+    none=>path.join(match library.data_directory(){ok(value)=>value,err(problem)=>{return fail(problem)}},"Output")}
   var local_settings=match settings.load(output_directory){ok(value)=>value,
     err(problem)=>{return fail(problem)},}
   // Safe mode (shared AIR store); the unlock lives only in this process.
@@ -2245,7 +2250,9 @@ pub fn main(args: view<str>) -> i32
                 model_index = restored.model
                 task_index = restored.task
                 profile_index = restored.profile
-                conditioner_projection_index = restored.conditioner_projection
+                // H3 always encodes with ConvRot INT8: the 49 GB BF16 encoder streams from disk and runs only
+                // once per process (owner 11-09: always ConvRot, also for reused settings)
+                conditioner_projection_index = h3.projection_convrot_int8()
                 transformer_projection_index = restored.transformer_projection
                 attention_index = restored.attention
                 show_movie_runtime_policy(session,profile_index,conditioner_projection_index,
@@ -4581,7 +4588,7 @@ pub fn main(args: view<str>) -> i32
             }
             if id == "gen_profile" { profile_index = cast.sat(desk.number(event, "value")) }
             if id == "gen_conditioner_projection" {
-              conditioner_projection_index = cast.sat(desk.number(event, "value"))
+              conditioner_projection_index = h3.projection_convrot_int8()
             }
             if id == "gen_transformer_projection" {
               transformer_projection_index = cast.sat(desk.number(event, "value"))
@@ -4881,7 +4888,7 @@ pub fn main(args: view<str>) -> i32
                 if array.len(prompt_jobs)==0 {show_prompt_model(session,prompt_model_index)}
                 match runtime_config.value("MM_AIR_OUTPUT_ROOT"){
                   ok(value)=>match value{some(folder)=>{
-                    output_directory=path.normalize(folder)
+                    output_directory=if str.len(str.view(text.trim(str.view(folder))))==0 {string.copy(str.view(home_output))} else {path.normalize(folder)}
                     movie_library_root=path.join(output_directory,"movies")},none=>{},},
                   err(problem)=>{let _=desk.set_text(session,"settings_status",problem)},}
                 let _=desk.set_text(session,"settings_status",text.concat(
@@ -7433,7 +7440,7 @@ pub fn main(args: view<str>) -> i32
                     else { h3_session.Task.Ref2VA }
                   let model = if request.model == h3.model_base() { h3_session.Model.Base }
                     else { h3_session.Model.Reference }
-                  let conditioner_projection: h3_session.Projection = session_projection(request.conditioner_projection)
+                  let conditioner_projection: h3_session.Projection = h3_session.Projection.ConvRotI8
                   // Character Swap runs the plain Ref2VA root with its LoRA files
                   // applied at run time, after any LoRAs in the Generate list. The
                   // 4-step schedule also needs the turbo (distillation) LoRA.

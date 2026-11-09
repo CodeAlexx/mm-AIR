@@ -784,7 +784,7 @@ pub fn h3_job(configuration:ref<Configuration>,request:ref<h3_request.Request>,
     request.geometry,copied_paths(struct.borrow(request,field=references)),
     copied_paths(struct.borrow(request,field=audio_references)),struct.borrow(request,field=output),
     parameters.clone_loras(loras),character_sheet.off(),"",cast.sat(request.seed),
-    h3_request.evaluations(presets,request.profile),request_projection(request.conditioner_projection),
+    h3_request.evaluations(presets,request.profile),session.Projection.ConvRotI8,
     request_projection(request.transformer_projection),attention,progress,
     if h3_request.exponential(presets,request.profile){session.Schedule.Exponential}else{session.Schedule.Simple},
     h3_request.sampler(presets,request.profile)))
