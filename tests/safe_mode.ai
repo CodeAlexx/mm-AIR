@@ -1,0 +1,184 @@
+// MM-Air Safe mode: what is kept out of galleries and previews, hide vs blur, PIN unlock and
+// relock, the owner's marks winning both ways, sidecar and made-from rules.
+// Run with AIR_SAFE_MEDIA_DIR and XDG_DATA_HOME set to empty scratch folders:
+//   safe_mode SCRATCH_DIR PICTURE.png
+module app.mm_air.tests.safe_mode
+
+import std.files as files
+import std.path as path
+import std.text as text
+import std.safe_media as sm
+import "../library.ai" as library
+import "../safe_mode.ai" as safe
+
+fn check(name: str, ok: bool, failed: ref<u64>) -> unit effects {alloc, io.write} {
+  io.write(if ok { "ok   " } else { "FAIL " })
+  io.write(name)
+  io.write("\n")
+  if not ok { let _ = ref.swap(failed, failed + 1) }
+  ()
+}
+
+fn params(prompt: str, lora: str, source: str) -> string effects {alloc} {
+  var out: string = text.copy("{\"schema\":\"mm-air.krea2.parameters\",\"prompt\":\"")
+  string.append(out, prompt)
+  string.append(out, "\",\"negative_prompt\":\"nude\",\"output\":\"/o/self.png\",\"loras\":[")
+  if str.len(lora) != 0 {
+    string.append(out, "{\"path\":\"")
+    string.append(out, lora)
+    string.append(out, "\",\"strength\":1.0,\"enabled\":true}")
+  }
+  string.append(out, "],\"request\":{\"references\":[")
+  if str.len(source) != 0 {
+    string.append(out, "\"")
+    string.append(out, source)
+    string.append(out, "\"")
+  }
+  string.append(out, "]}}")
+  out
+}
+
+fn shows(state: ref<safe.State>, items: ref<array<library.Item>>, index: u64) -> bool
+    effects {alloc, env, fs.meta, fs.read, fs.write, process, time} {
+  let t: safe.Tile = safe.tile(state, array.borrow(items, index))
+  t.show
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, random, time} {
+  var failed: u64 = 0
+  let store: bool = match env.get("AIR_SAFE_MEDIA_DIR") { some(v) => str.len(str.view(v)) != 0, none => false }
+  let data: bool = match env.get("XDG_DATA_HOME") { some(v) => str.len(str.view(v)) != 0, none => false }
+  if not store or not data or view.len(args) < 3 {
+    io.ewrite("usage: AIR_SAFE_MEDIA_DIR=... XDG_DATA_HOME=... safe_mode SCRATCH PICTURE.png\n")
+    return 2
+  }
+  let scratch: str = view.get(args, 1)
+  let picture: str = view.get(args, 2)
+
+  // what a parameter file says it was made with
+  var made: safe.MadeWith = safe.made_with(str.view(params("a red car", "/l/eri-krea2.safetensors", "/m/in.png")))
+  check("made-with: LoRA path read", array.len(struct.borrow(made, field=loras)) == 1, failed)
+  check("made-with: prompt read, negative prompt left out", text.contains(str.view(struct.borrow(made, field=prompt)), "red car")
+    and not text.contains(str.view(struct.borrow(made, field=prompt)), "nude"), failed)
+  check("made-with: source picture read, output left out", array.len(struct.borrow(made, field=sources)) == 1
+    and str.view(array.borrow(struct.borrow(made, field=sources), 0)) == "/m/in.png", failed)
+
+  // settings: on, PIN, adult LoRA and word, hide
+  var s: sm.Settings = sm.load()
+  let _ = sm.set_pin(s, "2468")
+  struct.set(s, true, field=enabled)
+  array.push(struct.borrow(s, field=adult_loras), string.copy("eri-krea2"))
+  array.push(struct.borrow(s, field=adult_words), string.copy("nude"))
+  let _ = sm.save(s)
+
+  // owner marks: E is not adult although its prompt is; folder /f/adult is adult
+  var m: sm.Marks = sm.load_marks()
+  sm.mark(m, "/h/e.png", option.some(false))
+  sm.mark(m, "/f/adult", option.some(true))
+  let _ = sm.save_marks(m)
+
+  var items: array<library.Item> = array.new()
+  array.push(items, library.item("/h/a.png", picture, str.view(params("a nude figure", "", ""))))           // 0 word
+  array.push(items, library.item("/h/b.png", picture, str.view(params("a cat", "/l/ERI-krea2.safetensors", "")))) // 1 LoRA
+  array.push(items, library.item("/h/c.png", picture, str.view(params("a cat", "", ""))))                  // 2 safe
+  array.push(items, library.item("/h/d.mp4", picture, str.view(params("animate it", "", "/h/a.png"))))     // 3 made from 0
+  array.push(items, library.item("/h/e.png", picture, str.view(params("nude study", "", ""))))             // 4 marked safe
+  array.push(items, library.item("/f/adult/x/f.png", picture, str.view(params("a dog", "", ""))))          // 5 in adult folder
+
+  var state: safe.State = safe.load()
+  // library items record their own parameters; files shown by path use the sidecar
+  var i: u64 = 0
+  loop { if i >= array.len(items) { break }
+    let _ = safe.item_adult(state, array.borrow(items, i))
+    i = i + 1 }
+  check("on + locked: active", safe.active(state), failed)
+  check("hide: adult word kept out", not shows(state, items, 0), failed)
+  check("hide: adult LoRA kept out (any case)", not shows(state, items, 1), failed)
+  check("hide: plain item shows", shows(state, items, 2), failed)
+  check("hide: video made from an adult picture kept out", not shows(state, items, 3), failed)
+  check("owner mark 'not adult' beats the word", shows(state, items, 4), failed)
+  check("owner mark on a folder covers files under it", not shows(state, items, 5), failed)
+  check("count leaves hidden items out", safe.visible_count(state, items) == 2, failed)
+  check("preview blocked by path", safe.blocked(state, "/h/a.png"), failed)
+
+  // a file known only by its sidecar
+  let side: string = path.join(scratch, "side.png")
+  let _ = files.write_text(str.view(side), "x")
+  let _ = files.write_text(str.view(text.concat(str.view(side), ".json")), str.view(params("NUDE beach", "", "")))
+  check("sidecar prompt word blocks a file", safe.blocked(state, str.view(side)), failed)
+  check("audio is never covered", not safe.blocked(state, "/f/adult/song.wav"), failed)
+  var picked: array<string> = ["/h/c.png", "/h/a.png"]
+  var picked_plain: array<string> = ["/h/c.png", "/f/adult/song.wav"]
+  check("picker: a pick holding an adult file is refused", safe.any_blocked(state, picked)
+    and not safe.any_blocked(state, picked_plain), failed)
+
+  // unlock
+  check("wrong PIN does not unlock", not safe.unlock(state, "1111") and safe.active(state), failed)
+  check("right PIN unlocks", safe.unlock(state, "2468") and not safe.active(state), failed)
+  check("unlock reported as a change", safe.changed(state) and not safe.changed(state), failed)
+  var open: safe.Tile = safe.tile(state, array.borrow(items, 0))
+  check("unlocked: adult item shows with the 18+ marker", open.show and str.view(struct.borrow(open, field=label)) == "18+", failed)
+  check("unlocked: relock time counted in minutes", safe.minutes_left(state) == 30, failed)
+  safe.lock(state)
+  check("lock: kept out again", safe.active(state) and safe.changed(state), failed)
+
+  // relock 0 = until restart
+  var forever: sm.Settings = sm.load()
+  struct.set(forever, 0, field=relock_minutes)
+  let _ = sm.save(forever)
+  safe.reload(state)
+  check("relock 0: unlocked until restart", safe.unlock(state, "2468") and safe.unlocked(state)
+    and safe.minutes_left(state) == 0, failed)
+  safe.lock(state)
+
+  // blur
+  var blur: sm.Settings = sm.load()
+  struct.set(blur, false, field=hide)
+  let _ = sm.save(blur)
+  safe.reload(state)
+  check("after a reload: an item seen in a gallery stays blocked by path", safe.blocked(state, "/h/a.png"), failed)
+  var soft: safe.Tile = safe.tile(state, array.borrow(items, 0))
+  let soft_path: str = str.view(struct.borrow(soft, field=path))
+  check("blur: adult item shows", soft.show, failed)
+  check("blur: shows a blurred copy, not the picture", str.len(soft_path) != 0 and soft_path != picture
+    and match files.exists(soft_path) { ok(v) => v, err(_) => false }, failed)
+  check("blur: still blocked from opening", safe.blocked(state, "/h/a.png"), failed)
+  check("blur: count keeps blurred items", safe.visible_count(state, items) == 6, failed)
+
+  // off: everything shows, adult items carry the marker
+  var off: sm.Settings = sm.load()
+  struct.set(off, false, field=enabled)
+  let _ = sm.save(off)
+  safe.reload(state)
+  var plain: safe.Tile = safe.tile(state, array.borrow(items, 1))
+  check("off: adult item shows with the marker", plain.show and str.view(struct.borrow(plain, field=label)) == "18+"
+    and not safe.blocked(state, "/h/b.png"), failed)
+
+  // the owner's Adult toggle, both ways
+  let _ = safe.set_mark(state, "/h/c.png", true)
+  check("toggle on: plain item now adult", safe.item_adult(state, array.borrow(items, 2)), failed)
+  let _ = safe.set_mark(state, "/h/b.png", false)
+  check("toggle off: LoRA item no longer adult", not safe.item_adult(state, array.borrow(items, 1)), failed)
+  var marks: sm.Marks = sm.load_marks()
+  check("marks saved in the shared store", match sm.marked(marks, "/h/c.png") { some(v) => v, none => false }, failed)
+
+  // derived files inherit
+  var from: array<string> = ["/h/c.png"]
+  safe.inherit(state, "/h/c-side-by-side.mp4", from)
+  check("side-by-side of an adult result is adult", safe.adult(state, "/h/c-side-by-side.mp4"), failed)
+
+  // Settings helpers
+  safe.set_words(state, " nude, lingerie set ,,")
+  check("words: trimmed, empty ones dropped", str.view(safe.words_text(state)) == "nude, lingerie set", failed)
+  safe.toggle_lora(state, "/models/loras/H3-Thing.safetensors")
+  check("LoRA added", safe.lora_is_adult(state, "h3-thing"), failed)
+  safe.toggle_lora(state, "h3-thing.safetensors")
+  check("LoRA taken out again", not safe.lora_is_adult(state, "/x/h3-thing.safetensors"), failed)
+
+  if failed != 0 {
+    io.ewrite(text.concat(str.view(string.from_int(failed)), " Safe mode check(s) failed\n"))
+    return 1
+  }
+  io.write("safe mode: all checks passed\n")
+  0
+}

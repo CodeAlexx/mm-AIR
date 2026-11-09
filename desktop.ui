@@ -2,6 +2,7 @@
 <interface>
   <object class="GtkAdjustment" id="settings_panel_width_adjustment"><property name="lower">240</property><property name="upper">900</property><property name="step-increment">10</property><property name="value">300</property></object>
   <object class="GtkAdjustment" id="settings_navigation_width_adjustment"><property name="lower">60</property><property name="upper">200</property><property name="step-increment">2</property><property name="value">86</property></object>
+  <object class="GtkAdjustment" id="settings_safe_relock_adjustment"><property name="lower">0</property><property name="upper">1440</property><property name="step-increment">5</property><property name="value">30</property></object>
   <object class="GtkAdjustment" id="settings_navigation_height_adjustment"><property name="lower">32</property><property name="upper">120</property><property name="step-increment">2</property><property name="value">56</property></object>
   <requires lib="gtk" version="4.10"/>
   <object class="GtkAdjustment" id="gen_lora_strength_adjustment">
@@ -398,6 +399,24 @@
                     <child><object class="GtkLabel"><property name="visible">false</property><property name="label">Side panels stay beside the canvas. Smaller values leave more room for your image.</property><property name="wrap">true</property><property name="xalign">0</property><style><class name="capability-note"/></style></object></child>
                     <child><object class="GtkButton" id="settings_preview"><property name="label">Preview appearance</property></object></child>
                   </object></child>
+                  <child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">12</property><property name="width-request">300</property>
+                    <child><object class="GtkLabel"><property name="label">Safe mode</property><property name="xalign">0</property><style><class name="section-title"/></style></object></child>
+                    <child><object class="GtkCheckButton" id="settings_safe_on"><property name="label">On</property></object></child>
+                    <child><object class="GtkLabel" id="settings_safe_status"><property name="label">Off</property><property name="xalign">0</property><style><class name="muted"/></style></object></child>
+                    <child><object class="GtkLabel"><property name="label">PIN</property><property name="xalign">0</property></object></child>
+                    <child><object class="GtkEntry" id="settings_safe_pin"><property name="visibility">false</property><property name="input-purpose">pin</property></object></child>
+                    <child><object class="GtkBox"><property name="spacing">8</property><child><object class="GtkButton" id="settings_safe_unlock"><property name="label">Unlock</property></object></child><child><object class="GtkButton" id="settings_safe_lock"><property name="label">Lock</property></object></child></object></child>
+                    <child><object class="GtkLabel"><property name="label">New PIN</property><property name="xalign">0</property></object></child>
+                    <child><object class="GtkBox"><property name="spacing">8</property><child><object class="GtkEntry" id="settings_safe_new_pin"><property name="visibility">false</property><property name="input-purpose">pin</property><property name="hexpand">true</property></object></child><child><object class="GtkButton" id="settings_safe_set_pin"><property name="label">Set PIN</property></object></child></object></child>
+                    <child><object class="GtkLabel"><property name="label">Adult items</property><property name="xalign">0</property></object></child>
+                    <child><object class="GtkDropDown" id="settings_safe_hide"><property name="model"><object class="GtkStringList"><items><item>Hide</item><item>Blur</item></items></object></property></object></child>
+                    <child><object class="GtkLabel"><property name="label">Relock after (minutes)</property><property name="xalign">0</property></object></child>
+                    <child><object class="GtkSpinButton" id="settings_safe_relock"><property name="adjustment">settings_safe_relock_adjustment</property><property name="numeric">true</property></object></child>
+                    <child><object class="GtkLabel"><property name="label">Adult LoRAs</property><property name="xalign">0</property></object></child>
+                    <child><object class="GtkScrolledWindow"><property name="height-request">180</property><property name="hscrollbar-policy">never</property><child><object class="GtkListBox" id="settings_safe_loras"/></child></object></child>
+                    <child><object class="GtkLabel"><property name="label">Adult words</property><property name="xalign">0</property></object></child>
+                    <child><object class="GtkEntry" id="settings_safe_words"><property name="placeholder-text">word, word</property></object></child>
+                  </object></child>
                 </object>
               </child></object></child>
               <child><object class="GtkLabel" id="settings_status"><property name="label">Preferences are saved for your user account.</property><property name="wrap">true</property><property name="xalign">0</property><style><class name="capability-note"/></style></object></child>
@@ -713,6 +732,7 @@
                     <child><object class="GtkButton" id="gen_use_image_reference"><style><class name="quiet-button"/></style><property name="label">Reference</property><property name="tooltip-text">Use the selected image as an H3 reference</property><property name="sensitive">false</property><layout><property name="column">0</property><property name="row">1</property></layout></object></child>
                     <child><object class="GtkButton" id="gen_use_swap_character"><style><class name="quiet-button"/></style><property name="label">Swap Char</property><property name="tooltip-text">Use the selected generated image or character sheet as the Character Swap identity (Picture 1)</property><property name="sensitive">false</property><layout><property name="column">0</property><property name="row">2</property></layout></object></child>
                     <child><object class="GtkButton" id="gen_delete_result"><style><class name="danger-button"/></style><property name="label">Trash</property><property name="tooltip-text">Move the selected result to Trash</property><property name="sensitive">false</property><layout><property name="column">1</property><property name="row">1</property></layout></object></child>
+                    <child><object class="GtkToggleButton" id="gen_mark_adult"><style><class name="quiet-button"/></style><property name="label">Adult</property><property name="sensitive">false</property><layout><property name="column">1</property><property name="row">2</property></layout></object></child>
                   </object></child>
                 </object></child></object></child>
                 

@@ -19,6 +19,23 @@ configured desktop Downloads directory and returns the copied path in the footer
 Copies run on a native worker; originals/history stay intact and repeated copies
 receive non-overwriting numbered filenames. No save dialog is opened.
 
+**Safe mode** (Settings → Safe mode) keeps adult pictures and videos out of
+MM-Air for younger users. It uses AIR's shared `std.safe_media` store
+(`~/.config/air/safe-media`, also read by SerenityAir): On/Off, a PIN, Hide or
+Blur, relock minutes, adult LoRAs (from the LoRA library) and adult words. An
+item is adult when the owner marked it (the **Adult** toggle beside a selected
+result, or a folder mark made in SerenityAir); otherwise when its parameters or
+`<file>.json` sidecar name an adult LoRA or prompt word, or it was made from an
+adult picture or video (side-by-side and stitched movies inherit). While on and
+locked, every gallery, preview, player, full view, take list and file picker in
+MM-Air leaves adult items out (Hide; counts exclude them) or shows them blurred
+and unopenable (Blur). Turning it off or unlocking needs the PIN; an unlock
+relocks after the set minutes and on restart. Off: everything shows, adult
+items carry a small `18+` caption. Audio is never affected. The desktop's own
+file chooser shows its own previews; MM-Air refuses an adult pick from it.
+`tests/safe_mode.ai` (`mm-air-safe-mode-check`) covers the rules with a scratch
+store: `AIR_SAFE_MEDIA_DIR=... XDG_DATA_HOME=... mm-air-safe-mode-check SCRATCH PICTURE.png`.
+
 MM-AIR is the native AIR desktop application for generation. Generate links
 MiniMax H3, Krea 2 Turbo and Qwen-Image-2.1 AIR-language
 sessions directly.

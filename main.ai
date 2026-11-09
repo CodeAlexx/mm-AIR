@@ -46,6 +46,8 @@ import "relayvsr_post.ai" as relayvsr_post
 import "parameters.ai" as parameters
 import "face_swap.ai" as face_swap
 import "library.ai" as library
+import "safe_mode.ai" as safe_mode
+import std.safe_media as safe_media
 import "prompt_lab.ai" as prompt_lab
 import "movie_project.ai" as movie
 import ".air/deps/prompt/types.ai" as prompt_types
@@ -228,8 +230,8 @@ fn save_parameter_snapshot(session: ref<desk.Session>, directory: str, encoded: 
   }
 }
 
-fn show_items(session: ref<desk.Session>, id: str, items: ref<array<library.Item>>)
-    -> unit effects {alloc,net,time} {
+fn show_items(session:ref<desk.Session>,safe:ref<safe_mode.State>,id: str, items: ref<array<library.Item>>)
+    -> unit effects {alloc,env,fs.meta,fs.read,fs.write,net,process,time} {
   var command = desk.command("items", id)
   codec.field_u64(command, "thumbnail_width", 136)
   codec.field_u64(command, "thumbnail_height", 136)
@@ -238,11 +240,14 @@ fn show_items(session: ref<desk.Session>, id: str, items: ref<array<library.Item
   var i: u64 = 0
   loop {
     if i == array.len(items) { break }
-    let item = array.borrow(items, i)
+    // Safe mode: hidden items are left out (keys keep their list position), blurred ones show a blurred copy.
+    var tile: safe_mode.Tile = safe_mode.tile(safe, array.borrow(items, i))
+    if not tile.show { i = i + 1
+      continue }
     codec.begin_object(command)
     codec.field_text(command, "key", string.from_int(i))
-    codec.field_text(command, "label", "")
-    codec.field_text(command, "path", struct.borrow(item, field=thumbnail))
+    codec.field_text(command, "label", struct.borrow(tile, field=label))
+    codec.field_text(command, "path", struct.borrow(tile, field=path))
     codec.field_text(command, "icon", "video-x-generic-symbolic")
     codec.end_object(command)
     i = i + 1
@@ -253,8 +258,8 @@ fn show_items(session: ref<desk.Session>, id: str, items: ref<array<library.Item
 
 // Generated-output galleries are visual selectors. Paths and filenames remain
 // in the item records for actions, but do not consume presentation space.
-fn show_gallery_items(session:ref<desk.Session>,id:str,
-    items:ref<array<library.Item>>) -> unit effects {alloc,net,time} {
+fn show_gallery_items(session:ref<desk.Session>,safe:ref<safe_mode.State>,id:str,
+    items:ref<array<library.Item>>) -> unit effects {alloc,env,fs.meta,fs.read,fs.write,net,process,time} {
   var command=desk.command("items",id)
   codec.field_u64(command,"thumbnail_width",136)
   codec.field_u64(command,"thumbnail_height",136)
@@ -264,12 +269,16 @@ fn show_gallery_items(session:ref<desk.Session>,id:str,
   loop {
     if i == array.len(items){break}
     let item=array.borrow(items,i)
+    var tile:safe_mode.Tile=safe_mode.tile(safe,item)
+    if not tile.show{i=i+1
+      continue}
     codec.begin_object(command)
     codec.field_text(command,"key",string.from_int(i))
-    codec.field_text(command,"label","")
+    // Empty, or the small 18+ marker on adult items while Safe mode is off or unlocked.
+    codec.field_text(command,"label",struct.borrow(tile,field=label))
     // Not shown; names the tile for screen readers and UI tests.
     codec.field_text(command,"name",str.view(path.basename(str.view(struct.borrow(item,field=path)))))
-    codec.field_text(command,"path",struct.borrow(item,field=thumbnail))
+    codec.field_text(command,"path",struct.borrow(tile,field=path))
     codec.field_text(command,"icon","image-x-generic-symbolic")
     codec.end_object(command)
     i=i+1
@@ -286,8 +295,9 @@ fn relayvsr_controls(session:ref<desk.Session>,relay:bool)->unit effects{alloc,n
   ()
 }
 
-fn show_path_gallery(session:ref<desk.Session>,id:str,paths:ref<array<string>>)
-    ->unit effects{alloc,net,time}{
+// `origin`: the source the pictures were cut from (people found in a video), else empty.
+fn show_path_gallery(session:ref<desk.Session>,safe:ref<safe_mode.State>,id:str,paths:ref<array<string>>,origin:str)
+    ->unit effects{alloc,env,fs.meta,fs.read,fs.write,net,process,time}{
   var command=desk.command("items",id)
   codec.field_u64(command,"thumbnail_width",112)
   codec.field_u64(command,"thumbnail_height",112)
@@ -296,11 +306,14 @@ fn show_path_gallery(session:ref<desk.Session>,id:str,paths:ref<array<string>>)
   var index:u64=0
   loop{
     if index>=array.len(paths){break}
+    var tile:safe_mode.Tile=safe_mode.path_tile(safe,str.view(array.borrow(paths,index)),origin)
+    if not tile.show{index=index+1
+      continue}
     codec.begin_object(command)
     codec.field_text(command,"key",string.from_int(index))
-    codec.field_text(command,"label","")
+    codec.field_text(command,"label",struct.borrow(tile,field=label))
     codec.field_text(command,"name",str.view(path.basename(str.view(array.borrow(paths,index)))))
-    codec.field_text(command,"path",str.view(array.borrow(paths,index)))
+    codec.field_text(command,"path",struct.borrow(tile,field=path))
     codec.field_text(command,"icon","image-x-generic-symbolic")
     codec.end_object(command)
     index=index+1
@@ -309,9 +322,9 @@ fn show_path_gallery(session:ref<desk.Session>,id:str,paths:ref<array<string>>)
   let _=desk.submit(session,command)
 }
 
-fn update_qwen_edit_sources(session:ref<desk.Session>,paths:ref<array<string>>)
-    ->unit effects{alloc,net,time}{
-  show_path_gallery(session,"qwen_edit_references",paths)
+fn update_qwen_edit_sources(session:ref<desk.Session>,safe:ref<safe_mode.State>,paths:ref<array<string>>)
+    ->unit effects {alloc, env, fs.meta, fs.read, fs.write, net, process, time}{
+  show_path_gallery(session,safe,"qwen_edit_references",paths,"")
   let count:u64=array.len(paths)
   let count_i64:i64=cast.sat(count)
   let _=desk.set_text(session,"qwen_edit_source_count",text.concat(
@@ -321,9 +334,9 @@ fn update_qwen_edit_sources(session:ref<desk.Session>,paths:ref<array<string>>)
   let _=desk.set_bool(session,"qwen_edit_clear_sources","sensitive",any)
   let _=desk.set_bool(session,"qwen_edit_run","sensitive",any)
   let _=desk.set_bool(session,"qwen_edit_source_empty","visible",not any)
-  if any{let _=desk.picture(session,"qwen_edit_source_picture",
+  if any{let _=safe_mode.picture(session,safe,"qwen_edit_source_picture",
     str.view(array.borrow(paths,0)))}else{
-    let _=desk.picture(session,"qwen_edit_source_picture","")
+    let _=safe_mode.picture(session,safe,"qwen_edit_source_picture","")
   }
 }
 
@@ -335,13 +348,13 @@ fn swap_sources(target:str,face:str)->array<string> effects{alloc}{
   if face!=""{array.push(paths,string.copy(face))}
   paths
 }
-fn show_swap_slots(session:ref<desk.Session>,swap:bool,target:str,face:str)->unit effects{alloc,net,time}{
+fn show_swap_slots(session:ref<desk.Session>,safe:ref<safe_mode.State>,swap:bool,target:str,face:str)->unit effects {alloc, env, fs.meta, fs.read, fs.write, net, process, time}{
   let _=desk.set_bool(session,"qwen_edit_choose_source","visible",not swap)
   let _=desk.set_bool(session,"qwen_edit_add_target","visible",swap)
   let _=desk.set_bool(session,"qwen_edit_add_face","visible",swap)
   if not swap{return ()}
   var paths=swap_sources(target,face)
-  show_path_gallery(session,"qwen_edit_references",paths)
+  show_path_gallery(session,safe,"qwen_edit_references",paths,"")
   let any:bool=array.len(paths)!=0
   let _=desk.set_bool(session,"qwen_edit_remove_source","sensitive",any)
   let _=desk.set_bool(session,"qwen_edit_clear_sources","sensitive",any)
@@ -355,7 +368,7 @@ fn show_swap_slots(session:ref<desk.Session>,swap:bool,target:str,face:str)->uni
     if face==""{string.copy("＋ Face / head to put in")}else{text.concat("Face: ",str.view(path.basename(face)))})
   let _=desk.set_text(session,"qwen_edit_source_empty","IMAGE TO CHANGE")
   let _=desk.set_bool(session,"qwen_edit_source_empty","visible",target=="")
-  let _=desk.picture(session,"qwen_edit_source_picture",target)
+  let _=safe_mode.picture(session,safe,"qwen_edit_source_picture",target)
   ()
 }
 
@@ -457,8 +470,8 @@ fn reference_actions(session: ref<desk.Session>, audio: bool, key: str, count: u
     "sensitive", valid and index + 1 < count)
 }
 
-fn move_reference(session: ref<desk.Session>, items: ref<array<library.Item>>,
-    selected: ref<string>, audio: bool, earlier: bool) -> unit effects {alloc,net,time} {
+fn move_reference(session:ref<desk.Session>,safe:ref<safe_mode.State>,items: ref<array<library.Item>>,
+    selected: ref<string>, audio: bool, earlier: bool) -> unit effects {alloc, env, fs.meta, fs.read, fs.write, net, process, time} {
   let index: u64 = match text.parse_u64(str.view(selected)) {
     some(value) => value, none => { return () },
   }
@@ -467,7 +480,7 @@ fn move_reference(session: ref<desk.Session>, items: ref<array<library.Item>>,
       var key: string = string.from_int(target)
       let _ = ref.swap(selected, key)
       let id: str = if audio { "gen_audio_refs" } else { "gen_visual_refs" }
-      show_items(session, id, items)
+      show_items(session,safe,id, items)
       let _ = desk.select(session, id, str.view(selected))
       reference_actions(session, audio, str.view(selected), array.len(items))
     },
@@ -818,19 +831,19 @@ fn model_widgets(session: ref<desk.Session>, model:u32, sheet_mode: u32,
   let _ = desk.set_text(session,"gen_prompt_label",if swap {"Built Prompt · editable before Generate"} else {"Prompt"})
 }
 
-fn clear_swap_source_ui(session: ref<desk.Session>) -> unit effects {alloc,net,time} {
-  let _ = desk.picture(session,"gen_swap_source_preview","")
+fn clear_swap_source_ui(session:ref<desk.Session>,safe:ref<safe_mode.State>) -> unit effects {alloc, fs.read, net, time} {
+  let _ = safe_mode.picture(session,safe,"gen_swap_source_preview","")
   let _ = desk.set_bool(session,"gen_swap_source_preview","visible",false)
   let _ = desk.set_text(session,"gen_swap_source_name","＋ Choose source video")
   let _ = desk.set_text(session,"gen_swap_source_metadata","Required")
   let _ = desk.set_bool(session,"gen_swap_clear_source","sensitive",false)
 }
 
-fn show_swap_source(session: ref<desk.Session>, item: ref<library.Item>,
+fn show_swap_source(session:ref<desk.Session>,safe:ref<safe_mode.State>,item: ref<library.Item>,
                     filename: str) -> unit
     effects {alloc,env,fs.meta,fs.read,fs.write,net,process,time} {
-  let _ = desk.picture(session,"gen_swap_source_preview",
-    struct.borrow(item,field=thumbnail))
+  let _ = safe_mode.picture_of(session,safe,"gen_swap_source_preview",
+    struct.borrow(item,field=thumbnail),filename)
   let _ = desk.set_bool(session,"gen_swap_source_preview","visible",true)
   let _ = desk.set_text(session,"gen_swap_source_name",path.basename(filename))
   let _ = desk.set_bool(session,"gen_swap_clear_source","sensitive",true)
@@ -954,8 +967,8 @@ fn edit_timecode(position:f64,duration:f64)->string effects {alloc} {
   out
 }
 
-fn clear_reference(session: ref<desk.Session>, last: bool) -> unit effects {alloc,net,time} {
-  let _ = desk.picture(session, if last { "last_reference_preview" } else { "reference_preview" }, "")
+fn clear_reference(session:ref<desk.Session>,safe:ref<safe_mode.State>,last: bool) -> unit effects {alloc, fs.read, net, time} {
+  let _ = safe_mode.picture(session,safe,if last { "last_reference_preview" } else { "reference_preview" }, "")
   let _ = desk.set_bool(session, if last { "last_reference_preview" } else { "reference_preview" }, "visible", false)
   let _ = desk.set_text(session, if last { "last_reference_name" } else { "reference_name" },
     if last { "＋ Choose last frame" } else { "＋ Choose first frame" })
@@ -963,7 +976,29 @@ fn clear_reference(session: ref<desk.Session>, last: bool) -> unit effects {allo
   let _ = desk.set_bool(session, if last { "clear_last_reference" } else { "clear_reference" }, "sensitive", false)
 }
 
-fn show_result(session: ref<desk.Session>, filename: str) -> unit effects {alloc,fs.meta,fs.read,net,time,io.write} {
+// The result monitor with nothing selected (also when Safe mode keeps the pick out).
+fn clear_result_view(session:ref<desk.Session>,safe:ref<safe_mode.State>) -> unit effects {alloc,fs.read,net,time} {
+  let _ = safe_mode.picture(session,safe,"result_picture","")
+  let _ = safe_mode.play(session,safe,"result_video","")
+  let _ = desk.clear_video(session,"result_video")
+  let _ = desk.set_bool(session,"result_picture","visible",false)
+  let _ = desk.set_bool(session,"result_video","visible",false)
+  let _ = desk.set_bool(session,"result_placeholder","visible",true)
+  let _ = desk.set_bool(session,"result_empty_title","visible",true)
+  let _ = desk.set_bool(session,"gen_copy_downloads","sensitive",false)
+  let _ = desk.set_bool(session,"gen_reuse_parameters","sensitive",false)
+  let _ = desk.set_bool(session,"gen_use_image_reference","sensitive",false)
+  let _ = desk.set_bool(session,"gen_use_swap_character","sensitive",false)
+  let _ = desk.set_bool(session,"gen_side_by_side","visible",false)
+  let _ = desk.set_bool(session,"gen_delete_result","sensitive",false)
+  let _ = desk.set_bool(session,"gen_mark_adult","sensitive",false)
+}
+
+fn show_result(session:ref<desk.Session>,safe:ref<safe_mode.State>,filename: str) -> unit effects {alloc,fs.meta,fs.read,net,time,io.write} {
+  if safe_mode.blocked(safe,filename) {
+    clear_result_view(session,safe)
+    return ()
+  }
   let is_image: bool = match media.inspect(filename, 68719476736) {
     ok(info) => info.kind == media.Kind.Image,
     err(_) => false,
@@ -976,19 +1011,25 @@ fn show_result(session: ref<desk.Session>, filename: str) -> unit effects {alloc
   io.write(text.concat("mm-air preview=", text.concat(filename, "\n")))
   if is_image {
     let _ = desk.pause(session, "result_video", false)
-    let _ = desk.picture(session, "result_picture", filename)
-  } else { let _ = desk.play(session, "result_video", filename) }
+    let _ = safe_mode.picture(session,safe,"result_picture", filename)
+  } else { let _ = safe_mode.play(session,safe,"result_video", filename) }
   let _ = desk.set_bool(session, "gen_reuse_parameters", "sensitive", true)
   let _ = desk.set_bool(session, "gen_copy_downloads", "sensitive", true)
   let _ = desk.set_bool(session, "gen_use_image_reference", "sensitive", is_image)
   let _ = desk.set_bool(session, "gen_use_swap_character", "sensitive", is_image)
   let _ = desk.set_bool(session,"gen_delete_result","sensitive",true)
+  let _ = desk.set_bool(session,"gen_mark_adult","sensitive",true)
+  let _ = desk.set_bool(session,"gen_mark_adult","active",safe_mode.adult(safe,filename))
   let paired: bool = not is_image and option.is_some(side_by_side_source(filename))
   let _ = desk.set_bool(session, "gen_side_by_side", "visible", paired)
 }
 
-fn show_source(session: ref<desk.Session>, filename: str) -> unit
+fn show_source(session:ref<desk.Session>,safe:ref<safe_mode.State>,filename: str) -> unit
     effects {alloc,fs.meta,fs.read,net,time,io.write} {
+  if safe_mode.blocked(safe,filename) {
+    clear_result_view(session,safe)
+    return ()
+  }
   match media.inspect(filename, 8589934592) {
     err(error) => { var held: media.Error = error
       let _ = desk.set_text(session, "status", media_error(held)) },
@@ -997,24 +1038,26 @@ fn show_source(session: ref<desk.Session>, filename: str) -> unit
         let _ = desk.pause(session, "result_video", false)
         let _ = desk.set_bool(session, "result_video", "visible", false)
         let _ = desk.set_bool(session, "result_picture", "visible", true)
-        let _ = desk.picture(session, "result_picture", filename)
+        let _ = safe_mode.picture(session,safe,"result_picture", filename)
         let _ = desk.set_bool(session, "result_placeholder", "visible", false)
         let _ = desk.set_bool(session, "result_empty_title", "visible", false)
-      } else { show_result(session, filename) }
+      } else { show_result(session,safe,filename) }
       let _ = desk.set_bool(session, "gen_reuse_parameters", "sensitive", false)
       let _ = desk.set_bool(session, "gen_copy_downloads", "sensitive", false)
       let _ = desk.set_bool(session, "gen_use_image_reference", "sensitive", false)
       let _ = desk.set_bool(session, "gen_use_swap_character", "sensitive", false)
       let _ = desk.set_bool(session, "gen_side_by_side", "visible", false)
+      let _ = desk.set_bool(session,"gen_mark_adult","sensitive",false)
     },
   }
 }
 
-fn open_image_view(session: ref<desk.Session>, filename: str) -> unit
-    effects {alloc,fs.meta,net,time} {
+fn open_image_view(session:ref<desk.Session>,safe:ref<safe_mode.State>,filename: str) -> unit
+    effects {alloc,fs.meta,fs.read,net,time} {
+  if safe_mode.blocked(safe,filename) { return () }
   match media.inspect(filename, 68719476736) {
     ok(info) => { if info.kind == media.Kind.Image {
-      let _ = desk.picture(session,"result_fullscreen_picture",filename)
+      let _ = safe_mode.picture(session,safe,"result_fullscreen_picture",filename)
       let _ = desk.set_text(session,"image_view_name",path.basename(filename))
       let _ = desk.set_string(session,"app_surface","visible-child-name","image")
       let _ = desk.focus(session,"result_fullscreen_close")
@@ -1023,9 +1066,9 @@ fn open_image_view(session: ref<desk.Session>, filename: str) -> unit
   }
 }
 
-fn close_image_view(session: ref<desk.Session>) -> unit effects {alloc,net,time} {
+fn close_image_view(session:ref<desk.Session>,safe:ref<safe_mode.State>) -> unit effects {alloc, fs.read, net, time} {
   let _ = desk.set_string(session,"app_surface","visible-child-name","workspace")
-  let _ = desk.picture(session,"result_fullscreen_picture","")
+  let _ = safe_mode.picture(session,safe,"result_fullscreen_picture","")
   let _ = desk.focus(session,"window")
 }
 
@@ -1082,6 +1125,25 @@ fn movie_items(session:ref<desk.Session>,id:str,labels:ref<array<string>>)
     codec.field_text(command,"label",array.borrow(labels,i))
     codec.field_text(command,"icon",if id=="movie_take_list"{
       "media-playback-start-symbolic"}else{"video-x-generic-symbolic"})
+    codec.end_object(command)
+    i=i+1
+  }
+  codec.end_array(command)
+  let _=desk.submit(session,command)
+  ()
+}
+
+fn movie_take_items(session:ref<desk.Session>,keys:ref<array<string>>,labels:ref<array<string>>)
+    ->unit effects{alloc,net,time}{
+  var command=desk.command("items","movie_take_list")
+  codec.key(command,"items")
+  codec.begin_array(command)
+  var i:u64=0
+  loop{if i >= array.len(labels){break}
+    codec.begin_object(command)
+    codec.field_text(command,"key",array.borrow(keys,i))
+    codec.field_text(command,"label",array.borrow(labels,i))
+    codec.field_text(command,"icon","media-playback-start-symbolic")
     codec.end_object(command)
     i=i+1
   }
@@ -1147,8 +1209,8 @@ fn show_movie_runtime_policy(session:ref<desk.Session>,profile:u32,
   ()
 }
 
-fn show_movie(session:ref<desk.Session>,project:ref<movie.Project>)
-    ->unit effects{alloc,net,time}{
+fn show_movie(session:ref<desk.Session>,safe:ref<safe_mode.State>,project:ref<movie.Project>)
+    ->unit effects {alloc, fs.read, net, time}{
   let count=array.len(struct.borrow(project,field=shots))
   if count==0{return ()}
   if project.selected_shot >= count{struct.set(project,0,field=selected_shot)}
@@ -1279,10 +1341,20 @@ fn show_movie(session:ref<desk.Session>,project:ref<movie.Project>)
     let _=desk.set_text(session,"movie_character_identity_buffer","")
   }
   var take_labels:array<string> = []
+  var take_keys:array<string> = []
   i=0
   loop{if i >= take_count{break}
     let take=array.borrow(struct.borrow(shot,field=takes),i)
     let selected_take:u64=cast.wrap(shot.selected_take)
+    // Safe mode: adult takes are left out (hide) or listed without their file (blur).
+    let take_blocked:bool=safe_mode.blocked(safe,str.view(struct.borrow(take,field=output)))
+    if take_blocked and safe_mode.hide(safe){i=i+1
+      continue}
+    array.push(take_keys,string.from_int(i))
+    if take_blocked{
+      array.push(take_labels,text.concat("  Take ",str.view(text.concat(str.view(string.from_int(i+1))," · Safe mode"))))
+      i=i+1
+      continue}
     var take_label=string.copy(if selected_take==i{"✓ "}else{"  "})
     string.append(take_label,"Take ")
     string.append(take_label,str.view(string.from_int(i+1)))
@@ -1292,14 +1364,14 @@ fn show_movie(session:ref<desk.Session>,project:ref<movie.Project>)
     string.append(take_label,path.basename(struct.borrow(take,field=output)))
     array.push(take_labels,take_label)
     i=i+1}
-  movie_items(session,"movie_take_list",take_labels)
+  movie_take_items(session,take_keys,take_labels)
   let selected_take:u64=cast.wrap(shot.selected_take)
   if shot.selected_take >= 0 and selected_take < take_count{
     let take=array.borrow(struct.borrow(shot,field=takes),selected_take)
     if take.state=="done" and str.len(struct.borrow(take,field=output))!=0{
       let _=desk.set_bool(session,"movie_monitor_empty","visible",false)
       let _=desk.set_bool(session,"movie_monitor_video","visible",true)
-      let _=desk.play(session,"movie_monitor_video",struct.borrow(take,field=output))
+      let _=safe_mode.play(session,safe,"movie_monitor_video",struct.borrow(take,field=output))
     }
   }else{
     let _=desk.set_bool(session,"movie_monitor_empty","visible",true)
@@ -1323,6 +1395,13 @@ fn absolute(value: str) -> result<string,string> effects {alloc,fs.read} {
     err(problem) => { return result.err(text.copy(problem.message)) },
   }
   result.ok(path.join(cwd, value))
+}
+
+fn sm_has_pin(safe:ref<safe_mode.State>)->bool effects{}{
+  safe_media.has_pin(struct.borrow(safe,field=settings))
+}
+fn sm_set_pin(safe:ref<safe_mode.State>,pin:str)->result<unit,string> effects{alloc,random}{
+  safe_media.set_pin(struct.borrow(safe,field=settings),pin)
 }
 
 fn select_mode(session: ref<desk.Session>, mode: str) -> unit effects {alloc,net,time} {
@@ -1356,9 +1435,9 @@ fn action_status(session: ref<desk.Session>, id: str) -> unit effects {alloc,net
   ()
 }
 
-fn show_media(session: ref<desk.Session>, id: str, filename: str,
+fn show_media(session:ref<desk.Session>,safe:ref<safe_mode.State>,id: str, filename: str,
               media_kind: media.Kind) -> unit
-  effects {alloc,io.write,net,time} {
+  effects {alloc, fs.read, io.write, net, time} {
   let first: bool = id == "choose_reference"
   let last: bool = id == "choose_last_reference"
   let title_id: str = if first { "reference_name" }
@@ -1374,10 +1453,10 @@ fn show_media(session: ref<desk.Session>, id: str, filename: str,
     let _ = desk.set_bool(session, if last { "clear_last_reference" } else { "clear_reference" }, "sensitive", true)
   }
   if media_kind == media.Kind.Image {
-    let _ = desk.picture(session, picture_id, filename)
+    let _ = safe_mode.picture(session,safe,picture_id, filename)
     let _ = desk.set_bool(session, picture_id, "visible", true)
   } else {
-    let _ = desk.picture(session, picture_id, "")
+    let _ = safe_mode.picture(session,safe,picture_id, "")
     let _ = desk.set_bool(session, picture_id, "visible", false)
   }
   let slot: str = if first { "first-reference" }
@@ -1400,8 +1479,8 @@ fn media_error(problem: ref<media.Error>) -> string effects {alloc} {
   text.concat("Cannot read media: ", filename)
 }
 
-fn accept_media(session: ref<desk.Session>, id: str, filename: str) -> bool
-  effects {alloc,fs.meta,io.write,net,time} {
+fn accept_media(session:ref<desk.Session>,safe:ref<safe_mode.State>,id: str, filename: str) -> bool
+  effects {alloc, fs.meta, fs.read, io.write, net, time} {
   match media.inspect(filename, 8589934592) {
     err(found) => {
       var problem: media.Error = found
@@ -1420,7 +1499,7 @@ fn accept_media(session: ref<desk.Session>, id: str, filename: str) -> bool
         io.write(text.concat("mm-air media rejected=", text.concat(filename, "\n")))
         return false
       }
-      show_media(session, id, filename, info.kind)
+      show_media(session,safe,id, filename, info.kind)
       true
     },
   }
@@ -1463,6 +1542,11 @@ pub fn main(args: view<str>) -> i32
       match library.data_directory(){ok(value)=>value,err(problem)=>{return fail(problem)}},"Output")}
   var local_settings=match settings.load(output_directory){ok(value)=>value,
     err(problem)=>{return fail(problem)},}
+  // Safe mode (shared AIR store); the unlock lives only in this process.
+  var safe:safe_mode.State=safe_mode.load()
+  var safe_pin_text:string=string.new()
+  var safe_new_pin_text:string=string.new()
+  var safe_words_dirty:bool=false
   // H3 resolutions, profiles and generation policy (MM_AIR_H3_APP_PRESET).
   var h3_presets: h3.Presets = match generation.app_presets() {ok(value)=>value,
     err(problem)=>{return fail(problem)},}
@@ -1776,6 +1860,7 @@ pub fn main(args: view<str>) -> i32
     var generations: array<task<generation.Outcome>> = array.new()
     var copies: array<task<result<string, string>>> = array.new()
     var side_jobs: array<task<result<string, string>>> = array.new()
+    var side_by_side_from: string = string.new()
     var prompt_jobs: array<task<prompt_lab.Outcome>> = array.new()
     var auto_mask_jobs:array<task<auto_mask.Outcome>> = array.new()
     var video_swap_jobs:array<task<video_swap.Outcome>> = array.new()
@@ -1806,6 +1891,7 @@ pub fn main(args: view<str>) -> i32
         settings.show(session,local_settings)
         match settings.apply(session,local_settings){ok(_)=>{},
           err(problem)=>{let _=desk.set_text(session,"settings_status",problem)},}
+        safe_mode.show(session,safe,str.view(lora_library_folder()))
         let _=desk.set_text(session,"gen_seed",str.view(string.from_int(seed)))
         let _=desk.set_bool(session,"gen_seed_lock","active",seed_locked)
         let initial_qwen_edit_seed:i64=cast.sat(qwen_edit_seed)
@@ -1818,7 +1904,7 @@ pub fn main(args: view<str>) -> i32
         layout_memory.restore(session)
         show_edit_model(session,qwen_edit_fibo)
         show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
-        update_qwen_edit_sources(session,qwen_edit_references)
+        update_qwen_edit_sources(session,safe,qwen_edit_references)
         select_mode(session, "generate")
         source_widgets(session, task_index)
         model_widgets(session,model_index,character_sheet_mode,generation_mode)
@@ -1830,10 +1916,10 @@ pub fn main(args: view<str>) -> i32
           lora_editor(session,generate_loras,selected_lora)
           lora_family_now = string.copy(lora_family(model_index))
         }
-        show_gallery_items(session,"gen_history",history)
+        show_gallery_items(session,safe,"gen_history",history)
         show_prompt_session(session,prompt_state)
         show_prompt_model(session,prompt_model_index)
-        show_movie(session,movie_state)
+        show_movie(session,safe,movie_state)
         show_movie_runtime_policy(session,profile_index,conditioner_projection_index,
           transformer_projection_index,attention_index)
         // Snapshot restored fields, so layout defaults cannot overwrite a saved Movie.
@@ -1847,7 +1933,7 @@ pub fn main(args: view<str>) -> i32
         show_project_library(session,movie_library_paths,str.view(movie_project_path))
         let _=show_prompt_window_plan(session,prompt_total_seconds,
           prompt_window_seconds,prompt_overlap_seconds)
-        let _ = desk.set_bool(session, "gen_history_empty", "visible", array.len(history) == 0)
+        let _ = desk.set_bool(session,"gen_history_empty","visible",safe_mode.visible_count(safe,history)==0)
         loop {
           if pending_parameters != "" {
             if parameters.is_retired_flux3(pending_parameters){
@@ -1899,7 +1985,7 @@ pub fn main(args: view<str>) -> i32
                     show_qwen_turbo(session,qwen_turbo)
                     let restored_seed:i64=cast.sat(request.seed)
                     let _=desk.set_text(session,"qwen_edit_seed",str.view(string.from_int(restored_seed)))
-                    update_qwen_edit_sources(session,qwen_edit_references)
+                    update_qwen_edit_sources(session,safe,qwen_edit_references)
                     qwen_edit_fibo=false
                     let _=desk.set_number(session,"qwen_edit_model","selected",0.0)
                     show_edit_model(session,false)
@@ -1988,7 +2074,7 @@ pub fn main(args: view<str>) -> i32
                     qwen_edit_fibo=true
                     let _=desk.set_number(session,"qwen_edit_model","selected",1.0)
                     show_edit_model(session,true)
-                    update_qwen_edit_sources(session,qwen_edit_references)
+                    update_qwen_edit_sources(session,safe,qwen_edit_references)
                     select_mode(session,"image_edit")
                     let _=desk.set_text(session,"status","Fibo 2.0 edit settings restored")
                   }else{
@@ -2180,8 +2266,8 @@ pub fn main(args: view<str>) -> i32
                 audio_references = []
                 selected_visual = string.new()
                 selected_audio = string.new()
-                clear_reference(session, false)
-                clear_reference(session, true)
+                clear_reference(session,safe,false)
+                clear_reference(session,safe,true)
                 let references = struct.borrow(restored, field=references)
                 var i: u64 = 0
                 loop {
@@ -2197,10 +2283,10 @@ pub fn main(args: view<str>) -> i32
                     }
                   } else if i == 0 {
                     reference_media = string.copy(filename)
-                    let _ = accept_media(session, "choose_reference", filename)
+                    let _ = accept_media(session,safe,"choose_reference", filename)
                   } else if i == 1 {
                     last_reference_media = string.copy(filename)
-                    let _ = accept_media(session, "choose_last_reference", filename)
+                    let _ = accept_media(session,safe,"choose_last_reference", filename)
                   }
                   i = i + 1
                 }
@@ -2217,8 +2303,8 @@ pub fn main(args: view<str>) -> i32
                   }
                   i = i + 1
                 }
-                show_items(session, "gen_visual_refs", visual_references)
-                show_items(session, "gen_audio_refs", audio_references)
+                show_items(session,safe,"gen_visual_refs", visual_references)
+                show_items(session,safe,"gen_audio_refs", audio_references)
                 reference_actions(session, false, "", array.len(visual_references))
                 reference_actions(session, true, "", array.len(audio_references))
                 character_sheet_mode = character_sheet.off()
@@ -2252,6 +2338,9 @@ pub fn main(args: view<str>) -> i32
                 let _ = desk.set_bool(session, "gen_side_by_side", "sensitive", true)
                 match task.join(option.unwrap(array.pop(side_jobs))) {
                   ok(made) => {
+                    // A side-by-side of an adult result is adult too.
+                    var side_from:array<string> = [string.copy(str.view(side_by_side_from))]
+                    safe_mode.inherit(safe,str.view(made),side_from)
                     match library.prep_output(str.view(made), "") {
                       ok(item) => {
                         var held: library.Item = item
@@ -2259,16 +2348,16 @@ pub fn main(args: view<str>) -> i32
                           struct.borrow(held, field=path), struct.borrow(held, field=thumbnail),
                           struct.borrow(held, field=parameters), struct.borrow(held, field=postprocess)))
                         array.push(history, held)
-                        show_gallery_items(session,"gen_current",current)
-                        show_gallery_items(session,"gen_history",history)
-                        let _ = desk.set_bool(session, "gen_current_empty", "visible", false)
-                        let _ = desk.set_bool(session, "gen_history_empty", "visible", false)
+                        show_gallery_items(session,safe,"gen_current",current)
+                        show_gallery_items(session,safe,"gen_history",history)
+                        let _ = desk.set_bool(session,"gen_current_empty","visible",safe_mode.visible_count(safe,current)==0)
+                        let _ = desk.set_bool(session,"gen_history_empty","visible",safe_mode.visible_count(safe,history)==0)
                         match library.save_history(history) { ok(_) => {}, err(message) => { io.ewrite(text.concat(message, "\n")) } }
                       },
                       err(message) => { io.ewrite(text.concat(message, "\n")) },
                     }
                     selected_result = string.copy(str.view(made))
-                    show_result(session, str.view(made))
+                    show_result(session,safe,str.view(made))
                     let _ = desk.set_text(session, "status", text.concat("Side-by-side movie saved: ", str.view(made)))
                     io.write(text.concat("mm-air side-by-side=", text.concat(str.view(made), "\n")))
                   },
@@ -2301,7 +2390,7 @@ pub fn main(args: view<str>) -> i32
                   edit_brush_points=[]
                   let _=desk.set_bool(session,"edit_mask_overlay","visible",false)
                   let _=desk.set_bool(session,"edit_mask_video","visible",true)
-                  let _=desk.play_muted(session,"edit_mask_video",struct.borrow(completed,field=check_preview))
+                  let _=safe_mode.play_muted_of(session,safe,"edit_mask_video",struct.borrow(completed,field=check_preview),str.view(edit_source))
                   let _=desk.set_text(session,"edit_mask_name",
                     "Video Swap · cyan = regenerated, orange = tracked person, right = grey mannequin")
                   generation_notification("MM-Air Video Swap masks ready",
@@ -2322,7 +2411,7 @@ pub fn main(args: view<str>) -> i32
                 if found.succeeded and array.len(struct.borrow(found,field=picks))>=2{
                   edit_people_picks=struct.replace(found,array.new(),field=picks)
                   edit_people_thumbs=struct.replace(found,array.new(),field=thumbs)
-                  show_path_gallery(session,"edit_people",edit_people_thumbs)
+                  show_path_gallery(session,safe,"edit_people",edit_people_thumbs,str.view(edit_source))
                   let _=desk.set_bool(session,"edit_people","visible",true)
                   let _=desk.set_text(session,"edit_people_status",
                     text.concat(struct.borrow(found,field=message)," · person 1"))
@@ -2350,7 +2439,7 @@ pub fn main(args: view<str>) -> i32
                   edit_brush_points=[]
                   let _=desk.set_bool(session,"edit_mask_overlay","visible",false)
                   let _=desk.set_bool(session,"edit_mask_video","visible",true)
-                  let _=desk.play_muted(session,"edit_mask_video",str.view(edit_mask_path))
+                  let _=safe_mode.play_muted_of(session,safe,"edit_mask_video",str.view(edit_mask_path),str.view(edit_source))
                   let _=desk.seek(session,"edit_mask_video",edit_position)
                   let _=desk.set_text(session,"edit_mask_name",text.concat(
                     if text.contains(struct.borrow(completed,field=message),"SAM 3.1"){
@@ -2451,10 +2540,10 @@ pub fn main(args: view<str>) -> i32
                         struct.borrow(held, field=parameters),
                         struct.borrow(held,field=postprocess)))
                       array.push(history, held)
-                      show_gallery_items(session,"gen_current",current)
-                      show_gallery_items(session,"gen_history",history)
-                      let _ = desk.set_bool(session, "gen_current_empty", "visible", false)
-                      let _ = desk.set_bool(session, "gen_history_empty", "visible", false)
+                      show_gallery_items(session,safe,"gen_current",current)
+                      show_gallery_items(session,safe,"gen_history",history)
+                      let _ = desk.set_bool(session,"gen_current_empty","visible",safe_mode.visible_count(safe,current)==0)
+                      let _ = desk.set_bool(session,"gen_history_empty","visible",safe_mode.visible_count(safe,history)==0)
                       match library.save_history(history) {
                         ok(_) => {},
                         err(message) => { io.ewrite(text.concat(message, "\n")) },
@@ -2464,10 +2553,10 @@ pub fn main(args: view<str>) -> i32
                   }
                   saved_parameters = string.copy(running_parameters)
                   selected_result = string.copy(struct.borrow(completed, field=output))
-                  show_result(session, str.view(struct.borrow(completed, field=output)))
+                  show_result(session,safe,str.view(struct.borrow(completed, field=output)))
                   if qwen_edit_active{
                     qwen_edit_result=string.copy(struct.borrow(completed,field=output))
-                    let _=desk.picture(session,"qwen_edit_result_picture",
+                    let _=safe_mode.picture(session,safe,"qwen_edit_result_picture",
                       struct.borrow(completed,field=output))
                     let _=desk.set_bool(session,"qwen_edit_result_empty","visible",false)
                     let _=desk.set_text(session,"qwen_edit_status",
@@ -2484,7 +2573,7 @@ pub fn main(args: view<str>) -> i32
                     struct.set(movie_state,movie_generation_shot,field=selected_shot)
                     match save_movie(movie_state,str.view(movie_project_path)){
                       ok(_)=>{},err(message)=>{io.ewrite(text.concat("Movie autosave: ",text.concat(message,"\n")))}}
-                    show_movie(session,movie_state)
+                    show_movie(session,safe,movie_state)
                     let _=desk.set_text(session,"movie_runtime","H3 ready")
                     let _=desk.set_text(session,"status",text.concat("Movie take completed: ",
                       struct.borrow(completed,field=output)))
@@ -2495,7 +2584,7 @@ pub fn main(args: view<str>) -> i32
                         struct.set(movie_state,false,field=endless_active)
                         match save_movie(movie_state,str.view(movie_project_path)){
                           ok(_)=>{},err(message)=>{io.ewrite(text.concat(message,"\n"))}}
-                        show_movie(session,movie_state)
+                        show_movie(session,safe,movie_state)
                         let _=desk.set_text(session,"status",text.concat(
                           "Endless chain completed · ",text.concat(
                           str.view(string.from_float(completed_seconds))," seconds")))
@@ -2510,7 +2599,7 @@ pub fn main(args: view<str>) -> i32
                             next_duration)
                             match save_movie(movie_state,str.view(movie_project_path)){
                               ok(_)=>{},err(message)=>{io.ewrite(text.concat(message,"\n"))}}
-                            show_movie(session,movie_state)
+                            show_movie(session,safe,movie_state)
                             let _=desk.set_text(session,"status","Endless chain · starting next continuation")
                             let _=desk.activate(session,"queue_take")},
                           err(message)=>{struct.set(movie_state,false,field=endless_active)
@@ -2529,7 +2618,7 @@ pub fn main(args: view<str>) -> i32
                         next=next+1}
                       if found{
                         struct.set(movie_state,next,field=selected_shot)
-                        show_movie(session,movie_state)
+                        show_movie(session,safe,movie_state)
                         let _=desk.set_text(session,"status",text.concat("Render all · starting shot ",
                           str.view(string.from_int(next+1))))
                         let _=desk.activate(session,"queue_take")
@@ -2554,10 +2643,10 @@ pub fn main(args: view<str>) -> i32
                       edit_showing_result=true
                       if edit_source_video {
                         let _=desk.set_string(session,"edit_media_stack","visible-child-name","video")
-                        let _=desk.play(session,"edit_source_video",str.view(edit_result))
+                        let _=safe_mode.play_of(session,safe,"edit_source_video",str.view(edit_result),str.view(edit_source))
                       } else {
                         let _=desk.set_string(session,"edit_media_stack","visible-child-name","picture")
-                        let _=desk.picture(session,"edit_source_picture",str.view(edit_result))
+                        let _=safe_mode.picture_of(session,safe,"edit_source_picture",str.view(edit_result),str.view(edit_source))
                       }
                     }
                     let _=desk.set_bool(session,"edit_save_as","sensitive",true)
@@ -2589,7 +2678,7 @@ pub fn main(args: view<str>) -> i32
                     movie_generation_active=false
                     movie_render_all=false
                     struct.set(movie_state,false,field=endless_active)
-                    show_movie(session,movie_state)
+                    show_movie(session,safe,movie_state)
                     let _=desk.set_text(session,"movie_runtime","H3 take failed")
                   }
                   let _ = desk.set_text(session, "gen_batch_status", "Failed")
@@ -2628,7 +2717,7 @@ pub fn main(args: view<str>) -> i32
                       struct.borrow(completed,field=response))
                     match save_movie(movie_state,str.view(movie_project_path)){
                       ok(_)=>{},err(message)=>{io.ewrite(text.concat("Movie autosave: ",text.concat(message,"\n")))}}
-                    show_movie(session,movie_state)
+                    show_movie(session,safe,movie_state)
                     let _=desk.set_text(session,"movie_runtime","H3 ready · Qwen unloaded")
                     let _=desk.set_text(session,"status","Movie Director plan applied to the selected shot; compiled H3 prompt is ready")
                   } else if prompt_target == 1 and swap_style != 0 {
@@ -2758,6 +2847,31 @@ pub fn main(args: view<str>) -> i32
               },
             }
           }
+          // Safe mode switched, unlocked, relocked (minutes ran out) or its sources/marks changed:
+          // redraw every gallery and clear previews that are now kept out.
+          if safe_mode.changed(safe) {
+            show_gallery_items(session,safe,"gen_current",current)
+            show_gallery_items(session,safe,"gen_history",history)
+            let _=desk.set_bool(session,"gen_current_empty","visible",safe_mode.visible_count(safe,current)==0)
+            let _=desk.set_bool(session,"gen_history_empty","visible",safe_mode.visible_count(safe,history)==0)
+            show_items(session,safe,"gen_visual_refs",visual_references)
+            show_items(session,safe,"gen_audio_refs",audio_references)
+            show_items(session,safe,"gen_swap_character_refs",swap_character_references)
+            show_items(session,safe,"edit_references",edit_references)
+            show_path_gallery(session,safe,"qwen_edit_references",qwen_edit_references,"")
+            show_path_gallery(session,safe,"edit_people",edit_people_thumbs,str.view(edit_source))
+            show_movie(session,safe,movie_state)
+            let _=desk.pause(session,"movie_monitor_video",false)
+            safe_mode.reapply(session,safe)
+            if safe_mode.blocked(safe,str.view(selected_result)) {
+              selected_result=string.new()
+              saved_parameters=string.new()
+              clear_result_view(session,safe)
+            }
+            safe_mode.show(session,safe,str.view(lora_library_folder()))
+          } else if safe_mode.unlocked(safe) {
+            let _=desk.set_text(session,"settings_safe_status",str.view(safe_mode.status(safe)))
+          }
           var event: json.Document = match desk.next(session, 1000) {
             ok(item) => match item {
               some(value) => value,
@@ -2772,8 +2886,130 @@ pub fn main(args: view<str>) -> i32
           let raw_id: string = desk.field(event, "id")
           let id: string = if text.ends_with(str.view(raw_id),"_view"){
             text.replace(str.view(raw_id),"_view","_buffer")}else{raw_id}
+          // ---- Safe mode (Settings section and the Adult toggle on results)
+          if id=="nav_settings" or id=="show_settings" {
+            safe_mode.reload(safe)
+            safe_mode.redraw(safe)
+          }
+          if kind=="change" and id=="settings_safe_pin" { safe_pin_text=desk.field(event,"value")
+            continue }
+          if kind=="change" and id=="settings_safe_new_pin" { safe_new_pin_text=desk.field(event,"value")
+            continue }
+          if kind=="change" and id=="settings_safe_on" {
+            let want=desk.boolean(event,"value")
+            safe_mode.reload(safe)
+            // startup snapshots and programmatic sets report the current value: nothing to do
+            if want==safe_mode.enabled(safe) { continue }
+            var safe_message=string.new()
+            if want {
+              if not sm_has_pin(safe) {
+                let _=desk.set_bool(session,"settings_safe_on","active",false)
+                safe_message=string.copy("Set a PIN first")
+              } else {
+                struct.set(struct.borrow(safe,field=settings),true,field=enabled)
+                safe_mode.lock(safe)
+                safe_message=match safe_mode.save(safe){ok(_)=>string.copy("Safe mode on"),err(problem)=>problem,}
+              }
+            } else if safe_mode.unlock(safe,str.view(safe_pin_text)) {
+              struct.set(struct.borrow(safe,field=settings),false,field=enabled)
+              safe_mode.lock(safe)
+              safe_message=match safe_mode.save(safe){ok(_)=>string.copy("Safe mode off"),err(problem)=>problem,}
+            } else {
+              let _=desk.set_bool(session,"settings_safe_on","active",true)
+              safe_message=string.copy("Wrong PIN")
+            }
+            safe_pin_text=string.new()
+            let _=desk.set_text(session,"settings_safe_pin","")
+            safe_mode.redraw(safe)
+            let _=desk.set_text(session,"settings_status",str.view(safe_message))
+            continue
+          }
+          if id=="settings_safe_unlock" {
+            safe_mode.reload(safe)
+            let _=desk.set_text(session,"settings_status",
+              if safe_mode.unlock(safe,str.view(safe_pin_text)){"Unlocked"}else{"Wrong PIN"})
+            safe_pin_text=string.new()
+            let _=desk.set_text(session,"settings_safe_pin","")
+            safe_mode.redraw(safe)
+            continue
+          }
+          if id=="settings_safe_lock" {
+            safe_mode.lock(safe)
+            safe_mode.redraw(safe)
+            let _=desk.set_text(session,"settings_status","Locked")
+            continue
+          }
+          if id=="settings_safe_set_pin" {
+            safe_mode.reload(safe)
+            if sm_has_pin(safe) and not safe_mode.unlocked(safe) and not safe_mode.unlock(safe,str.view(safe_pin_text)) {
+              let _=desk.set_text(session,"settings_status","Enter the current PIN first")
+              continue
+            }
+            let safe_message=match sm_set_pin(safe,str.view(safe_new_pin_text)){
+              ok(_)=>match safe_mode.save(safe){ok(_)=>string.copy("PIN set"),err(problem)=>problem,},
+              err(problem)=>problem,}
+            safe_pin_text=string.new()
+            safe_new_pin_text=string.new()
+            let _=desk.set_text(session,"settings_safe_pin","")
+            let _=desk.set_text(session,"settings_safe_new_pin","")
+            safe_mode.redraw(safe)
+            let _=desk.set_text(session,"settings_status",str.view(safe_message))
+            continue
+          }
+          if (kind=="change" and (id=="settings_safe_hide" or id=="settings_safe_relock" or id=="settings_safe_words")) or
+             (kind=="activate" and id=="settings_safe_loras") {
+            safe_mode.reload(safe)
+            let safe_same:bool=if id=="settings_safe_hide"{(desk.number(event,"value")<0.5)==safe_mode.hide(safe)}
+              else if id=="settings_safe_relock"{desk.number(event,"value")==cast.float(safe.settings.relock_minutes)}
+              else if id=="settings_safe_words"{desk.field(event,"value")==safe_mode.words_text(safe)}
+              else{false}
+            if safe_same { continue }
+            if not safe_mode.editable(safe) {
+              safe_mode.redraw(safe)
+              let _=desk.set_text(session,"settings_status","Unlock first")
+              continue
+            }
+            if id=="settings_safe_hide" {
+              struct.set(struct.borrow(safe,field=settings),desk.number(event,"value")<0.5,field=hide)
+            } else if id=="settings_safe_relock" {
+              let minutes=desk.number(event,"value")
+              struct.set(struct.borrow(safe,field=settings),
+                if minutes<=0.0{0}else{cast.sat(math.round(minutes))},field=relock_minutes)
+            } else if id=="settings_safe_words" {
+              safe_mode.set_words(safe,str.view(desk.field(event,"value")))
+            } else {
+              safe_mode.toggle_lora(safe,str.view(desk.field(event,"value")))
+            }
+            match safe_mode.save(safe){ok(_)=>{},err(problem)=>{let _=desk.set_text(session,"settings_status",problem)},}
+            // the words entry keeps its own text while typing
+            if id!="settings_safe_words" { safe_mode.redraw(safe) }
+            else { safe_words_dirty=true }
+            continue
+          }
+          if safe_words_dirty and id!="settings_safe_words" {
+            safe_words_dirty=false
+            safe_mode.redraw(safe)
+          }
+          if kind=="change" and id=="gen_mark_adult" {
+            let want=desk.boolean(event,"value")
+            if str.len(selected_result)==0 { continue }
+            if not want and safe_mode.active(safe) {
+              let _=desk.set_bool(session,"gen_mark_adult","active",true)
+              let _=desk.set_text(session,"status","Unlock first")
+              continue
+            }
+            match safe_mode.set_mark(safe,str.view(selected_result),want){
+              ok(_)=>{let _=desk.set_text(session,"status",if want{"Marked adult"}else{"Marked not adult"})},
+              err(problem)=>{let _=desk.set_text(session,"status",problem)},}
+            continue
+          }
           if kind=="dialog" or kind=="drop" {
             if not desk.boolean(event, "cancelled") {
+              // Safe mode: adult pictures and videos cannot be picked or dropped in while it is on.
+              var safe_picked=desk.dialog_paths(event)
+              if safe_mode.any_blocked(safe,safe_picked){
+                let _=desk.set_text(session,"status","Kept out by Safe mode")
+                continue}
               let selected: string = desk.field(event, "value")
               match settings.index(id,true){
                 some(index)=>{
@@ -2796,7 +3032,7 @@ pub fn main(args: view<str>) -> i32
                       err(problem)=>{let _=desk.set_text(session,"status",problem)},}
                   }
                   match save_movie(movie_state,str.view(movie_project_path)){ok(_)=>{},err(message)=>{let _=desk.set_text(session,"status",message)}}
-                  show_movie(session,movie_state)
+                  show_movie(session,safe,movie_state)
                 }
                 continue
               }
@@ -2840,7 +3076,7 @@ pub fn main(args: view<str>) -> i32
                 var chosen=desk.dialog_paths(event)
                 movie.add_references(movie_state,movie_state.selected_shot,chosen)
                 match save_movie(movie_state,str.view(movie_project_path)){ok(_)=>{},err(message)=>{let _=desk.set_text(session,"status",message)}}
-                show_movie(session,movie_state)
+                show_movie(session,safe,movie_state)
                 continue
               }
               if id=="movie_add_character"{
@@ -2851,7 +3087,7 @@ pub fn main(args: view<str>) -> i32
                   struct.set(movie_state,new_character_index,field=selected_character)
                   match save_movie(movie_state,str.view(movie_project_path)){
                     ok(_)=>{},err(message)=>{let _=desk.set_text(session,"status",message)}}
-                  show_movie(session,movie_state)}
+                  show_movie(session,safe,movie_state)}
                 continue
               }
               if id=="export_project" or id=="export_edit"{
@@ -2876,7 +3112,7 @@ pub fn main(args: view<str>) -> i32
                       str.view(movie_project_path))
                     movie_library_paths=match movie.library_paths(str.view(movie_library_root)){
                       ok(paths)=>paths,err(_)=>copy_paths(movie_library_paths)}
-                    show_movie(session,movie_state)
+                    show_movie(session,safe,movie_state)
                     show_project_library(session,movie_library_paths,str.view(movie_project_path))
                     let _=desk.set_text(session,"status",text.concat("Imported movie project: ",str.view(selected)))
                   },err(message)=>{let _=desk.set_text(session,"status",message)}
@@ -2973,11 +3209,11 @@ pub fn main(args: view<str>) -> i32
                   let to_last: bool = task_index == h3.task_l2va() or
                     (task_index == h3.task_fl2va() and slot == 1)
                   if to_last {
-                    if accept_media(session, "choose_last_reference", dropped_path) {
+                    if accept_media(session,safe,"choose_last_reference", dropped_path) {
                       last_reference_media = text.copy(dropped_path)
                     }
                   } else {
-                    if accept_media(session, "choose_reference", dropped_path) {
+                    if accept_media(session,safe,"choose_reference", dropped_path) {
                       reference_media = text.copy(dropped_path)
                     }
                   }
@@ -3013,12 +3249,12 @@ pub fn main(args: view<str>) -> i32
                           if audio {
                             array.push(audio_references, item)
                             selected_audio = string.new()
-                            show_items(session, "gen_audio_refs", audio_references)
+                            show_items(session,safe,"gen_audio_refs", audio_references)
                             reference_actions(session, true, "", array.len(audio_references))
                           } else {
                             array.push(visual_references, item)
                             selected_visual = string.new()
-                            show_items(session, "gen_visual_refs", visual_references)
+                            show_items(session,safe,"gen_visual_refs", visual_references)
                             reference_actions(session, false, "", array.len(visual_references))
                           }
                         },
@@ -3041,7 +3277,7 @@ pub fn main(args: view<str>) -> i32
                       match library.prep_reference(str.view(selected),"") {
                         ok(item) => { var prepared = item
                           swap_source_video = string.copy(str.view(selected))
-                          show_swap_source(session,prepared,str.view(selected))
+                          show_swap_source(session,safe,prepared,str.view(selected))
                           swap_prompt_built = false
                           let _ = desk.set_bool(session,"gen_swap_open_prompt","sensitive",false)
                           let _ = desk.set_text(session,"gen_swap_status",
@@ -3129,16 +3365,16 @@ pub fn main(args: view<str>) -> i32
                         edit_brush_radius,edit_erase_mask,true,true)
                       match library.prep_reference(str.view(selected),"") {
                         ok(item)=>{var prepared=item
-                          let _=desk.picture(session,"edit_source_picture",
-                            struct.borrow(prepared,field=thumbnail))
+                          let _=safe_mode.picture_of(session,safe,"edit_source_picture",
+                            struct.borrow(prepared,field=thumbnail),str.view(edit_source))
                           if edit_source_video {
                             let _=desk.set_string(session,"edit_media_stack",
                               "visible-child-name","video")
-                            let _=desk.play(session,"edit_source_video",str.view(edit_source))
+                            let _=safe_mode.play_of(session,safe,"edit_source_video",str.view(edit_source),str.view(edit_source))
                           } else {
                             let _=desk.set_string(session,"edit_media_stack",
                               "visible-child-name","picture")
-                            let _=desk.picture(session,"edit_source_picture",str.view(edit_source))
+                            let _=safe_mode.picture_of(session,safe,"edit_source_picture",str.view(edit_source),str.view(edit_source))
                           }
                           let _=desk.set_bool(session,"edit_canvas_empty","visible",false)
                           let _=desk.set_text(session,"edit_source_name",path.basename(str.view(selected)))
@@ -3190,7 +3426,7 @@ pub fn main(args: view<str>) -> i32
                   }
                   qwen_edit_references=swap_sources(str.view(swap_target),str.view(swap_face))
                   qwen_edit_source=string.copy(str.view(swap_target))
-                  show_swap_slots(session,true,str.view(swap_target),str.view(swap_face))
+                  show_swap_slots(session,safe,true,str.view(swap_target),str.view(swap_face))
                   let _=desk.set_text(session,"qwen_edit_status",
                     if swap_target!="" and swap_face!=""{"Ready: the face goes onto the image to change"}
                     else{"Add both: the image to change and the face"})
@@ -3219,7 +3455,7 @@ pub fn main(args: view<str>) -> i32
                 if array.len(qwen_edit_references)!=0{
                   qwen_edit_source=string.copy(str.view(array.borrow(qwen_edit_references,0)))
                 }
-                update_qwen_edit_sources(session,qwen_edit_references)
+                update_qwen_edit_sources(session,safe,qwen_edit_references)
                 let count_i64:i64=cast.sat(array.len(qwen_edit_references))
                 var source_status=string.copy(
                   "Only valid PNG, JPEG, or WebP images were added · maximum 10")
@@ -3246,13 +3482,13 @@ pub fn main(args: view<str>) -> i32
                           if info.kind==media.Kind.Video {
                             let _=desk.set_bool(session,"edit_mask_overlay","visible",false)
                             let _=desk.set_bool(session,"edit_mask_video","visible",true)
-                            let _=desk.play_muted(session,"edit_mask_video",str.view(edit_mask_path))
+                            let _=safe_mode.play_muted_of(session,safe,"edit_mask_video",str.view(edit_mask_path),str.view(edit_source))
                             let _=desk.seek(session,"edit_mask_video",edit_position)
                           } else {
                             let _=desk.pause(session,"edit_mask_video",false)
                             let _=desk.set_bool(session,"edit_mask_video","visible",false)
-                            let _=desk.picture(session,"edit_mask_overlay",
-                              struct.borrow(prepared,field=thumbnail))
+                            let _=safe_mode.picture_of(session,safe,"edit_mask_overlay",
+                              struct.borrow(prepared,field=thumbnail),str.view(edit_source))
                             let _=desk.set_bool(session,"edit_mask_overlay","visible",true)
                           }
                           let _=desk.set_text(session,"edit_mask_name",path.basename(str.view(selected)))
@@ -3282,7 +3518,7 @@ pub fn main(args: view<str>) -> i32
                       let _=desk.set_text(session,"edit_status",media_error(held))},
                   }
                 }
-                show_items(session,"edit_references",edit_references)
+                show_items(session,safe,"edit_references",edit_references)
               }
               if id == "edit_save_as" and str.len(str.view(edit_result))!=0 {
                 match files.copy_new(str.view(edit_result),str.view(selected)) {
@@ -3323,7 +3559,7 @@ pub fn main(args: view<str>) -> i32
                   }
                 }
                 selected_swap_character = string.new()
-                show_items(session,"gen_swap_character_refs",swap_character_references)
+                show_items(session,safe,"gen_swap_character_refs",swap_character_references)
                 let _ = desk.set_bool(session,"gen_swap_remove_character","sensitive",false)
                 let _ = desk.set_bool(session,"gen_swap_open_prompt","sensitive",false)
               }
@@ -3363,17 +3599,17 @@ pub fn main(args: view<str>) -> i32
                 show_prompt_session(session,prompt_state)
               }
               if id == "choose_reference" {
-                if accept_media(session, id, str.view(selected)) {
+                if accept_media(session,safe,id, str.view(selected)) {
                   reference_media = text.copy(str.view(selected))
                 }
               }
               if id == "choose_last_reference" {
-                if accept_media(session, id, str.view(selected)) {
+                if accept_media(session,safe,id, str.view(selected)) {
                   last_reference_media = text.copy(str.view(selected))
                 }
               }
               if id == "choose_control" {
-                if accept_media(session, id, str.view(selected)) {
+                if accept_media(session,safe,id, str.view(selected)) {
                   control_media = text.copy(str.view(selected))
                 }
               }
@@ -3383,13 +3619,13 @@ pub fn main(args: view<str>) -> i32
           if kind == "close" or id == "quit" { break }
           if id == "result_fullscreen_close" or
              (kind == "activate" and id == "result_fullscreen_picture") {
-            close_image_view(session)
+            close_image_view(session,safe)
             continue
           }
           if kind == "activate" and (id == "result_picture" or
              id == "qwen_edit_source_picture" or id == "qwen_edit_result_picture" or
              id == "edit_source_picture" or id == "edit_crop_preview") {
-            open_image_view(session,desk.field(event,"value"))
+            open_image_view(session,safe,desk.field(event,"value"))
             continue
           }
           if kind == "select" or kind == "activate" {
@@ -3403,10 +3639,10 @@ pub fn main(args: view<str>) -> i32
               qwen_edit_selected=match text.parse_u64(desk.field(event,"value")){
                 some(value)=>value,none=>0}
               if qwen_edit_selected<array.len(qwen_edit_references){
-                if qwen_swap==0{let _=desk.picture(session,"qwen_edit_source_picture",str.view(
+                if qwen_swap==0{let _=safe_mode.picture(session,safe,"qwen_edit_source_picture",str.view(
                   array.borrow(qwen_edit_references,qwen_edit_selected)))}
                 let _=desk.set_bool(session,"qwen_edit_remove_source","sensitive",true)
-                if kind == "activate" { open_image_view(session,str.view(
+                if kind == "activate" { open_image_view(session,safe,str.view(
                   array.borrow(qwen_edit_references,qwen_edit_selected))) }
               }
               continue
@@ -3421,7 +3657,7 @@ pub fn main(args: view<str>) -> i32
                     movie_project_path=string.copy(str.view(selected))
                     save_movie_selection(str.view(movie_library_root),
                       str.view(movie_project_path))
-                    show_movie(session,movie_state)
+                    show_movie(session,safe,movie_state)
                     show_project_library(session,movie_library_paths,
                       str.view(movie_project_path))
                     let _=desk.set_text(session,"status",text.concat(
@@ -3435,7 +3671,7 @@ pub fn main(args: view<str>) -> i32
                 some(found)=>found,none=>0}
               if value<array.len(struct.borrow(movie_state,field=characters)){
                 struct.set(movie_state,value,field=selected_character)
-                show_movie(session,movie_state)}
+                show_movie(session,safe,movie_state)}
               continue
             }
             if id=="movie_shot_list"{
@@ -3444,7 +3680,7 @@ pub fn main(args: view<str>) -> i32
               if value<array.len(struct.borrow(movie_state,field=shots)) and
                  value!=movie_state.selected_shot{
                 struct.set(movie_state,value,field=selected_shot)
-                show_movie(session,movie_state)
+                show_movie(session,safe,movie_state)
               }
               continue
             }
@@ -3454,7 +3690,7 @@ pub fn main(args: view<str>) -> i32
               if movie.select_take(movie_state,movie_state.selected_shot,value){
                 match save_movie(movie_state,str.view(movie_project_path)){
                   ok(_)=>{},err(message)=>{let _=desk.set_text(session,"status",message)}}
-                show_movie(session,movie_state)
+                show_movie(session,safe,movie_state)
               }
               continue
             }
@@ -3504,16 +3740,25 @@ pub fn main(args: view<str>) -> i32
               let _ = desk.set_bool(session,"gen_swap_remove_character","sensitive",
                 str.len(key) != 0)
               let filename = selected_path(swap_character_references,key)
-              if filename != "" { show_source(session,filename)
-                if kind == "activate" { open_image_view(session,filename) } }
+              if filename != "" { show_source(session,safe,filename)
+                if kind == "activate" { open_image_view(session,safe,filename) } }
             }
             if key != "" and (id == "gen_visual_refs" or id == "gen_audio_refs") {
               let filename = if id == "gen_visual_refs" { selected_path(visual_references, key) }
                              else { selected_path(audio_references, key) }
-              if filename != "" { show_source(session, filename)
-                if kind == "activate" { open_image_view(session,filename) } }
+              if filename != "" { show_source(session,safe,filename)
+                if kind == "activate" { open_image_view(session,safe,filename) } }
             }
             if id == "gen_history" or id == "gen_current" {
+              // Safe mode: a blurred tile can be selected but never opened or used.
+              if safe_mode.blocked(safe,str.view(if id == "gen_current" { selected_path(current, key) }
+                  else { selected_path(history, key) })) {
+                selected_result = string.new()
+                saved_parameters = string.new()
+                clear_result_view(session,safe)
+                let _ = desk.set_text(session,"status","Kept out by Safe mode")
+                continue
+              }
               let found = if id == "gen_current" { selected_parameters(current, key) }
                           else { selected_parameters(history, key) }
               match found {
@@ -3522,8 +3767,8 @@ pub fn main(args: view<str>) -> i32
                   let filename = if id == "gen_current" { selected_path(current, key) }
                                  else { selected_path(history, key) }
                   selected_result = string.copy(filename)
-                  show_result(session, filename)
-                  if kind == "activate" { open_image_view(session,filename) }
+                  show_result(session,safe,filename)
+                  if kind == "activate" { open_image_view(session,safe,filename) }
                   let post=if id=="gen_current"{selected_postprocess(current,key)}
                     else{selected_postprocess(history,key)}
                 },
@@ -3758,7 +4003,7 @@ pub fn main(args: view<str>) -> i32
               save_movie_selection(str.view(movie_library_root),
                 str.view(movie_project_path))
               if id=="movie_target" or id=="movie_takes" or id=="movie_format"{
-                show_movie(session,movie_state)}
+                show_movie(session,safe,movie_state)}
               continue
             }
             if id=="movie_character_name" or id=="movie_character_role" or
@@ -3805,7 +4050,7 @@ pub fn main(args: view<str>) -> i32
                 ok(_)=>{},err(message)=>{let _=desk.set_text(session,"status",message)}}
               if id=="movie_shot_title" or id=="movie_duration" or
                  id=="movie_resolution" or id=="movie_width" or id=="movie_height" or id=="movie_locked"{
-                show_movie(session,movie_state)
+                show_movie(session,safe,movie_state)
               }else if id!="movie_prompt_buffer"{
                 var updated=movie.snapshot_shot(movie_state,movie_state.selected_shot)
                 let compiled=movie.compile_prompt(updated)
@@ -4422,11 +4667,11 @@ pub fn main(args: view<str>) -> i32
                   if array.len(qwen_edit_references)>1{swap_face=string.copy(str.view(array.borrow(qwen_edit_references,1)))}
                 }
                 qwen_edit_references=swap_sources(str.view(swap_target),str.view(swap_face))
-                show_swap_slots(session,true,str.view(swap_target),str.view(swap_face))
+                show_swap_slots(session,safe,true,str.view(swap_target),str.view(swap_face))
               }else{
-                show_swap_slots(session,false,"","")
+                show_swap_slots(session,safe,false,"","")
                 let _=desk.set_text(session,"qwen_edit_source_empty","SOURCE IMAGE")
-                update_qwen_edit_sources(session,qwen_edit_references)
+                update_qwen_edit_sources(session,safe,qwen_edit_references)
               }
               if qwen_swap>0{
                 // The swap files were trained on the base model with their own instruction:
@@ -4679,7 +4924,7 @@ pub fn main(args: view<str>) -> i32
                 qwen_edit_selected=0
                 qwen_edit_references=swap_sources(str.view(swap_target),str.view(swap_face))
                 qwen_edit_source=string.copy(str.view(swap_target))
-                show_swap_slots(session,true,str.view(swap_target),str.view(swap_face))
+                show_swap_slots(session,safe,true,str.view(swap_target),str.view(swap_face))
                 continue
               }
               if qwen_edit_selected<array.len(qwen_edit_references){
@@ -4688,7 +4933,7 @@ pub fn main(args: view<str>) -> i32
               qwen_edit_selected=0
               qwen_edit_source=if array.len(qwen_edit_references)==0{string.new()}
                 else{string.copy(str.view(array.borrow(qwen_edit_references,0)))}
-              update_qwen_edit_sources(session,qwen_edit_references)
+              update_qwen_edit_sources(session,safe,qwen_edit_references)
               continue
             }
             if id=="qwen_edit_clear_sources"{
@@ -4698,14 +4943,14 @@ pub fn main(args: view<str>) -> i32
                 qwen_edit_references=array.new()
                 qwen_edit_source=string.new()
                 qwen_edit_selected=0
-                show_swap_slots(session,true,"","")
+                show_swap_slots(session,safe,true,"","")
                 let _=desk.set_text(session,"qwen_edit_status","Add the image to change and the face")
                 continue
               }
               qwen_edit_references=array.new()
               qwen_edit_source=string.new()
               qwen_edit_selected=0
-              update_qwen_edit_sources(session,qwen_edit_references)
+              update_qwen_edit_sources(session,safe,qwen_edit_references)
               let _=desk.set_text(session,"qwen_edit_status",
                 "Add 1–10 PNG, JPEG, or WebP source images to begin")
               continue
@@ -4918,12 +5163,12 @@ pub fn main(args: view<str>) -> i32
               let _=desk.set_number(session,"edit_expand","value",cast.float(edit_expand))
               let _=desk.set_number(session,"edit_crop_strategy","selected",cast.float(edit_strategy))
               let _=desk.set_number(session,"edit_padding","value",cast.float(edit_padding))
-              show_items(session,"edit_references",edit_references)
+              show_items(session,safe,"edit_references",edit_references)
               if str.len(str.view(edit_source))!=0 {
                 match library.prep_reference(str.view(edit_source),"") {
                   ok(item)=>{var prepared=item
-                    let _=desk.picture(session,"edit_source_picture",
-                      struct.borrow(prepared,field=thumbnail))
+                    let _=safe_mode.picture_of(session,safe,"edit_source_picture",
+                      struct.borrow(prepared,field=thumbnail),str.view(edit_source))
                     let _=desk.set_bool(session,"edit_canvas_empty","visible",false)},
                   err(_)=>{},
                 }
@@ -4931,8 +5176,8 @@ pub fn main(args: view<str>) -> i32
               if str.len(str.view(edit_mask_path))!=0 {
                 match library.prep_reference(str.view(edit_mask_path),"") {
                   ok(item)=>{var prepared=item
-                    let _=desk.picture(session,"edit_mask_overlay",
-                      struct.borrow(prepared,field=thumbnail))
+                    let _=safe_mode.picture_of(session,safe,"edit_mask_overlay",
+                      struct.borrow(prepared,field=thumbnail),str.view(edit_source))
                     let _=desk.set_bool(session,"edit_mask_overlay","visible",true)},
                   err(_)=>{},
                 }
@@ -4953,7 +5198,7 @@ pub fn main(args: view<str>) -> i32
                   edit_outpaint_height,edit_outpaint_direction,
                   edit_outpaint_anchor,edit_position){
                 ok(geometry)=>{
-                  let _=desk.picture(session,"edit_crop_preview",str.view(edit_frame_preview))
+                  let _=safe_mode.picture_of(session,safe,"edit_crop_preview",str.view(edit_frame_preview),str.view(edit_source))
                   let _=desk.set_bool(session,"edit_crop_preview","visible",true)
                   let _=desk.set_text(session,"edit_outpaint_geometry_status",
                     text.concat("Preserved rect x=",text.concat(str.view(string.from_int(
@@ -5018,7 +5263,7 @@ pub fn main(args: view<str>) -> i32
                     let _=desk.set_text(session,"edit_crop_status",str.view(summary))
                     match library.prep_reference(struct.borrow(held,field=cropped_source),"") {
                       ok(item)=>{var preview=item
-                        let _=desk.picture(session,"edit_crop_preview",struct.borrow(preview,field=thumbnail))
+                        let _=safe_mode.picture_of(session,safe,"edit_crop_preview",struct.borrow(preview,field=thumbnail),str.view(edit_source))
                         let _=desk.set_bool(session,"edit_crop_preview","visible",true)},
                       err(message)=>{let _=desk.set_text(session,"edit_status",message)},
                     }
@@ -5088,12 +5333,12 @@ pub fn main(args: view<str>) -> i32
                   let _=desk.pause(session,"edit_source_video",false)
                   match masked_runtime.preview_frame(str.view(edit_source),
                       str.view(edit_frame_preview),edit_position) {
-                    ok(_)=>{let _=desk.picture(session,"edit_source_picture",
-                      str.view(edit_frame_preview))},
+                    ok(_)=>{let _=safe_mode.picture_of(session,safe,"edit_source_picture",
+                      str.view(edit_frame_preview),str.view(edit_source))},
                     err(message)=>{let _=desk.set_text(session,"edit_status",message)
                       continue},
                   }
-                } else {let _=desk.picture(session,"edit_source_picture",str.view(edit_source))}
+                } else {let _=safe_mode.picture_of(session,safe,"edit_source_picture",str.view(edit_source),str.view(edit_source))}
                 let _=desk.set_string(session,"edit_media_stack","visible-child-name","picture")
                 edit_painting=true
                 let _=desk.mask_paint(session,"edit_canvas",true,edit_brush_radius,
@@ -5140,18 +5385,18 @@ pub fn main(args: view<str>) -> i32
               edit_showing_result=false
               if edit_source_video {let _=desk.set_string(session,"edit_media_stack",
                   "visible-child-name","video")
-                let _=desk.play(session,"edit_source_video",str.view(edit_source))}
+                let _=safe_mode.play_of(session,safe,"edit_source_video",str.view(edit_source),str.view(edit_source))}
               else {let _=desk.set_string(session,"edit_media_stack","visible-child-name","picture")
-                let _=desk.picture(session,"edit_source_picture",str.view(edit_source))}
+                let _=safe_mode.picture_of(session,safe,"edit_source_picture",str.view(edit_source),str.view(edit_source))}
               continue
             }
             if id=="edit_show_result" and str.len(str.view(edit_result))!=0 {
               edit_showing_result=true
               if edit_source_video {let _=desk.set_string(session,"edit_media_stack",
                   "visible-child-name","video")
-                let _=desk.play(session,"edit_source_video",str.view(edit_result))}
+                let _=safe_mode.play_of(session,safe,"edit_source_video",str.view(edit_result),str.view(edit_source))}
               else {let _=desk.set_string(session,"edit_media_stack","visible-child-name","picture")
-                let _=desk.picture(session,"edit_source_picture",str.view(edit_result))}
+                let _=safe_mode.picture_of(session,safe,"edit_source_picture",str.view(edit_result),str.view(edit_source))}
               continue
             }
             if id == "edit_save_as" {
@@ -5265,8 +5510,8 @@ pub fn main(args: view<str>) -> i32
               edit_painting=false
               edit_references=[]
               edit_result=string.new()
-              let _=desk.picture(session,"edit_source_picture","")
-              let _=desk.picture(session,"edit_mask_overlay","")
+              let _=safe_mode.picture_of(session,safe,"edit_source_picture","",str.view(edit_source))
+              let _=safe_mode.picture_of(session,safe,"edit_mask_overlay","",str.view(edit_source))
               let _=desk.pause(session,"edit_source_video",false)
               let _=desk.pause(session,"edit_mask_video",false)
               let _=desk.set_bool(session,"edit_mask_video","visible",false)
@@ -5285,7 +5530,7 @@ pub fn main(args: view<str>) -> i32
                   "Ready · load source and character reference"}
                 else{"Ready · no source or mask"})
               let _=desk.set_bool(session,"edit_save_as","sensitive",false)
-              show_items(session,"edit_references",edit_references)
+              show_items(session,safe,"edit_references",edit_references)
               continue
             }
             if id == "gen_swap_add_character" {
@@ -5302,7 +5547,7 @@ pub fn main(args: view<str>) -> i32
             if id == "gen_swap_clear_source" {
               swap_source_video = string.new()
               swap_prompt_built = false
-              clear_swap_source_ui(session)
+              clear_swap_source_ui(session,safe)
               let _ = desk.set_bool(session,"gen_swap_open_prompt","sensitive",false)
               let _ = desk.set_text(session,"gen_swap_status",
                 "Source Video cleared; the original file was kept")
@@ -5312,7 +5557,7 @@ pub fn main(args: view<str>) -> i32
               remove_item(swap_character_references,selected_swap_character)
               selected_swap_character = string.new()
               swap_prompt_built = false
-              show_items(session,"gen_swap_character_refs",swap_character_references)
+              show_items(session,safe,"gen_swap_character_refs",swap_character_references)
               let _ = desk.set_bool(session,"gen_swap_remove_character","sensitive",false)
               let _ = desk.set_bool(session,"gen_swap_open_prompt","sensitive",false)
               let _ = desk.set_text(session,"gen_swap_status",
@@ -5339,8 +5584,8 @@ pub fn main(args: view<str>) -> i32
               swap_mask_strategy = 0
               swap_mask_padding = 96
               prompt = string.new()
-              clear_swap_source_ui(session)
-              show_items(session,"gen_swap_character_refs",swap_character_references)
+              clear_swap_source_ui(session,safe)
+              show_items(session,safe,"gen_swap_character_refs",swap_character_references)
               let _ = desk.set_number(session,"gen_swap_target","selected",0.0)
               let _ = desk.set_text(session,"gen_swap_target_notes","")
               let _ = desk.set_text(session,"gen_swap_notes_buffer","")
@@ -5716,7 +5961,7 @@ pub fn main(args: view<str>) -> i32
                 str.view(movie_project_path))
               movie_library_paths=match movie.library_paths(str.view(movie_library_root)){
                 ok(paths)=>paths,err(_)=>copy_paths(movie_library_paths)}
-              show_movie(session,movie_state)
+              show_movie(session,safe,movie_state)
               show_project_library(session,movie_library_paths,str.view(movie_project_path))
               let _=desk.set_text(session,"status","New H3 movie project created and autosaved")
               continue
@@ -5735,7 +5980,7 @@ pub fn main(args: view<str>) -> i32
                 ok(value)=>value,err(_)=>movie.create()}
               save_movie_selection(str.view(movie_library_root),
                 str.view(movie_project_path))
-              show_movie(session,movie_state)
+              show_movie(session,safe,movie_state)
               show_project_library(session,movie_library_paths,str.view(movie_project_path))
               let _=desk.set_text(session,"status","Movie project moved to Trash")
               continue
@@ -5753,7 +5998,7 @@ pub fn main(args: view<str>) -> i32
               }
               match save_movie(movie_state,str.view(movie_project_path)){
                 ok(_)=>{},err(message)=>{let _=desk.set_text(session,"status",message)}}
-              show_movie(session,movie_state)
+              show_movie(session,safe,movie_state)
               let _=desk.set_text(session,"status",if id=="add_shot"{"Shot added"}
                 else if id=="duplicate_shot"{"Shot duplicated as a clean unrendered take"}
                 else{"Shot deleted"})
@@ -5777,14 +6022,14 @@ pub fn main(args: view<str>) -> i32
                 struct.set(movie_state,0,field=selected_character)
                 match save_movie(movie_state,str.view(movie_project_path)){
                   ok(_)=>{},err(message)=>{let _=desk.set_text(session,"status",message)}}
-                show_movie(session,movie_state)}
+                show_movie(session,safe,movie_state)}
               continue
             }
             if id=="movie_remove_reference"{
               movie.remove_last_reference(movie_state,movie_state.selected_shot)
               match save_movie(movie_state,str.view(movie_project_path)){
                 ok(_)=>{},err(message)=>{let _=desk.set_text(session,"status",message)}}
-              show_movie(session,movie_state)
+              show_movie(session,safe,movie_state)
               continue
             }
             if id=="export_project" or id=="export_edit"{
@@ -5802,12 +6047,15 @@ pub fn main(args: view<str>) -> i32
               let _=desk.set_text(session,"movie_runtime","STITCHING SELECTED TAKES…")
               match movie.stitch(movie_state,str.view(output),system.temp_directory()){
                 ok(_)=>{
+                  // A movie stitched from adult takes is adult too.
+                  var stitched_from=movie.selected_outputs(movie_state)
+                  safe_mode.inherit(safe,str.view(output),stitched_from)
                   let _=desk.set_text(session,"movie_runtime","H3 ready")
                   let _=desk.set_text(session,"status",text.concat("Movie stitched: ",str.view(output)))
                   generation_notification("MM-Air movie ready",str.view(output))
                   let _=desk.set_bool(session,"movie_monitor_empty","visible",false)
                   let _=desk.set_bool(session,"movie_monitor_video","visible",true)
-                  let _=desk.play(session,"movie_monitor_video",str.view(output))
+                  let _=safe_mode.play(session,safe,"movie_monitor_video",str.view(output))
                 },err(message)=>{
                   let _=desk.set_text(session,"movie_runtime","Stitch failed")
                   let _=desk.set_text(session,"status",message)
@@ -5990,10 +6238,10 @@ pub fn main(args: view<str>) -> i32
               selected_audio = string.new()
               reference_media = string.new()
               last_reference_media = string.new()
-              clear_reference(session,false)
-              clear_reference(session,true)
-              show_items(session,"gen_visual_refs",visual_references)
-              show_items(session,"gen_audio_refs",audio_references)
+              clear_reference(session,safe,false)
+              clear_reference(session,safe,true)
+              show_items(session,safe,"gen_visual_refs",visual_references)
+              show_items(session,safe,"gen_audio_refs",audio_references)
               reference_actions(session,false,"",0)
               reference_actions(session,true,"",0)
               let _ = desk.set_text(session,"status","All references removed from this request; source files kept")
@@ -6063,8 +6311,8 @@ pub fn main(args: view<str>) -> i32
               let _ = desk.set_number(session,"gen_character_sheet_mode","selected",0.0)
               let _ = desk.set_number(session,"gen_mode","selected",0.0)
               let _ = desk.set_number(session,"gen_character_sheet_style","selected",0.0)
-              clear_swap_source_ui(session)
-              show_items(session,"gen_swap_character_refs",swap_character_references)
+              clear_swap_source_ui(session,safe)
+              show_items(session,safe,"gen_swap_character_refs",swap_character_references)
               let _ = desk.set_number(session,"gen_swap_target","selected",0.0)
               let _ = desk.set_text(session,"gen_swap_target_notes","")
               let _ = desk.set_text(session,"gen_swap_notes_buffer","")
@@ -6143,11 +6391,11 @@ pub fn main(args: view<str>) -> i32
                 let _=desk.set_text(session,"status",message)}}
               selected_result=string.new()
               saved_parameters=string.new()
-              show_gallery_items(session,"gen_current",current)
-              show_gallery_items(session,"gen_history",history)
-              let _=desk.set_bool(session,"gen_current_empty","visible",array.len(current)==0)
-              let _=desk.set_bool(session,"gen_history_empty","visible",array.len(history)==0)
-              let _=desk.picture(session,"result_picture","")
+              show_gallery_items(session,safe,"gen_current",current)
+              show_gallery_items(session,safe,"gen_history",history)
+              let _=desk.set_bool(session,"gen_current_empty","visible",safe_mode.visible_count(safe,current)==0)
+              let _=desk.set_bool(session,"gen_history_empty","visible",safe_mode.visible_count(safe,history)==0)
+              let _=safe_mode.picture(session,safe,"result_picture","")
               let _=desk.clear_video(session,"result_video")
               let _=desk.set_bool(session,"result_picture","visible",false)
               let _=desk.set_bool(session,"result_video","visible",false)
@@ -6170,6 +6418,7 @@ pub fn main(args: view<str>) -> i32
               }
               let _ = desk.set_text(session, "status", "Making the side-by-side movie (source left, result right)")
               let _ = desk.set_bool(session, "gen_side_by_side", "sensitive", false)
+              side_by_side_from = string.copy(str.view(selected_result))
               array.push(side_jobs, task.spawn(string.copy(selected_result), fn=make_side_by_side))
               continue
             }
@@ -6258,7 +6507,7 @@ pub fn main(args: view<str>) -> i32
                     lora_family_now = string.copy(lora_family(model_index))
                   }
                   geometry_widgets(session,width,height,seconds,false,false)
-                  show_items(session,"gen_swap_character_refs",swap_character_references)
+                  show_items(session,safe,"gen_swap_character_refs",swap_character_references)
                   let _ = desk.set_bool(session,"gen_swap_remove_character","sensitive",false)
                   let _ = desk.set_bool(session,"gen_swap_open_prompt","sensitive",false)
                   let _ = desk.set_text(session,"gen_swap_status",
@@ -6323,7 +6572,7 @@ pub fn main(args: view<str>) -> i32
                   // the output readout after H3 owns the screen so a Qwen
                   // source geometry cannot remain visible as H3 output.
                   geometry_widgets(session,width,height,seconds,false,false)
-                  show_items(session, "gen_visual_refs", visual_references)
+                  show_items(session,safe,"gen_visual_refs", visual_references)
                   let _ = desk.select(session, "gen_visual_refs", selected_visual)
                   reference_actions(session, false, selected_visual, array.len(visual_references))
                   let _ = desk.set_text(session, "status", "Selected image added to H3 references; prompt and execution settings were kept")
@@ -6333,12 +6582,12 @@ pub fn main(args: view<str>) -> i32
               continue
             }
             if id == "gen_visual_earlier" or id == "gen_visual_later" {
-              move_reference(session, visual_references, selected_visual,
+              move_reference(session,safe,visual_references, selected_visual,
                 false, id == "gen_visual_earlier")
               continue
             }
             if id == "gen_audio_earlier" or id == "gen_audio_later" {
-              move_reference(session, audio_references, selected_audio,
+              move_reference(session,safe,audio_references, selected_audio,
                 true, id == "gen_audio_earlier")
               continue
             }
@@ -6346,12 +6595,12 @@ pub fn main(args: view<str>) -> i32
               if id == "gen_remove_visual" {
                 remove_item(visual_references, selected_visual)
                 selected_visual = string.new()
-                show_items(session, "gen_visual_refs", visual_references)
+                show_items(session,safe,"gen_visual_refs", visual_references)
                 reference_actions(session, false, "", array.len(visual_references))
               } else {
                 remove_item(audio_references, selected_audio)
                 selected_audio = string.new()
-                show_items(session, "gen_audio_refs", audio_references)
+                show_items(session,safe,"gen_audio_refs", audio_references)
                 reference_actions(session, true, "", array.len(audio_references))
               }
               continue
@@ -6360,7 +6609,7 @@ pub fn main(args: view<str>) -> i32
               match library.clear_history() {
                 ok(_) => {
                   history = []
-                  show_gallery_items(session,"gen_history",history)
+                  show_gallery_items(session,safe,"gen_history",history)
                   let _ = desk.set_bool(session, "gen_history_empty", "visible", true)
                   let _ = desk.set_text(session, "status", "History cleared; generated media files were kept")
                 },
@@ -6370,12 +6619,12 @@ pub fn main(args: view<str>) -> i32
             }
             if id == "clear_reference" {
               reference_media = string.new()
-              clear_reference(session, false)
+              clear_reference(session,safe,false)
               continue
             }
             if id == "clear_last_reference" {
               last_reference_media = string.new()
-              clear_reference(session, true)
+              clear_reference(session,safe,true)
               continue
             }
             if id == "gen_add_visual" or id == "gen_add_audio" {
@@ -6458,7 +6707,7 @@ pub fn main(args: view<str>) -> i32
                 let _=desk.set_text(session,"status","Every shot already has a selected finished take")
                 continue}
               struct.set(movie_state,next,field=selected_shot)
-              show_movie(session,movie_state)
+              show_movie(session,safe,movie_state)
               let _=desk.set_text(session,"status","Render all started · shots run sequentially on the H3 session")
               let _=desk.activate(session,"queue_take")
               continue
@@ -6467,7 +6716,7 @@ pub fn main(args: view<str>) -> i32
               struct.set(movie_state,false,field=endless_active)
               match save_movie(movie_state,str.view(movie_project_path)){
                 ok(_)=>{},err(message)=>{let _=desk.set_text(session,"status",message)}}
-              show_movie(session,movie_state)
+              show_movie(session,safe,movie_state)
               let _=desk.set_text(session,"status","Endless chain will stop after the current segment")
               continue
             }
@@ -6485,7 +6734,7 @@ pub fn main(args: view<str>) -> i32
                 struct.set(movie_state,false,field=endless_active)
                 let _=desk.set_text(session,"status",
                   "Endless target is already complete")
-                show_movie(session,movie_state)
+                show_movie(session,safe,movie_state)
                 continue}
               let next_duration=movie.endless_segment_duration(completed_seconds,
                 movie_state.endless_target,movie_state.endless_segment)
@@ -6502,7 +6751,7 @@ pub fn main(args: view<str>) -> i32
               } else {movie.set_duration(movie_state,last,next_duration)}
               match save_movie(movie_state,str.view(movie_project_path)){
                 ok(_)=>{},err(message)=>{let _=desk.set_text(session,"status",message)}}
-              show_movie(session,movie_state)
+              show_movie(session,safe,movie_state)
               let _=desk.set_text(session,"status","Endless continuation started; segments run sequentially")
               let _=desk.activate(session,"queue_take")
               continue
@@ -6512,7 +6761,7 @@ pub fn main(args: view<str>) -> i32
                 ok(_)=>{},err(message)=>{let _=desk.set_text(session,"status",message)
                   continue}}
               match save_movie(movie_state,str.view(movie_project_path)){ok(_)=>{},err(message)=>{let _=desk.set_text(session,"status",message)}}
-              show_movie(session,movie_state)
+              show_movie(session,safe,movie_state)
               let _=desk.set_text(session,"status","Continuation shot created from the selected take; queue it when ready")
               continue
             }

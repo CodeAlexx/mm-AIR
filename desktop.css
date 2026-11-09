@@ -378,3 +378,5 @@ list, list > row { background: @carbon; color: @ink; }
 list > row label { color: @ink; }
 list > row:hover { background: alpha(@accent, .18); }
 list > row:selected { background: alpha(@accent, .30); color: @ink; }
+/* Safe mode: the Adult toggle shows when it is on. */
+.quiet-button:checked { border-color: @accent; box-shadow: inset 0 0 0 1px @accent; }

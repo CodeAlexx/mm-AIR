@@ -1,0 +1,624 @@
+// Safe mode in MM-Air: pictures and videos that are adult stay out of every gallery,
+// preview, player and picker while Safe mode is on and locked. The settings, PIN and the
+// owner's marks are AIR's shared std.safe_media store (also read by SerenityAir); the unlock
+// lives only in this process (relocks after the set minutes and on restart).
+//
+// An item is adult when the owner marked it (or its folder); otherwise when it was made with
+// an adult LoRA or prompt word (its saved parameters or the <file>.json sidecar), or made
+// from a picture or video that is itself adult.
+module app.mm_air.safe_mode
+
+import "../AIR/toolkits/desktop/ui.ai" as desk
+import "library.ai" as library
+import std.safe_media as sm
+import std.codec as codec
+import std.files as files
+import std.json as json
+import std.path as path
+import std.process as proc
+import std.text as text
+
+pub type MadeWith = struct {loras: array<string>, prompt: string, sources: array<string>}
+
+pub type State = struct {
+  settings: sm.Settings,
+  marks: sm.Marks,
+  // monotonic ns when the unlock ends; 0 = locked; forever() = until the app restarts
+  unlocked_until: u64,
+  // the lock state the screens were last drawn for
+  drawn_active: bool,
+  drawn_hide: bool,
+  // adult results already worked out, by path
+  known_paths: array<string>,
+  known_adult: array<bool>,
+  // saved parameters of every history/reference item seen, by path (kept across reloads)
+  item_paths: array<string>,
+  item_parameters: array<string>,
+  // the last file put in each preview or player, and what it was made from
+  shown_ids: array<string>,
+  shown_files: array<string>,
+  shown_origins: array<string>,
+  shown_video: array<bool>
+}
+
+fn forever() -> u64 effects {} { 18446744073709551615 }
+
+pub fn load() -> State effects {alloc,env,fs.read} {
+  let s: sm.Settings = sm.load()
+  let active: bool = s.enabled
+  let hide: bool = s.hide
+  State {settings: s, marks: sm.load_marks(), unlocked_until: 0, drawn_active: active, drawn_hide: hide,
+    known_paths: array.new(), known_adult: array.new(), item_paths: array.new(), item_parameters: array.new(),
+    shown_ids: array.new(), shown_files: array.new(), shown_origins: array.new(), shown_video: array.new()}
+}
+
+fn forget(state: ref<State>) -> unit effects {alloc} {
+  struct.set(state, array.new(), field=known_paths)
+  struct.set(state, array.new(), field=known_adult)
+}
+
+/// Read the shared store again (SerenityAir may have changed it) and forget worked-out results.
+pub fn reload(state: ref<State>) -> unit effects {alloc,env,fs.read} {
+  struct.set(state, sm.load(), field=settings)
+  struct.set(state, sm.load_marks(), field=marks)
+  forget(state)
+}
+
+pub fn save(state: ref<State>) -> result<unit,string> effects {alloc,env,fs.write} {
+  forget(state)
+  sm.save(struct.borrow(state, field=settings))
+}
+
+pub fn enabled(state: ref<State>) -> bool effects {} { state.settings.enabled }
+pub fn hide(state: ref<State>) -> bool effects {} { state.settings.hide }
+
+pub fn unlocked(state: ref<State>) -> bool effects {time} {
+  state.unlocked_until != 0 and (state.unlocked_until == forever() or time.monotonic_ns() < state.unlocked_until)
+}
+
+/// Safe mode is on and not unlocked: adult items are kept out.
+pub fn active(state: ref<State>) -> bool effects {time} { state.settings.enabled and not unlocked(state) }
+
+/// Minutes left of the unlock (0 when locked or until restart).
+pub fn minutes_left(state: ref<State>) -> u64 effects {time} {
+  if not unlocked(state) or state.unlocked_until == forever() { return 0 }
+  let left: u64 = state.unlocked_until - time.monotonic_ns()
+  (left + 59999999999) / 60000000000
+}
+
+pub fn unlock(state: ref<State>, pin: str) -> bool effects {alloc,time} {
+  if not sm.check_pin(struct.borrow(state, field=settings), pin) { return false }
+  let minutes: u64 = state.settings.relock_minutes
+  struct.set(state, if minutes == 0 { forever() } else { time.monotonic_ns() + minutes * 60000000000 }, field=unlocked_until)
+  true
+}
+
+pub fn lock(state: ref<State>) -> unit effects {} { struct.set(state, 0, field=unlocked_until) }
+
+/// True once whenever what Safe mode keeps out has changed since the screens were drawn
+/// (switched on or off, unlocked, relocked when the minutes ran out, hide/blur changed).
+pub fn changed(state: ref<State>) -> bool effects {time} {
+  if state.unlocked_until != 0 and not unlocked(state) { struct.set(state, 0, field=unlocked_until) }
+  let now: bool = active(state)
+  if now == state.drawn_active and state.drawn_hide == state.settings.hide { return false }
+  struct.set(state, now, field=drawn_active)
+  struct.set(state, state.settings.hide, field=drawn_hide)
+  true
+}
+
+/// Force the next changed() to report a change (after a mark or source edit).
+pub fn redraw(state: ref<State>) -> unit effects {time} {
+  struct.set(state, not active(state), field=drawn_active)
+}
+
+// ------------------------------------------------------------------ what an item was made with
+
+fn key_name(document: ref<json.Document>, index: u64) -> string effects {alloc} {
+  match json.as_string(document, index) { some(v) => text.lower_ascii(str.view(v)), none => string.new() }
+}
+
+// the key naming an object: its own member key, or the key of the array holding it
+fn context_of(document: ref<json.Document>, object: u64) -> string effects {alloc} {
+  if object == 0 { return string.new() }
+  let parent: u64 = match json.token(document, object) { some(t) => t.parent, none => { return string.new() } }
+  match json.kind(document, parent) {
+    some(k) => match k {
+      Object => key_name(document, object - 1),
+      Array => {
+        if parent == 0 { return string.new() }
+        let outer: u64 = match json.token(document, parent) { some(t) => t.parent, none => { return string.new() } }
+        match json.kind(document, outer) {
+          some(o) => match o { Object => key_name(document, parent - 1), Array => string.new(), Null => string.new(),
+            Boolean => string.new(), Number => string.new(), String => string.new() },
+          none => string.new(),
+        }
+      },
+      Null => string.new(), Boolean => string.new(), Number => string.new(), String => string.new(),
+    },
+    none => string.new(),
+  }
+}
+
+fn classify(out: ref<MadeWith>, key: str, context: str, value: str) -> unit effects {alloc} {
+  if str.len(value) == 0 or text.contains(key, "negative") { return () }
+  if text.contains(key, "prompt") {
+    string.append(struct.borrow(out, field=prompt), value)
+    string.append(struct.borrow(out, field=prompt), "\n")
+    return ()
+  }
+  if text.contains(key, "lora") or (key == "path" and text.contains(context, "lora")) {
+    array.push(struct.borrow(out, field=loras), text.copy(value))
+    return ()
+  }
+  if key != "output" and path.is_absolute(value) and sm.covered(value) {
+    array.push(struct.borrow(out, field=sources), text.copy(value))
+  }
+  ()
+}
+
+fn is_string(document: ref<json.Document>, index: u64) -> bool effects {} {
+  match json.kind(document, index) {
+    some(k) => match k { String => true, Object => false, Array => false, Null => false, Boolean => false, Number => false },
+    none => false,
+  }
+}
+
+/// The LoRAs, prompt text (negative prompts left out) and source pictures/videos named in a
+/// saved parameter file of any MM-Air model.
+pub fn made_with(parameters: str) -> MadeWith effects {alloc} {
+  var out: MadeWith = MadeWith {loras: array.new(), prompt: string.new(), sources: array.new()}
+  if str.len(parameters) == 0 { return out }
+  var document: json.Document = match json.parse(parameters) { ok(v) => v, err(_) => { return out } }
+  let count: u64 = array.len(struct.borrow(document, field=tokens))
+  var index: u64 = 0
+  loop {
+    if index >= count { break }
+    let object: bool = match json.kind(document, index) {
+      some(k) => match k { Object => true, Array => false, Null => false, Boolean => false, Number => false, String => false },
+      none => false,
+    }
+    if object {
+      let context: string = context_of(document, index)
+      var cursor: u64 = json.first_member(document, index)
+      loop {
+        let found = json.member(document, index, cursor)
+        if not option.is_some(found) { break }
+        let entry = option.unwrap(found)
+        cursor = entry.next
+        let key: string = key_name(document, entry.name)
+        if is_string(document, entry.value) {
+          match json.as_string(document, entry.value) {
+            some(v) => classify(out, str.view(key), str.view(context), str.view(v)), none => {},
+          }
+        } else {
+          var item = json.first_item(document, entry.value)
+          loop {
+            if not option.is_some(item) { break }
+            let at: u64 = option.unwrap(item)
+            if is_string(document, at) {
+              match json.as_string(document, at) {
+                some(v) => classify(out, str.view(key), str.view(context), str.view(v)), none => {},
+              }
+            }
+            item = json.next_item(document, entry.value, at)
+          }
+        }
+      }
+    }
+    index = index + 1
+  }
+  out
+}
+
+// ------------------------------------------------------------------ adult or not
+
+fn known(state: ref<State>, file: str) -> option<bool> effects {} {
+  var i: u64 = 0
+  loop {
+    if i >= array.len(struct.borrow(state, field=known_paths)) { break }
+    if str.view(array.borrow(struct.borrow(state, field=known_paths), i)) == file {
+      return option.some(array.get(struct.borrow(state, field=known_adult), i))
+    }
+    i = i + 1
+  }
+  option.none()
+}
+
+fn remember(state: ref<State>, file: str, adult: bool) -> unit effects {alloc} {
+  array.push(struct.borrow(state, field=known_paths), text.copy(file))
+  array.push(struct.borrow(state, field=known_adult), adult)
+}
+
+fn sidecar(file: str) -> string effects {alloc,fs.read} {
+  match files.read_limited(str.view(text.concat(file, ".json")), 4194304) {
+    ok(payload) => match str.from_bytes(bytes.view(payload)) { some(v) => string.copy(v), none => string.new() },
+    err(_) => string.new(),
+  }
+}
+
+fn learned(state: ref<State>, file: str) -> string effects {alloc} {
+  var i: u64 = 0
+  loop {
+    if i >= array.len(struct.borrow(state, field=item_paths)) { break }
+    if str.view(array.borrow(struct.borrow(state, field=item_paths), i)) == file {
+      return text.copy(str.view(array.borrow(struct.borrow(state, field=item_parameters), i)))
+    }
+    i = i + 1
+  }
+  string.new()
+}
+
+fn learn(state: ref<State>, file: str, parameters: str) -> unit effects {alloc} {
+  if str.len(parameters) == 0 { return () }
+  var i: u64 = 0
+  loop {
+    if i >= array.len(struct.borrow(state, field=item_paths)) { break }
+    if str.view(array.borrow(struct.borrow(state, field=item_paths), i)) == file {
+      array.set(struct.borrow(state, field=item_parameters), i, text.copy(parameters))
+      return ()
+    }
+    i = i + 1
+  }
+  array.push(struct.borrow(state, field=item_paths), text.copy(file))
+  array.push(struct.borrow(state, field=item_parameters), text.copy(parameters))
+}
+
+fn work_out(state: ref<State>, file: str, parameters: str, depth: u64) -> bool effects {alloc,fs.read} {
+  match sm.marked(struct.borrow(state, field=marks), file) { some(v) => { return v }, none => {}, }
+  // the item's own parameters, else those seen for this path in a gallery, else its sidecar
+  let remembered: string = if str.len(parameters) != 0 { text.copy(parameters) } else { learned(state, file) }
+  let saved: string = if str.len(str.view(remembered)) != 0 { remembered } else { sidecar(file) }
+  var made: MadeWith = made_with(str.view(saved))
+  if sm.made_adult(struct.borrow(state, field=settings), struct.borrow(made, field=loras),
+      str.view(struct.borrow(made, field=prompt))) { return true }
+  if depth >= 2 { return false }
+  var i: u64 = 0
+  loop {
+    if i >= array.len(struct.borrow(made, field=sources)) { break }
+    let source: str = str.view(array.borrow(struct.borrow(made, field=sources), i))
+    i = i + 1
+    if source == file { continue }
+    if adult_at(state, source, depth + 1) { return true }
+  }
+  false
+}
+
+fn adult_at(state: ref<State>, file: str, depth: u64) -> bool effects {alloc,fs.read} {
+  match known(state, file) { some(v) => { return v }, none => {}, }
+  let value: bool = work_out(state, file, "", depth)
+  remember(state, file, value)
+  value
+}
+
+/// Is this file adult (owner's mark, else the made-with rule)?
+pub fn adult(state: ref<State>, file: str) -> bool effects {alloc,fs.read} {
+  if str.len(file) == 0 or not sm.covered(file) { return false }
+  adult_at(state, file, 0)
+}
+
+/// Is this history or reference item adult? Uses its saved parameters when it has them.
+pub fn item_adult(state: ref<State>, item: ref<library.Item>) -> bool effects {alloc,fs.read} {
+  let file: str = str.view(struct.borrow(item, field=path))
+  // pictures and videos only (an audio reference is never kept out)
+  if not sm.covered(file) { return false }
+  learn(state, file, str.view(struct.borrow(item, field=parameters)))
+  match known(state, file) { some(v) => { return v }, none => {}, }
+  let value: bool = work_out(state, file, str.view(struct.borrow(item, field=parameters)), 0)
+  remember(state, file, value)
+  value
+}
+
+/// Kept out right now: Safe mode active, a picture or video, adult.
+pub fn blocked(state: ref<State>, file: str) -> bool effects {alloc,fs.read,time} {
+  active(state) and str.len(file) != 0 and sm.covered(file) and adult(state, file)
+}
+
+pub fn item_blocked(state: ref<State>, item: ref<library.Item>) -> bool effects {alloc,fs.read,time} {
+  active(state) and item_adult(state, item)
+}
+
+/// Any of these picked files kept out?
+pub fn any_blocked(state: ref<State>, paths: ref<array<string>>) -> bool effects {alloc,fs.read,time} {
+  var i: u64 = 0
+  loop {
+    if i >= array.len(paths) { break }
+    if blocked(state, str.view(array.borrow(paths, i))) { return true }
+    i = i + 1
+  }
+  false
+}
+
+// ------------------------------------------------------------------ the owner's marks
+
+/// The owner's Adult toggle on a picture or video: true adult, false not adult (beats the rule).
+pub fn set_mark(state: ref<State>, file: str, adult_value: bool) -> result<unit,string> effects {alloc,env,fs.read,fs.write,time} {
+  struct.set(state, sm.load_marks(), field=marks)
+  sm.mark(struct.borrow(state, field=marks), file, option.some(adult_value))
+  forget(state)
+  redraw(state)
+  sm.save_marks(struct.borrow(state, field=marks))
+}
+
+/// A file made from adult media (side-by-side, a stitched movie) is marked adult too.
+pub fn inherit(state: ref<State>, made: str, sources: ref<array<string>>) -> unit effects {alloc,env,fs.read,fs.write,time} {
+  var i: u64 = 0
+  loop {
+    if i >= array.len(sources) { break }
+    if adult(state, str.view(array.borrow(sources, i))) {
+      let _ = set_mark(state, made, true)
+      return ()
+    }
+    i = i + 1
+  }
+  ()
+}
+
+// ------------------------------------------------------------------ galleries
+
+pub type Tile = struct {show: bool, path: string, label: string}
+
+/// A blurred copy of a thumbnail (cached beside MM-Air's thumbnails); empty when it cannot be made.
+pub fn blurred(source: str) -> string effects {alloc,env,fs.meta,fs.read,fs.write,process} {
+  if str.len(source) == 0 { return string.new() }
+  let root: string = match library.data_directory() { ok(v) => v, err(_) => { return string.new() } }
+  let folder: string = path.join(str.view(root), "thumbnails")
+  let stamp: string = match files.metadata(source) {
+    ok(m) => text.concat(str.view(string.from_int(m.size)), str.view(text.concat(":", str.view(string.from_int(m.mtime_ns))))),
+    err(_) => { return string.new() },
+  }
+  let key: string = text.concat(source, str.view(text.concat(":", str.view(stamp))))
+  let name: string = text.concat("safe-", str.view(text.concat(str.view(bytes.hex(bytes.view(hash.sha256(str.bytes(str.view(key)))))), ".png")))
+  let destination: string = path.join(str.view(folder), str.view(name))
+  if match files.exists(str.view(destination)) { ok(v) => v, err(_) => false } { return destination }
+  match files.mkdirs(str.view(folder)) { ok(_) => {}, err(_) => { return string.new() } }
+  match proc.check(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", text.copy(source), "-frames:v", "1",
+      "-vf", "scale=24:-2,gblur=sigma=3,scale=272:-2:flags=bicubic", text.copy(str.view(destination))]) {
+    ok(_) => destination,
+    err(_) => string.new(),
+  }
+}
+
+/// How a gallery item shows: left out (hide), blurred, or as it is (with a small marker when adult).
+pub fn tile(state: ref<State>, item: ref<library.Item>) -> Tile effects {alloc,env,fs.meta,fs.read,fs.write,process,time} {
+  let thumbnail: string = text.copy(str.view(struct.borrow(item, field=thumbnail)))
+  if not item_adult(state, item) { return Tile {show: true, path: thumbnail, label: string.new()} }
+  if not active(state) { return Tile {show: true, path: thumbnail, label: text.copy("18+")} }
+  if state.settings.hide { return Tile {show: false, path: string.new(), label: string.new()} }
+  Tile {show: true, path: blurred(str.view(thumbnail)), label: string.new()}
+}
+
+/// The same for a file shown by path (Image Edit sources, people found in a video).
+pub fn path_tile(state: ref<State>, file: str, origin: str) -> Tile effects {alloc,env,fs.meta,fs.read,fs.write,process,time} {
+  let is_adult: bool = adult(state, file) or adult(state, origin)
+  if not is_adult { return Tile {show: true, path: text.copy(file), label: string.new()} }
+  if not active(state) { return Tile {show: true, path: text.copy(file), label: text.copy("18+")} }
+  if state.settings.hide { return Tile {show: false, path: string.new(), label: string.new()} }
+  Tile {show: true, path: blurred(file), label: string.new()}
+}
+
+/// How many of these items show right now (hidden ones are not counted).
+pub fn visible_count(state: ref<State>, items: ref<array<library.Item>>) -> u64 effects {alloc,fs.read,time} {
+  if not active(state) or not state.settings.hide { return array.len(items) }
+  var n: u64 = 0
+  var i: u64 = 0
+  loop {
+    if i >= array.len(items) { break }
+    if not item_adult(state, array.borrow(items, i)) { n = n + 1 }
+    i = i + 1
+  }
+  n
+}
+
+// ------------------------------------------------------------------ previews and players
+
+fn record(state: ref<State>, id: str, file: str, origin: str, video: bool) -> unit effects {alloc} {
+  var i: u64 = 0
+  loop {
+    if i >= array.len(struct.borrow(state, field=shown_ids)) { break }
+    if str.view(array.borrow(struct.borrow(state, field=shown_ids), i)) == id {
+      array.set(struct.borrow(state, field=shown_files), i, text.copy(file))
+      array.set(struct.borrow(state, field=shown_origins), i, text.copy(origin))
+      array.set(struct.borrow(state, field=shown_video), i, video)
+      return ()
+    }
+    i = i + 1
+  }
+  array.push(struct.borrow(state, field=shown_ids), text.copy(id))
+  array.push(struct.borrow(state, field=shown_files), text.copy(file))
+  array.push(struct.borrow(state, field=shown_origins), text.copy(origin))
+  array.push(struct.borrow(state, field=shown_video), video)
+}
+
+fn kept_out(state: ref<State>, file: str, origin: str) -> bool effects {alloc,fs.read,time} {
+  str.len(file) != 0 and (blocked(state, file) or (str.len(origin) != 0 and blocked(state, origin)))
+}
+
+/// A picture preview of `file`; nothing when it is kept out.
+pub fn picture(session: ref<desk.Session>, state: ref<State>, id: str, file: str) -> result<unit,string>
+    effects {alloc,fs.read,net,time} {
+  picture_of(session, state, id, file, "")
+}
+
+/// A preview of `file` made from `origin` (a thumbnail, frame or mask of that source).
+pub fn picture_of(session: ref<desk.Session>, state: ref<State>, id: str, file: str, origin: str) -> result<unit,string>
+    effects {alloc,fs.read,net,time} {
+  record(state, id, file, origin, false)
+  if kept_out(state, file, origin) { return desk.picture(session, id, "") }
+  desk.picture(session, id, file)
+}
+
+pub fn play(session: ref<desk.Session>, state: ref<State>, id: str, file: str) -> result<unit,string>
+    effects {alloc,fs.read,net,time} {
+  play_of(session, state, id, file, "")
+}
+
+pub fn play_of(session: ref<desk.Session>, state: ref<State>, id: str, file: str, origin: str) -> result<unit,string>
+    effects {alloc,fs.read,net,time} {
+  record(state, id, file, origin, true)
+  if kept_out(state, file, origin) { return desk.clear_video(session, id) }
+  desk.play(session, id, file)
+}
+
+pub fn play_muted_of(session: ref<desk.Session>, state: ref<State>, id: str, file: str, origin: str) -> result<unit,string>
+    effects {alloc,fs.read,net,time} {
+  record(state, id, file, origin, true)
+  if kept_out(state, file, origin) { return desk.clear_video(session, id) }
+  desk.play_muted(session, id, file)
+}
+
+/// After Safe mode changed: clear every preview now kept out, put back (paused) the ones allowed again.
+pub fn reapply(session: ref<desk.Session>, state: ref<State>) -> unit effects {alloc,fs.read,net,time} {
+  var i: u64 = 0
+  loop {
+    if i >= array.len(struct.borrow(state, field=shown_ids)) { break }
+    let id: string = text.copy(str.view(array.borrow(struct.borrow(state, field=shown_ids), i)))
+    let file: string = text.copy(str.view(array.borrow(struct.borrow(state, field=shown_files), i)))
+    let origin: string = text.copy(str.view(array.borrow(struct.borrow(state, field=shown_origins), i)))
+    let video: bool = array.get(struct.borrow(state, field=shown_video), i)
+    i = i + 1
+    if str.len(str.view(file)) == 0 { continue }
+    let out: bool = kept_out(state, str.view(file), str.view(origin))
+    if video {
+      if out { let _ = desk.clear_video(session, str.view(id)) }
+      else {
+        var command = desk.command("video", str.view(id))
+        codec.field_text(command, "path", str.view(file))
+        codec.field_bool(command, "playing", false)
+        let _ = desk.submit(session, command)
+      }
+    } else {
+      if out { let _ = desk.picture(session, str.view(id), "") }
+      else { let _ = desk.picture(session, str.view(id), str.view(file)) }
+    }
+  }
+}
+
+// ------------------------------------------------------------------ Settings
+
+pub fn words_text(state: ref<State>) -> string effects {alloc} {
+  text.join(struct.borrow(struct.borrow(state, field=settings), field=adult_words), ", ")
+}
+
+pub fn set_words(state: ref<State>, value: str) -> unit effects {alloc} {
+  var words: array<string> = array.new()
+  var parts: array<string> = text.split(value, ",")
+  var i: u64 = 0
+  loop {
+    if i >= array.len(parts) { break }
+    let word: string = text.trim(str.view(array.borrow(parts, i)))
+    if str.len(str.view(word)) != 0 { array.push(words, word) }
+    i = i + 1
+  }
+  struct.set(struct.borrow(state, field=settings), words, field=adult_words)
+}
+
+fn lora_key(value: str) -> string effects {alloc} {
+  var name: string = path.basename(value)
+  if text.ends_with(text.lower_ascii(str.view(name)), ".safetensors") {
+    name = text.copy(str.slice(str.view(name), 0, str.len(str.view(name)) - 12))
+  }
+  text.lower_ascii(str.view(name))
+}
+
+pub fn lora_is_adult(state: ref<State>, name: str) -> bool effects {alloc} {
+  let key: string = lora_key(name)
+  let list = struct.borrow(struct.borrow(state, field=settings), field=adult_loras)
+  var i: u64 = 0
+  loop {
+    if i >= array.len(list) { break }
+    if str.view(lora_key(str.view(array.borrow(list, i)))) == str.view(key) { return true }
+    i = i + 1
+  }
+  false
+}
+
+/// Add the LoRA to the adult sources, or take it out when it is there.
+pub fn toggle_lora(state: ref<State>, name: str) -> unit effects {alloc} {
+  let key: string = lora_key(name)
+  let list = struct.borrow(struct.borrow(state, field=settings), field=adult_loras)
+  var kept: array<string> = array.new()
+  var removed: bool = false
+  var i: u64 = 0
+  loop {
+    if i >= array.len(list) { break }
+    if str.view(lora_key(str.view(array.borrow(list, i)))) == str.view(key) { removed = true }
+    else { array.push(kept, text.copy(str.view(array.borrow(list, i)))) }
+    i = i + 1
+  }
+  if not removed { array.push(kept, key) }
+  struct.set(struct.borrow(state, field=settings), kept, field=adult_loras)
+}
+
+/// Settings' status line for Safe mode.
+pub fn status(state: ref<State>) -> string effects {alloc,time} {
+  if not state.settings.enabled {
+    return text.copy(if sm.has_pin(struct.borrow(state, field=settings)) { "Off" } else { "Off · no PIN set" })
+  }
+  if not unlocked(state) { return text.copy("On · locked") }
+  if state.unlocked_until == forever() { return text.copy("On · unlocked until restart") }
+  text.concat("On · unlocked · relocks in ", str.view(text.concat(str.view(string.from_int(minutes_left(state))), " min")))
+}
+
+/// Can the Safe mode settings be changed now? (off, or unlocked with the PIN)
+pub fn editable(state: ref<State>) -> bool effects {time} { not state.settings.enabled or unlocked(state) }
+
+/// Fill Settings' Safe mode section. `lora_folder` is MM-Air's LoRA library.
+pub fn show(session: ref<desk.Session>, state: ref<State>, lora_folder: str) -> unit
+    effects {alloc,fs.meta,fs.read,net,time} {
+  let open: bool = editable(state)
+  let _ = desk.set_bool(session, "settings_safe_on", "active", state.settings.enabled)
+  let _ = desk.set_text(session, "settings_safe_status", str.view(status(state)))
+  let _ = desk.set_number(session, "settings_safe_hide", "selected", if state.settings.hide { 0.0 } else { 1.0 })
+  let _ = desk.set_number(session, "settings_safe_relock", "value", cast.float(state.settings.relock_minutes))
+  let _ = desk.set_text(session, "settings_safe_words", str.view(words_text(state)))
+  let _ = desk.set_bool(session, "settings_safe_unlock", "sensitive", state.settings.enabled and not unlocked(state))
+  let _ = desk.set_bool(session, "settings_safe_lock", "sensitive", state.settings.enabled and unlocked(state))
+  let _ = desk.set_bool(session, "settings_safe_new_pin", "sensitive", open)
+  let _ = desk.set_bool(session, "settings_safe_set_pin", "sensitive", open)
+  let _ = desk.set_bool(session, "settings_safe_hide", "sensitive", open)
+  let _ = desk.set_bool(session, "settings_safe_relock", "sensitive", open)
+  let _ = desk.set_bool(session, "settings_safe_loras", "sensitive", open)
+  let _ = desk.set_bool(session, "settings_safe_words", "sensitive", open)
+  // the app's LoRA library, plus adult LoRAs no longer in it (so they can still be taken out)
+  var names: array<string> = array.new()
+  var listed: array<string> = match files.list_dir(lora_folder) { ok(v) => v, err(_) => array.new() }
+  var i: u64 = 0
+  loop {
+    if i >= array.len(listed) { break }
+    let name: str = str.view(array.borrow(listed, i))
+    i = i + 1
+    if text.ends_with(str.view(text.lower_ascii(name)), ".safetensors") { array.push(names, text.copy(str.slice(name, 0, str.len(name) - 12))) }
+  }
+  let adult_list = struct.borrow(struct.borrow(state, field=settings), field=adult_loras)
+  i = 0
+  loop {
+    if i >= array.len(adult_list) { break }
+    let key: string = lora_key(str.view(array.borrow(adult_list, i)))
+    i = i + 1
+    var present: bool = false
+    var k: u64 = 0
+    loop {
+      if k >= array.len(names) { break }
+      if str.view(lora_key(str.view(array.borrow(names, k)))) == str.view(key) { present = true }
+      k = k + 1
+    }
+    if not present { array.push(names, key) }
+  }
+  var command = desk.command("items", "settings_safe_loras")
+  codec.key(command, "items")
+  codec.begin_array(command)
+  i = 0
+  loop {
+    if i >= array.len(names) { break }
+    let name: str = str.view(array.borrow(names, i))
+    codec.begin_object(command)
+    codec.field_text(command, "key", name)
+    codec.field_text(command, "label", name)
+    codec.field_text(command, "icon", if lora_is_adult(state, name) { "object-select-symbolic" } else { "list-add-symbolic" })
+    codec.end_object(command)
+    i = i + 1
+  }
+  codec.end_array(command)
+  let _ = desk.submit(session, command)
+  ()
+}

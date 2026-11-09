@@ -137,7 +137,8 @@
       {"name": "face-fix-video", "entry": "tests/face_fix_video.ai"},
       {"name": "people-pick", "entry": "tests/people_pick.ai"},
       {"name": "native-h3-twice", "entry": "tests/native_h3_twice.ai"},
-      {"name": "native-h3-generate", "entry": "tests/native_h3_generate.ai"}
+      {"name": "native-h3-generate", "entry": "tests/native_h3_generate.ai"},
+      {"name": "mm-air-safe-mode-check", "entry": "tests/safe_mode.ai"}
     ],
     "test": [
       {"name": "mm-air-flux1-contract", "entry": "tests/flux1_contract.ai"},
@@ -258,6 +259,7 @@
     "relayvsr_post.ai",
     "prompt_lab.ai",
     "library.ai",
+    "safe_mode.ai",
     "parameters.ai",
     "native_generate.ai",
     "native_movie.ai",
