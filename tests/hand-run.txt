@@ -5,6 +5,8 @@
 tests/auto_mask_native.ai | PLUGIN MODEL SOURCE OUTPUT
 tests/flux1_worker_gpu.ai | GPU; FLUX.1 worker bridge with real weights
 tests/guide_edit_generate.ai | GPU; guide-video edit adapters with real weights
+tests/h3_lora_admission.ai | CHECKPOINT.safetensors SCRATCH_DIR
+tests/h3_lora_failure.ai | CHECKPOINT.safetensors SCRATCH_DIR
 tests/masked_reference_capture.ai | GPU; checkpoint diagnostic for the masked edit path
 tests/masked_reference_generate.ai | GPU; imported-mask edit with real weights
 tests/movie_continuation_generate.ai | GPU; one take plus one continuation, then the stitch

@@ -21,7 +21,7 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,fs.read,io.write,net,random,
     return 2},}
   if job.model!=session.Model.Reference or job.task!=session.Task.Ref2VA{return 3}
   if job.seed!=9223372036854775807 or job.attention!=session.Attention.DenseInt8{return 4}
-  if job.transformer_projection!=session.Projection.ConvRotI8Streaming or job.conditioner_projection!=session.Projection.ExactBF16{return 5}
+  if job.transformer_projection!=session.Projection.ConvRotI8Streaming or job.conditioner_projection!=session.Projection.ConvRotI8{return 5}
   if job.schedule_kind!=session.Schedule.Exponential or job.evaluations!=19{return 6}
   if job.geometry.width!=832 or array.len(struct.borrow(job,field=references))!=2{return 7}
   if array.len(struct.borrow(job,field=audio_references))!=1 or array.borrow(struct.borrow(job,field=loras),0).strength!=0.5{return 8}

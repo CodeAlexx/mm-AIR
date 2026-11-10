@@ -27,8 +27,10 @@ pub fn main(args:view<str>)->i32 effects {alloc,io.write,random} {
   let encoded=match parameters.encode_krea(edited){ok(value)=>value,err(_)=>{return 7},}
   var decoded=match parameters.decode_krea(encoded){ok(value)=>value,err(_)=>{return 8},}
   if decoded.seed!=edited.seed or array.borrow(struct.borrow(decoded,field=loras),1).strength!= -1.25{return 9}
+  // Two enabled LoRAs are accepted (only pose control restricts them).
   w.check(ui,w.find(ui,133),true)
-  match form.request(ui,100,original){ok(_)=>{return 10},err(_)=>{},}
+  var both=match form.request(ui,100,original){ok(value)=>value,err(_)=>{return 10},}
+  if not array.borrow(struct.borrow(both,field=loras),0).enabled or not array.borrow(struct.borrow(both,field=loras),1).enabled {return 10}
   w.check(ui,w.find(ui,133),false)
   w.set_text(ui,w.find(ui,140),"NaN")
   match form.request(ui,100,original){ok(_)=>{return 11},err(_)=>{},}

@@ -182,14 +182,6 @@
         "entry": "tests/h3_library_import.ai"
       },
       {
-        "name": "h3-lora-failure",
-        "entry": "tests/h3_lora_failure.ai"
-      },
-      {
-        "name": "h3-lora-admission",
-        "entry": "tests/h3_lora_admission.ai"
-      },
-      {
         "name": "parameters",
         "entry": "tests/parameters.ai"
       },
