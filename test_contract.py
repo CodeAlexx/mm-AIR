@@ -187,7 +187,7 @@ for control in ("qwen_edit_references", "qwen_edit_remove_source",
     assert tree.find(f".//object[@id='{control}']") is not None, control
 assert "2048×2048 · 40 steps · seed 42" not in ui
 assert "run_request_images_adapted" in generate
-assert "array.len(qwen_edit_references)>=10" in main
+assert "array.len(qwen_edit_references)>=edit_limit(qwen_edit_h3image)" in main
 for seed_id in ("gen_seed", "qwen_edit_seed"):
     seed_widget = tree.find(f".//object[@id='{seed_id}']")
     assert seed_widget.find("property[@name='text']").text == "Random"
