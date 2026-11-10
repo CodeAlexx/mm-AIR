@@ -138,6 +138,7 @@
       {"name": "people-pick", "entry": "tests/people_pick.ai"},
       {"name": "native-h3-twice", "entry": "tests/native_h3_twice.ai"},
       {"name": "native-h3-generate", "entry": "tests/native_h3_generate.ai"},
+      {"name": "h3image-job", "entry": "tests/h3image_generate.ai"},
       {"name": "mm-air-safe-mode-check", "entry": "tests/safe_mode.ai"}
     ],
     "check": [

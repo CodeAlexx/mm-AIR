@@ -22,11 +22,14 @@ pub fn moss_sft_model_index() -> u32 effects {} { 5 }
 pub fn is_moss_model(model:u32) -> bool effects {} { model==4 or model==5 }
 // Every Generate model that outputs a PNG (not H3).
 pub fn fibo_dev_model_index() -> u32 effects {} { 6 }
-pub fn image_model(model:u32) -> bool effects {} { model>=2 and model<=6 }
+pub fn h3image_model_index() -> u32 effects {} { 7 }
+pub fn image_model(model:u32) -> bool effects {} { model>=2 and model<=7 }
 // Image models that share Generate's Sampling panel and remembered size (not Krea or Qwen).
-pub fn uses_image_geometry(model:u32) -> bool effects {} { is_moss_model(model) or model==fibo_dev_model_index() }
+pub fn uses_image_geometry(model:u32) -> bool effects {} {
+  is_moss_model(model) or model==fibo_dev_model_index() or model==h3image_model_index()
+}
 // The Windows presenter's FLUX.1 id; it is not on the desktop dropdown, so it stays clear of it.
-pub fn flux1_model_index() -> u32 effects {} { 7 }
+pub fn flux1_model_index() -> u32 effects {} { 8 }
 pub type Flux1Request=struct {prompt:string,output:string,width:u64,height:u64,steps:u64,seed:u64,guidance:f64} derive codec(strict)
 type Flux1File=struct {schema:string,request:Flux1Request} derive codec(strict)
 pub fn flux1_defaults() -> Flux1Request effects {alloc} {
@@ -256,6 +259,91 @@ pub fn decode_fibo(source:str) -> result<FiboRequest,string> effects {alloc} {
   if file.schema!=fibo_schema() {return result.err("Unsupported Fibo 2.0 parameter file")}
   let _=try validate_fibo(struct.borrow(file,field=request))
   result.ok(struct.replace(file,fibo_defaults_for(false),field=request))
+}
+
+// MiniMax H3-Image: text to image on Generate, reference-image edit on Image Edit (one request type;
+// `images` empty is text to image). Steps, guidance and negative prompt are the model's own and are not
+// stored. width/height 0 (edits only) keep the first picture's size. `expander` is "off", "low" or "xhigh"
+// (the model's own prompt expander) or "qwen" (edits only: the local Qwen3-VL 8B).
+pub type H3ImageRequest = struct {
+  prompt:string,output:string,images:array<string>,width:u64,height:u64,seed:u64,
+  loras:array<LoraEntry>,expander:string
+} derive codec(strict)
+type H3ImageFile=struct {schema:string,request:H3ImageRequest} derive codec(strict)
+pub fn h3image_schema() -> str effects {} { "mm-air.h3image.parameters.v1" }
+pub fn h3image_max_images() -> u64 effects {} { 16 }
+// Largest picture: the model works 4 to 20 megapixels (agent assumption: 20 MP as the app limit; 4096x4096 was measured).
+pub fn h3image_max_pixels() -> u64 effects {} { 20000000 }
+pub fn h3image_expander_valid(name:str,edit:bool) -> bool effects {} {
+  name=="off" or name=="low" or name=="xhigh" or (edit and name=="qwen")
+}
+pub fn h3image_defaults() -> H3ImageRequest effects {alloc} {
+  H3ImageRequest {prompt:"",output:"",images:[],width:1024,height:1024,seed:42,loras:[],expander:"off"}
+}
+pub fn h3image_is_edit(request:ref<H3ImageRequest>) -> bool effects {} {
+  array.len(struct.borrow(request,field=images))>0
+}
+pub fn validate_h3image(request:ref<H3ImageRequest>) -> result<unit,string> effects {alloc} {
+  let edit=h3image_is_edit(request)
+  if text.trim(struct.borrow(request,field=prompt))=="" {
+    return result.err(if edit{"Write the edit instruction first"}else{"Write a prompt first"})
+  }
+  let count=array.len(struct.borrow(request,field=images))
+  if count>h3image_max_images() {return result.err("MiniMax H3-Image takes 1 to 16 images")}
+  var index:u64=0
+  loop{
+    if index>=count{break}
+    let lower=text.lower_ascii(str.view(array.borrow(struct.borrow(request,field=images),index)))
+    if not (text.ends_with(str.view(lower),".png") or text.ends_with(str.view(lower),".jpg") or
+        text.ends_with(str.view(lower),".jpeg") or text.ends_with(str.view(lower),".webp")){
+      return result.err("MiniMax H3-Image reads PNG, JPEG or WebP pictures")
+    }
+    index=index+1
+  }
+  let keep_size:bool=request.width==0 and request.height==0
+  if not (edit and keep_size) and (request.width<64 or request.height<64 or request.width>8192 or request.height>8192) {
+    return result.err("MiniMax H3-Image size must be 64 to 8192 px on each side")
+  }
+  if not (edit and keep_size) and request.width*request.height>h3image_max_pixels() {
+    return result.err("MiniMax H3-Image makes pictures up to 20 megapixels")
+  }
+  if not h3image_expander_valid(struct.borrow(request,field=expander),edit) {
+    return result.err("Choose a prompt expander from the list")
+  }
+  if not path.is_absolute(struct.borrow(request,field=output)) or
+      text.lower_ascii(path.extension(struct.borrow(request,field=output)))!=".png" {
+    return result.err("MiniMax H3-Image output must be an absolute PNG path")
+  }
+  validate_loras(struct.borrow(request,field=loras))
+}
+pub fn copy_h3image(request:ref<H3ImageRequest>) -> H3ImageRequest effects {alloc} {
+  var images:array<string> = []
+  var index:u64=0
+  loop{
+    if index>=array.len(struct.borrow(request,field=images)){break}
+    array.push(images,string.copy(str.view(array.borrow(struct.borrow(request,field=images),index))))
+    index=index+1
+  }
+  H3ImageRequest {prompt:string.copy(struct.borrow(request,field=prompt)),
+    output:string.copy(struct.borrow(request,field=output)),images:images,width:request.width,height:request.height,
+    seed:request.seed,loras:clone_loras(struct.borrow(request,field=loras)),
+    expander:string.copy(struct.borrow(request,field=expander))}
+}
+pub fn encode_h3image(request:ref<H3ImageRequest>) -> result<string,string> effects {alloc} {
+  let _=try validate_h3image(request)
+  var file:H3ImageFile=H3ImageFile {schema:string.copy(h3image_schema()),request:copy_h3image(request)}
+  match H3ImageFile_encode(file) {ok(value)=>result.ok(value),err(_)=>result.err("MiniMax H3-Image parameter encoding failed"),}
+}
+pub fn is_h3image(source:str) -> bool effects {alloc} {
+  var doc:json.Document=match json.parse(source) {ok(value)=>value,err(_)=>{return false},}
+  match string_field(doc,"schema") {ok(value)=>value==h3image_schema(),err(_)=>false,}
+}
+pub fn decode_h3image(source:str) -> result<H3ImageRequest,string> effects {alloc} {
+  var file:H3ImageFile=match H3ImageFile_decode(source) {ok(value)=>value,
+    err(_)=>{return result.err("MiniMax H3-Image parameters do not match the saved format")},}
+  if file.schema!=h3image_schema() {return result.err("Unsupported MiniMax H3-Image parameter file")}
+  let _=try validate_h3image(struct.borrow(file,field=request))
+  result.ok(struct.replace(file,h3image_defaults(),field=request))
 }
 
 pub fn moss_schema() -> str effects {} { "mm-air.moss-image.parameters.v1" }

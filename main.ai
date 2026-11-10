@@ -49,6 +49,7 @@ import "library.ai" as library
 import "safe_mode.ai" as safe_mode
 import std.safe_media as safe_media
 import "prompt_lab.ai" as prompt_lab
+import "h3image.ai" as h3image
 import "movie_project.ai" as movie
 import ".air/deps/prompt/types.ai" as prompt_types
 import ".air/deps/prompt/swap_prompts.ai" as swap_prompts
@@ -322,13 +323,24 @@ fn show_path_gallery(session:ref<desk.Session>,safe:ref<safe_mode.State>,id:str,
   let _=desk.submit(session,command)
 }
 
-fn update_qwen_edit_sources(session:ref<desk.Session>,safe:ref<safe_mode.State>,paths:ref<array<string>>)
-    ->unit effects {alloc, env, fs.meta, fs.read, fs.write, net, process, time}{
+// Most pictures one Image Edit run takes: 10 for Qwen and Fibo, 16 for MiniMax H3-Image.
+fn edit_limit(wide:bool)->u64 effects{}{if wide{16}else{10}}
+
+// MiniMax H3-Image prompt expander choices, in list order (Generate lists the first three).
+fn expander_name(index:u64)->string effects{alloc}{
+  string.copy(if index==1{"low"}else if index==2{"xhigh"}else if index==3{"qwen"}else{"off"})
+}
+fn expander_index(name:str)->u64 effects{}{
+  if name=="low"{1}else if name=="xhigh"{2}else if name=="qwen"{3}else{0}
+}
+
+fn update_qwen_edit_sources(session:ref<desk.Session>,safe:ref<safe_mode.State>,paths:ref<array<string>>,
+    maximum:u64)->unit effects {alloc, env, fs.meta, fs.read, fs.write, net, process, time}{
   show_path_gallery(session,safe,"qwen_edit_references",paths,"")
   let count:u64=array.len(paths)
   let count_i64:i64=cast.sat(count)
   let _=desk.set_text(session,"qwen_edit_source_count",text.concat(
-    str.view(string.from_int(count_i64))," / 10"))
+    str.view(text.concat(str.view(string.from_int(count_i64))," / ")),str.view(string.from_int(cast.sat(maximum)))))
   let any:bool=count!=0
   let _=desk.set_bool(session,"qwen_edit_remove_source","sensitive",any)
   let _=desk.set_bool(session,"qwen_edit_clear_sources","sensitive",any)
@@ -559,7 +571,7 @@ fn show_qwen_turbo(session:ref<desk.Session>,turbo:bool)->unit effects{alloc,net
 }
 
 // Image Edit shows only the picked model's own options.
-fn show_edit_model(session:ref<desk.Session>,fibo:bool)->unit effects{alloc,net,time}{
+fn show_edit_model(session:ref<desk.Session>,fibo:bool,is_h3i:bool)->unit effects{alloc,net,time}{
   var qwen_only:array<string> = ["qwen_edit_turbo","qwen_edit_enhance","qwen_edit_swap_label",
     "qwen_edit_swap","qwen_edit_swap_strength_row","qwen_edit_resolution","qwen_edit_resolution_label",
     "qwen_edit_scheduler","qwen_edit_scheduler_label","qwen_edit_sampler","qwen_edit_sampler_label",
@@ -567,10 +579,48 @@ fn show_edit_model(session:ref<desk.Session>,fibo:bool)->unit effects{alloc,net,
     "qwen_edit_steps","qwen_edit_steps_label"]
   var index:u64=0
   loop{if index>=array.len(qwen_only){break}
-    let _=desk.set_bool(session,array.borrow(qwen_only,index),"visible",not fibo)
+    let _=desk.set_bool(session,array.borrow(qwen_only,index),"visible",not (fibo or is_h3i))
     index=index+1}
-  let _=desk.set_bool(session,"qwen_edit_match_source","visible",fibo)
-  let _=desk.set_text(session,"qwen_edit_chip",if fibo{"FIBO 2.0 EDIT TURBO"}else{"QWEN-IMAGE-2.1"})
+  let _=desk.set_bool(session,"qwen_edit_match_source","visible",fibo or is_h3i)
+  var h3image_only:array<string> = ["qwen_edit_expander_label","qwen_edit_expander","qwen_edit_lora_label",
+    "qwen_edit_lora_row","qwen_edit_lora_strength_row"]
+  index=0
+  loop{if index>=array.len(h3image_only){break}
+    let _=desk.set_bool(session,array.borrow(h3image_only,index),"visible",is_h3i)
+    index=index+1}
+  let _=desk.set_bool(session,"qwen_edit_lora_library","visible",false)
+  let _=desk.set_text(session,"qwen_edit_choose_source",
+    if is_h3i{"＋ Add PNG / JPEG / WebP · up to 16"}else{"＋ Add PNG / JPEG / WebP · up to 10"})
+  let _=desk.set_text(session,"qwen_edit_chip",if is_h3i{"MINIMAX H3-IMAGE"}else if fibo{"FIBO 2.0 EDIT TURBO"}else{"QWEN-IMAGE-2.1"})
+  ()
+}
+
+// The edit LoRA (one, like Generate): its name and strength.
+fn show_edit_lora(session:ref<desk.Session>,entries:ref<array<parameters.LoraEntry>>)->unit effects{alloc,net,time}{
+  let any=array.len(entries)>0
+  let _=desk.set_bool(session,"qwen_edit_lora_strength_row","sensitive",any)
+  let _=desk.set_bool(session,"qwen_edit_remove_lora","sensitive",any)
+  if any{
+    let entry=array.borrow(entries,0)
+    let _=desk.set_text(session,"qwen_edit_lora_selected",path.basename(struct.borrow(entry,field=path)))
+    let _=desk.set_number(session,"qwen_edit_lora_strength","value",entry.strength)
+  }else{
+    let _=desk.set_text(session,"qwen_edit_lora_selected","No LoRA")
+  }
+  ()
+}
+
+// What the picked Image Edit model needs that is missing on this computer, as one short line.
+fn edit_model_status(session:ref<desk.Session>,fibo:bool,is_h3i:bool,expander:str)->unit effects{alloc,env,fs.meta,fs.read,net,time}{
+  if is_h3i{
+    let absent=h3image.missing(expander)
+    let _=desk.set_text(session,"qwen_edit_status",if str.len(str.view(absent))>0{string.copy(str.view(absent))}
+      else{string.copy("Up to 16 pictures · call them Picture 1, Picture 2 in the instruction")})
+    return ()
+  }
+  let _=desk.set_text(session,"qwen_edit_status",
+    if fibo{"Fibo 2.0 Edit Turbo: image 1 is the picture to change; up to four more images can guide it"}
+    else{"Qwen-Image-2.1 edit selected"})
   ()
 }
 
@@ -695,21 +745,28 @@ fn lora_family(model: u32) -> str effects {} {
   if parameters.is_moss_model(model) { return "moss-" }
   if model == parameters.fibo_dev_model_index() { return "fibo2-" }
   if model == parameters.qwen_image_model_index() { return "qwen21-" }
+  if model == parameters.h3image_model_index() { return "h3image-" }
   "h3-"
 }
+// MiniMax H3-Image also lists the H3 video LoRAs (they load on it); its own are named h3image-*.
+fn lora_listed(model: u32, name: str) -> bool effects {} {
+  str.starts_with(name,lora_family(model)) or (model == parameters.h3image_model_index() and str.starts_with(name,"h3-"))
+}
 fn show_lora_library(session: ref<desk.Session>, model: u32) -> unit effects {alloc,env,fs.read,fs.meta,net,time} {
+  show_lora_library_into(session,"gen_lora_library",model)
+}
+fn show_lora_library_into(session: ref<desk.Session>, id: str, model: u32) -> unit effects {alloc,env,fs.read,fs.meta,net,time} {
   let folder: string = lora_library_folder()
   var names: array<string> = match files.list_dir(str.view(folder)) { ok(v) => v, err(_) => array.new(), }
-  var command = desk.command("items","gen_lora_library")
+  var command = desk.command("items",id)
   codec.key(command,"items")
   codec.begin_array(command)
-  let family: str = lora_family(model)
   var i: u64 = 0
   loop {
     if i >= array.len(names) { break }
     let name: str = str.view(array.borrow(names,i))
     i = i + 1
-    if not text.ends_with(text.lower_ascii(name),".safetensors") or not str.starts_with(name,family) { continue }
+    if not text.ends_with(text.lower_ascii(name),".safetensors") or not lora_listed(model,name) { continue }
     codec.begin_object(command)
     codec.field_text(command,"key",str.view(path.join(str.view(folder),name)))
     codec.field_text(command,"label",str.slice(name,0,str.len(name)-12))
@@ -730,6 +787,7 @@ fn filter_parameters(session:ref<desk.Session>,query:str,model:u32,swap_mode:u32
   let qwen_image:bool=model==parameters.qwen_image_model_index()
   let moss:bool=parameters.is_moss_model(model)
   let fibo:bool=model==parameters.fibo_dev_model_index()
+  let wide:bool=model==parameters.h3image_model_index()
   let image_model:bool=parameters.image_model(model)
   let swap:bool=not image_model and character_swap.is_swap(swap_mode)
   let _ = desk.set_bool(session, "gen_model_group", "visible", wanted == "" or
@@ -742,8 +800,10 @@ fn filter_parameters(session:ref<desk.Session>,query:str,model:u32,swap_mode:u32
       "h3 mode character swap source video replacement target identity qwen prompt",wanted)))
   // LoRAs apply to Krea 2, MOSS, Fibo, Qwen-Image-2.1 and H3 runs; Character Swap adds its
   // Settings LoRA files.
-  let _ = desk.set_bool(session,"gen_lora_group","visible",(krea or moss or fibo or qwen_image or not image_model) and
+  let _ = desk.set_bool(session,"gen_lora_group","visible",(krea or moss or fibo or wide or qwen_image or not image_model) and
     (wanted == "" or text.contains("krea h3 moss fibo qwen lora overlay strength",wanted)))
+  let _=desk.set_bool(session,"gen_h3image_group","visible",wide and
+    (wanted=="" or text.contains("prompt expand expander rewrite low extra high",wanted)))
   let _=desk.set_bool(session,"gen_image_sampling","visible",(moss or fibo) and
     (wanted=="" or text.contains("sampling sampler schedule noise bong math steps cfg guidance shift speed fast negative prompt",wanted)))
   let _=desk.set_bool(session,"gen_prompt_images","visible",moss and
@@ -766,7 +826,7 @@ fn filter_parameters(session:ref<desk.Session>,query:str,model:u32,swap_mode:u32
     text.contains("resolution width height duration seconds frames fps size geometry custom",wanted)))
   let _=desk.set_bool(session,"gen_resolution","visible",not image_model)
   let _=desk.set_bool(session,"gen_duration_row","visible",not image_model)
-  let sixteen:bool=krea or moss or fibo
+  let sixteen:bool=krea or moss or fibo or wide
   let _=desk.set_number(session,"gen_width_adjustment","lower",if sixteen{16.0}else{32.0})
   let _=desk.set_number(session,"gen_height_adjustment","lower",if sixteen{16.0}else{32.0})
   let _=desk.set_number(session,"gen_width_adjustment","step-increment",if sixteen{16.0}else{32.0})
@@ -811,6 +871,7 @@ fn model_widgets(session: ref<desk.Session>, model:u32, sheet_mode: u32,
   let qwen_image:bool=model==parameters.qwen_image_model_index()
   let moss:bool=parameters.is_moss_model(model)
   let fibo:bool=model==parameters.fibo_dev_model_index()
+  let wide:bool=model==parameters.h3image_model_index()
   let image_model:bool=parameters.image_model(model)
   let swap: bool = not image_model and character_swap.is_swap(swap_mode)
   let masked: bool = not image_model and character_swap.is_masked(swap_mode)
@@ -823,10 +884,10 @@ fn model_widgets(session: ref<desk.Session>, model:u32, sheet_mode: u32,
   let _ = desk.set_bool(session,"gen_swap_qwen_note","visible",masked)
   let _ = desk.set_bool(session,"gen_sources_group","sensitive",not image_model and not swap)
   let sheet: bool = character_sheet.valid(sheet_mode)
-  let _ = desk.set_text(session,"generate_action",if fibo {"Generate Fibo PNG"} else if moss {"Generate MOSS PNG"} else if qwen_image {"Generate Qwen PNG"} else if krea {"Generate Krea PNG"} else if sheet {"Generate H3 Character Sheet"} else if masked {"Generate Masked H3 Swap"} else if swap {"Generate H3 Character Swap"} else {"Generate H3 MP4"})
+  let _ = desk.set_text(session,"generate_action",if wide {"Generate H3-Image PNG"} else if fibo {"Generate Fibo PNG"} else if moss {"Generate MOSS PNG"} else if qwen_image {"Generate Qwen PNG"} else if krea {"Generate Krea PNG"} else if sheet {"Generate H3 Character Sheet"} else if masked {"Generate Masked H3 Swap"} else if swap {"Generate H3 Character Swap"} else {"Generate H3 MP4"})
   let _ = desk.set_text(session,"gen_media_badge",if image_model {"Image"} else if sheet {"Sheet"} else if masked {"Masked"} else if swap {"Swap"} else {"Video"})
-  let _ = desk.set_text(session,"gen_stage_badge",if fibo {"FIBO"} else if moss {"MOSS"} else if qwen_image {"Q21"} else if krea {"K2"} else {"H3"})
-  let _ = desk.set_text(session,"gen_stage_model",if fibo {"Fibo 2.0"} else if moss {parameters.moss_label(model)} else if qwen_image {"Qwen-Image-2.1"} else if krea {"Krea 2 Turbo"} else {"MiniMax H3"})
+  let _ = desk.set_text(session,"gen_stage_badge",if wide {"H3I"} else if fibo {"FIBO"} else if moss {"MOSS"} else if qwen_image {"Q21"} else if krea {"K2"} else {"H3"})
+  let _ = desk.set_text(session,"gen_stage_model",if wide {"MiniMax H3-Image"} else if fibo {"Fibo 2.0"} else if moss {parameters.moss_label(model)} else if qwen_image {"Qwen-Image-2.1"} else if krea {"Krea 2 Turbo"} else {"MiniMax H3"})
   let _ = desk.set_text(session,"gen_fps_badge",if image_model {"PNG"} else {"24 FPS"})
   let _ = desk.set_text(session,"gen_prompt_label",if swap {"Built Prompt · editable before Generate"} else {"Prompt"})
 }
@@ -1744,6 +1805,11 @@ pub fn main(args: view<str>) -> i32
   var qwen_edit_seed_locked:bool=false
   // Image Edit model: false = Qwen-Image-2.1, true = Fibo 2.0 Edit Turbo.
   var qwen_edit_fibo:bool=false
+  // true: Image Edit runs MiniMax H3-Image (model list entry 3); fibo and this are never both true.
+  var qwen_edit_h3image:bool=false
+  var qwen_edit_expander:string=string.copy("off")
+  var qwen_edit_lora:array<parameters.LoraEntry>=[]
+  var generate_expander:string=string.copy("off")
   var qwen_edit_match_source:bool=true
   var qwen_edit_enhance:bool=true
   // Face / head / body swap preset for Image Edit: 0 is off, n is face_swap.preset(n-1).
@@ -1910,9 +1976,9 @@ pub fn main(args: view<str>) -> i32
         let _=desk.set_number(session,"qwen_image_steps","value",cast.float(qwen_image_steps))
         let _=desk.set_number(session,"qwen_edit_steps","value",cast.float(qwen_image_steps))
         layout_memory.restore(session)
-        show_edit_model(session,qwen_edit_fibo)
-        show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
-        update_qwen_edit_sources(session,safe,qwen_edit_references)
+        show_edit_model(session,qwen_edit_fibo,qwen_edit_h3image)
+        show_qwen_sampling(session,qwen_turbo,(qwen_edit_fibo or qwen_edit_h3image),qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
+        update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image))
         select_mode(session, "generate")
         source_widgets(session, task_index)
         model_widgets(session,model_index,character_sheet_mode,generation_mode)
@@ -1995,11 +2061,12 @@ pub fn main(args: view<str>) -> i32
                     show_qwen_turbo(session,qwen_turbo)
                     let restored_seed:i64=cast.sat(request.seed)
                     let _=desk.set_text(session,"qwen_edit_seed",str.view(string.from_int(restored_seed)))
-                    update_qwen_edit_sources(session,safe,qwen_edit_references)
+                    update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image))
                     qwen_edit_fibo=false
+                    qwen_edit_h3image=false
                     let _=desk.set_number(session,"qwen_edit_model","selected",0.0)
-                    show_edit_model(session,false)
-                    show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
+                    show_edit_model(session,false,false)
+                    show_qwen_sampling(session,qwen_turbo,(qwen_edit_fibo or qwen_edit_h3image),qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
                     select_mode(session,"image_edit")
                     let _=desk.set_text(session,"status","Qwen Image Edit parameters restored")
                   }else{
@@ -2044,7 +2111,7 @@ pub fn main(args: view<str>) -> i32
                     let _=desk.set_number(session,"qwen_image_scheduler","selected",
                       cast.float(qwen_image_scheduler))
                     show_qwen_turbo(session,qwen_turbo)
-                    show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
+                    show_qwen_sampling(session,qwen_turbo,(qwen_edit_fibo or qwen_edit_h3image),qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
                     let _=desk.set_text(session,"gen_seed",string.from_int(seed))
                     show_qwen_recipe(session,qwen_image_scheduler,qwen_image_sampler)
                     let _=desk.set_text(session,"gen_prompt_buffer",str.view(prompt))
@@ -2053,6 +2120,86 @@ pub fn main(args: view<str>) -> i32
                     geometry_widgets(session,width,height,seconds,false,true)
                     select_mode(session,"generate")
                     let _=desk.set_text(session,"status","Qwen Generate parameters restored")
+                  }
+                },
+                err(message)=>{let _=desk.set_text(session,"status",message)},
+              }
+              pending_parameters=string.new()
+              continue
+            }
+            if parameters.is_h3image(pending_parameters){
+              match parameters.decode_h3image(pending_parameters){
+                ok(restored)=>{
+                  var request=restored
+                  if parameters.h3image_is_edit(request){
+                    qwen_edit_prompt=string.copy(struct.borrow(request,field=prompt))
+                    let _=desk.set_text(session,"qwen_edit_prompt_buffer",str.view(qwen_edit_prompt))
+                    qwen_edit_references=copy_paths(struct.borrow(request,field=images))
+                    qwen_edit_source=string.copy(str.view(array.borrow(qwen_edit_references,0)))
+                    qwen_edit_selected=0
+                    qwen_edit_match_source=request.width==0
+                    let _=desk.set_bool(session,"qwen_edit_match_source","active",qwen_edit_match_source)
+                    if not qwen_edit_match_source{
+                      qwen_edit_width=request.width
+                      qwen_edit_height=request.height
+                      let _=desk.set_number(session,"qwen_edit_width","value",cast.float(qwen_edit_width))
+                      let _=desk.set_number(session,"qwen_edit_height","value",cast.float(qwen_edit_height))
+                    }
+                    qwen_edit_seed=request.seed
+                    let restored_seed:i64=cast.sat(request.seed)
+                    let _=desk.set_text(session,"qwen_edit_seed",str.view(string.from_int(restored_seed)))
+                    qwen_edit_fibo=false
+                    qwen_edit_h3image=true
+                    qwen_edit_expander=string.copy(struct.borrow(request,field=expander))
+                    let _=desk.set_number(session,"qwen_edit_expander","selected",cast.float(expander_index(str.view(qwen_edit_expander))))
+                    qwen_edit_lora=parameters.clone_loras(struct.borrow(request,field=loras))
+                    let _=desk.set_number(session,"qwen_edit_model","selected",2.0)
+                    show_edit_model(session,false,true)
+                    show_edit_lora(session,qwen_edit_lora)
+                    update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(true))
+                    select_mode(session,"image_edit")
+                    let _=desk.set_text(session,"status","MiniMax H3-Image edit settings restored")
+                  }else{
+                    if not parameters.image_model(model_index){
+                      saved_h3_width=width
+                      saved_h3_height=height
+                      saved_h3_seconds=seconds
+                      saved_h3_resolution=resolution_index
+                      saved_h3_output=string.copy(output_media)
+                    }
+                    model_index=parameters.h3image_model_index()
+                    generate_loras=parameters.clone_loras(struct.borrow(request,field=loras))
+                    selected_lora=18446744073709551615
+                    show_loras(session,generate_loras,selected_lora)
+                    prompt=string.copy(struct.borrow(request,field=prompt))
+                    seed=cast.sat(request.seed)
+                    seed_valid=true
+                    width=request.width
+                    height=request.height
+                    saved_image_width=width
+                    saved_image_height=height
+                    output_media=string.copy(struct.borrow(request,field=output))
+                    saved_image_output=string.copy(output_media)
+                    generate_expander=string.copy(struct.borrow(request,field=expander))
+                    resolution_index=h3.resolution_custom()
+                    character_sheet_mode=character_sheet.off()
+                    let _=desk.set_number(session,"gen_character_sheet_mode","selected",0.0)
+                    generation_mode=character_swap.standard()
+                    let _=desk.set_number(session,"gen_mode","selected",0.0)
+                    let _=desk.set_number(session,"gen_model","selected",cast.float(model_index))
+                    let _=desk.set_number(session,"gen_width","value",cast.float(width))
+                    let _=desk.set_number(session,"gen_height","value",cast.float(height))
+                    let _=desk.set_text(session,"gen_seed",string.from_int(seed))
+                    let _=desk.set_text(session,"gen_prompt_buffer",prompt)
+                    let _=desk.set_number(session,"gen_h3image_expander","selected",cast.float(expander_index(str.view(generate_expander))))
+                    model_widgets(session,model_index,character_sheet_mode,generation_mode)
+                    show_lora_library(session,model_index)
+                    lora_family_now = string.copy(lora_family(model_index))
+                    show_loras(session,generate_loras,selected_lora)
+                    lora_editor(session,generate_loras,selected_lora)
+                    geometry_widgets(session,width,height,seconds,false,true)
+                    select_mode(session,"generate")
+                    let _=desk.set_text(session,"status","MiniMax H3-Image settings restored")
                   }
                 },
                 err(message)=>{let _=desk.set_text(session,"status",message)},
@@ -2082,9 +2229,10 @@ pub fn main(args: view<str>) -> i32
                     let restored_seed:i64=cast.sat(request.seed)
                     let _=desk.set_text(session,"qwen_edit_seed",str.view(string.from_int(restored_seed)))
                     qwen_edit_fibo=true
+                    qwen_edit_h3image=false
                     let _=desk.set_number(session,"qwen_edit_model","selected",1.0)
-                    show_edit_model(session,true)
-                    update_qwen_edit_sources(session,safe,qwen_edit_references)
+                    show_edit_model(session,true,false)
+                    update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image))
                     select_mode(session,"image_edit")
                     let _=desk.set_text(session,"status","Fibo 2.0 edit settings restored")
                   }else{
@@ -2574,7 +2722,8 @@ pub fn main(args: view<str>) -> i32
                       struct.borrow(completed,field=output))
                     let _=desk.set_bool(session,"qwen_edit_result_empty","visible",false)
                     let _=desk.set_text(session,"qwen_edit_status",
-                      if qwen_edit_fibo{"Fibo 2.0 edit completed · PNG saved and displayed"}
+                      if qwen_edit_h3image{"MiniMax H3-Image edit completed · PNG saved and displayed"}
+                      else if qwen_edit_fibo{"Fibo 2.0 edit completed · PNG saved and displayed"}
                       else{"Qwen Image Edit completed · PNG saved and displayed"})
                   }
                   let _ = desk.set_text(session, "gen_batch_status", "Completed")
@@ -3147,6 +3296,19 @@ pub fn main(args: view<str>) -> i32
                 show_prompt_pictures(session,moss_settings)
                 continue
               }
+              if id == "qwen_edit_lora_files" {
+                var chosen = desk.dialog_paths(event)
+                if array.len(chosen) != 0 {
+                  let filename = array.borrow(chosen,0)
+                  if text.ends_with(text.lower_ascii(filename),".safetensors") {
+                    qwen_edit_lora = [parameters.LoraEntry {path:string.copy(str.view(filename)),strength:1.0,enabled:true}]
+                    show_edit_lora(session,qwen_edit_lora)
+                  } else {
+                    let _ = desk.set_text(session,"qwen_edit_status","Choose a LoRA file")
+                  }
+                }
+                continue
+              }
               if id == "gen_add_lora" {
                 var chosen = desk.dialog_paths(event)
                 var choice: u64 = 0
@@ -3453,7 +3615,7 @@ pub fn main(args: view<str>) -> i32
                 var rejected:bool=false
                 loop{
                   if chosen_index>=array.len(chosen) or
-                     array.len(qwen_edit_references)>=10{break}
+                     array.len(qwen_edit_references)>=edit_limit(qwen_edit_h3image){break}
                   let candidate=array.borrow(chosen,chosen_index)
                   match media.inspect(str.view(candidate),8589934592){
                     err(_)=>{rejected=true},
@@ -3469,10 +3631,11 @@ pub fn main(args: view<str>) -> i32
                 if array.len(qwen_edit_references)!=0{
                   qwen_edit_source=string.copy(str.view(array.borrow(qwen_edit_references,0)))
                 }
-                update_qwen_edit_sources(session,safe,qwen_edit_references)
+                update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image))
                 let count_i64:i64=cast.sat(array.len(qwen_edit_references))
                 var source_status=string.copy(
-                  "Only valid PNG, JPEG, or WebP images were added · maximum 10")
+                  if qwen_edit_h3image{"Only valid PNG, JPEG, or WebP images were added · maximum 16"}
+                  else{"Only valid PNG, JPEG, or WebP images were added · maximum 10"})
                 if not rejected{source_status=text.concat(
                   str.view(string.from_int(count_i64))," ordered source image(s) ready")}
                 let _=desk.set_text(session,"qwen_edit_status",str.view(source_status))
@@ -3705,6 +3868,19 @@ pub fn main(args: view<str>) -> i32
                 match save_movie(movie_state,str.view(movie_project_path)){
                   ok(_)=>{},err(message)=>{let _=desk.set_text(session,"status",message)}}
                 show_movie(session,safe,movie_state)
+              }
+              continue
+            }
+            if id == "qwen_edit_lora_library" {
+              let picked: string = string.copy(str.view(desk.field(event,"value")))
+              let _ = desk.set_bool(session,"qwen_edit_lora_library","visible",false)
+              if str.view(picked) == "__browse__" {
+                let _ = desk.dialog_multiple(session,"qwen_edit_lora_files","Add LoRA",str.view(lora_library_folder()))
+                continue
+              }
+              if str.len(str.view(picked)) != 0 {
+                qwen_edit_lora = [parameters.LoraEntry {path:picked,strength:1.0,enabled:true}]
+                show_edit_lora(session,qwen_edit_lora)
               }
               continue
             }
@@ -4140,22 +4316,22 @@ pub fn main(args: view<str>) -> i32
             }
             if id=="qwen_edit_sampler"{
               qwen_image_sampler=parameters.qwen_sampler_code(cast.sat(desk.number(event,"value")))
-              show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
+              show_qwen_sampling(session,qwen_turbo,(qwen_edit_fibo or qwen_edit_h3image),qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
               continue
             }
             if id=="qwen_edit_schedule" or id=="qwen_image_schedule"{
               qwen_image_schedule=cast.sat(desk.number(event,"value"))
-              show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
+              show_qwen_sampling(session,qwen_turbo,(qwen_edit_fibo or qwen_edit_h3image),qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
               continue
             }
             if id=="qwen_edit_eta" or id=="qwen_image_eta"{
               qwen_image_eta=desk.number(event,"value")
-              show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
+              show_qwen_sampling(session,qwen_turbo,(qwen_edit_fibo or qwen_edit_h3image),qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
               continue
             }
             if id=="qwen_edit_bongmath" or id=="qwen_image_bongmath"{
               qwen_image_bongmath=desk.boolean(event,"value")
-              show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
+              show_qwen_sampling(session,qwen_turbo,(qwen_edit_fibo or qwen_edit_h3image),qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
               continue
             }
             if id=="qwen_edit_steps"{
@@ -4493,6 +4669,10 @@ pub fn main(args: view<str>) -> i32
                 lora_editor(session,generate_loras,selected_lora)
                 lora_family_now = string.copy(lora_family(model_index))
               }
+              if model_index==parameters.h3image_model_index(){
+                let absent=h3image.missing(str.view(generate_expander))
+                if str.len(str.view(absent))>0{generation_status(session,str.view(absent))}
+              }
               if current_image_model {
                 if not previous_image_model {
                   saved_h3_width = width
@@ -4660,7 +4840,7 @@ pub fn main(args: view<str>) -> i32
                   err(message)=>{io.ewrite(text.concat("Turbo preference: ",text.concat(message,"\n")))}}}
               qwen_turbo=chosen
               show_qwen_turbo(session,qwen_turbo)
-              show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
+              show_qwen_sampling(session,qwen_turbo,(qwen_edit_fibo or qwen_edit_h3image),qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
               qwen_image_steps=qwen_turbo_steps(session,
                 qwen_effective_scheduler(qwen_turbo,qwen_image_scheduler),qwen_image_steps)
               continue
@@ -4685,7 +4865,7 @@ pub fn main(args: view<str>) -> i32
               }else{
                 show_swap_slots(session,safe,false,"","")
                 let _=desk.set_text(session,"qwen_edit_source_empty","SOURCE IMAGE")
-                update_qwen_edit_sources(session,safe,qwen_edit_references)
+                update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image))
               }
               if qwen_swap>0{
                 // The swap files were trained on the base model with their own instruction:
@@ -4711,12 +4891,30 @@ pub fn main(args: view<str>) -> i32
               continue
             }
             if id=="qwen_edit_model"{
-              qwen_edit_fibo=desk.number(event,"value")==1.0
-              show_edit_model(session,qwen_edit_fibo)
-              show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
-              let _=desk.set_text(session,"qwen_edit_status",
-                if qwen_edit_fibo{"Fibo 2.0 Edit Turbo: image 1 is the picture to change; up to four more images can guide it"}
-                else{"Qwen-Image-2.1 edit selected"})
+              let picked_model=desk.number(event,"value")
+              qwen_edit_fibo=picked_model==1.0
+              qwen_edit_h3image=picked_model==2.0
+              show_edit_model(session,qwen_edit_fibo,qwen_edit_h3image)
+              show_qwen_sampling(session,qwen_turbo,(qwen_edit_fibo or qwen_edit_h3image),qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
+              update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image))
+              if qwen_edit_h3image{show_edit_lora(session,qwen_edit_lora)
+                show_lora_library_into(session,"qwen_edit_lora_library",parameters.h3image_model_index())}
+              edit_model_status(session,qwen_edit_fibo,qwen_edit_h3image,str.view(qwen_edit_expander))
+              continue
+            }
+            if id=="qwen_edit_expander"{
+              qwen_edit_expander=expander_name(cast.sat(desk.number(event,"value")))
+              edit_model_status(session,qwen_edit_fibo,qwen_edit_h3image,str.view(qwen_edit_expander))
+              continue
+            }
+            if id=="gen_h3image_expander"{
+              generate_expander=expander_name(cast.sat(desk.number(event,"value")))
+              continue
+            }
+            if id=="qwen_edit_lora_strength"{
+              if array.len(qwen_edit_lora)>0{
+                struct.set(array.borrow(qwen_edit_lora,0),desk.number(event,"value"),field=strength)
+              }
               continue
             }
             if id=="qwen_edit_match_source"{
@@ -4738,7 +4936,7 @@ pub fn main(args: view<str>) -> i32
             }
             if id=="qwen_image_sampler"{
               qwen_image_sampler=parameters.qwen_sampler_code(cast.sat(desk.number(event,"value")))
-              show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
+              show_qwen_sampling(session,qwen_turbo,(qwen_edit_fibo or qwen_edit_h3image),qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
               show_qwen_recipe(session,qwen_image_scheduler,qwen_image_sampler)
             }
             if id=="gen_pp_text" or id=="gen_pp_vision" or id=="gen_pp_strength1" or id=="gen_pp_strength2" or
@@ -4918,7 +5116,8 @@ pub fn main(args: view<str>) -> i32
               let folder=if array.len(qwen_edit_references)==0{string.new()}
                 else{path.dirname(str.view(array.borrow(qwen_edit_references,0)))}
               let _=desk.dialog_multiple(session,id,
-                "Add 1–10 ordered Qwen Image Edit images · PNG, JPEG, or WebP",
+                if qwen_edit_h3image{"Add 1–16 ordered images · PNG, JPEG, or WebP"}
+                else{"Add 1–10 ordered Qwen Image Edit images · PNG, JPEG, or WebP"},
                 str.view(folder))
               continue
             }
@@ -4947,7 +5146,7 @@ pub fn main(args: view<str>) -> i32
               qwen_edit_selected=0
               qwen_edit_source=if array.len(qwen_edit_references)==0{string.new()}
                 else{string.copy(str.view(array.borrow(qwen_edit_references,0)))}
-              update_qwen_edit_sources(session,safe,qwen_edit_references)
+              update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image))
               continue
             }
             if id=="qwen_edit_clear_sources"{
@@ -4964,9 +5163,10 @@ pub fn main(args: view<str>) -> i32
               qwen_edit_references=array.new()
               qwen_edit_source=string.new()
               qwen_edit_selected=0
-              update_qwen_edit_sources(session,safe,qwen_edit_references)
+              update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image))
               let _=desk.set_text(session,"qwen_edit_status",
-                "Add 1–10 PNG, JPEG, or WebP source images to begin")
+                if qwen_edit_h3image{"Add 1–16 PNG, JPEG, or WebP pictures to begin"}
+                else{"Add 1–10 PNG, JPEG, or WebP source images to begin"})
               continue
             }
             if id=="qwen_edit_run"{
@@ -4983,6 +5183,58 @@ pub fn main(args: view<str>) -> i32
                 qwen_edit_seed=cast.wrap(random_seed())
                 let shown_seed:i64=cast.sat(qwen_edit_seed)
                 let _=desk.set_text(session,"qwen_edit_seed",str.view(string.from_int(shown_seed)))
+              }
+              if qwen_edit_h3image{
+                if qwen_swap>0{
+                  let _=desk.set_text(session,"qwen_edit_status","Face / head / body swap uses Qwen-Image-2.1: pick that model or turn the swap off")
+                  continue
+                }
+                let absent=h3image.missing(str.view(qwen_edit_expander))
+                if str.len(str.view(absent))>0{
+                  let _=desk.set_text(session,"qwen_edit_status",str.view(absent))
+                  continue
+                }
+                var h3image_request=parameters.h3image_defaults()
+                let _=ref.swap(struct.borrow(h3image_request,field=prompt),string.copy(str.view(qwen_edit_prompt)))
+                let _=ref.swap(struct.borrow(h3image_request,field=images),copy_paths(qwen_edit_references))
+                let _=ref.swap(struct.borrow(h3image_request,field=loras),parameters.clone_loras(qwen_edit_lora))
+                let _=ref.swap(struct.borrow(h3image_request,field=expander),string.copy(str.view(qwen_edit_expander)))
+                if qwen_edit_match_source{
+                  struct.set(h3image_request,0,field=width)
+                  struct.set(h3image_request,0,field=height)
+                }else{
+                  struct.set(h3image_request,qwen_edit_width,field=width)
+                  struct.set(h3image_request,qwen_edit_height,field=height)
+                }
+                struct.set(h3image_request,qwen_edit_seed,field=seed)
+                let h3image_folder=path.join(output_directory,"h3image/edit")
+                let h3image_stem=text.concat("h3image-edit-",string.from_int(time.monotonic_ns()))
+                let h3image_output=match library.unused_output(str.view(h3image_folder),str.view(h3image_stem),".png"){
+                  ok(value)=>value,
+                  err(message)=>{let _=desk.set_text(session,"qwen_edit_status",message)
+                    continue},
+                }
+                let _=ref.swap(struct.borrow(h3image_request,field=output),h3image_output)
+                running_parameters=match parameters.encode_h3image(h3image_request){
+                  ok(value)=>value,
+                  err(message)=>{let _=desk.set_text(session,"qwen_edit_status",message)
+                    continue},
+                }
+                var h3image_receiver=match channel.open(128,1024){
+                  ok(value)=>value,
+                  err(problem)=>{var held=problem
+                    let _=desk.set_text(session,"qwen_edit_status",channel.message(held))
+                    continue},
+                }
+                generation_started=time.monotonic_ns()
+                qwen_edit_active=true
+                var h3image_work=h3image.H3ImageJob{request:h3image_request,progress:channel.ticket(h3image_receiver)}
+                array.push(progress_receivers,h3image_receiver)
+                array.push(generations,task.spawn(h3image_work,fn=h3image.run))
+                let _=desk.set_bool(session,"qwen_edit_run","sensitive",false)
+                let _=desk.set_text(session,"qwen_edit_status","Starting MiniMax H3-Image")
+                let _=desk.set_text(session,"gen_run_state","Generating")
+                continue
               }
               if qwen_edit_fibo{
                 if qwen_swap>0{
@@ -6211,6 +6463,16 @@ pub fn main(args: view<str>) -> i32
               show_prompt_pictures(session,moss_settings)
               continue
             }
+            if id == "qwen_edit_add_lora" {
+              show_lora_library_into(session,"qwen_edit_lora_library",parameters.h3image_model_index())
+              let _ = desk.set_bool(session,"qwen_edit_lora_library","visible",true)
+              continue
+            }
+            if id == "qwen_edit_remove_lora" {
+              qwen_edit_lora = []
+              show_edit_lora(session,qwen_edit_lora)
+              continue
+            }
             if id == "gen_add_lora" {
               show_lora_library(session,model_index)
               let _ = desk.set_bool(session,"gen_lora_library","visible",true)
@@ -6272,7 +6534,7 @@ pub fn main(args: view<str>) -> i32
               qwen_image_schedule=qwen_image_contract.schedule_default()
               qwen_image_eta=0.5
               qwen_image_bongmath=true
-              show_qwen_sampling(session,qwen_turbo,qwen_edit_fibo,qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
+              show_qwen_sampling(session,qwen_turbo,(qwen_edit_fibo or qwen_edit_h3image),qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
               let _=desk.set_number(session,"qwen_image_resolution","selected",0.0)
               let _=desk.set_number(session,"qwen_image_steps","value",
                 cast.float(qwen_image_steps))
@@ -7190,7 +7452,9 @@ pub fn main(args: view<str>) -> i32
                 let qwen_image:bool=model_index==parameters.qwen_image_model_index()
                 let moss:bool=parameters.is_moss_model(model_index)
                 let fibo:bool=model_index==parameters.fibo_dev_model_index()
+                let wide:bool=model_index==parameters.h3image_model_index()
                 let folder: str = if id=="queue_take"{"movies/takes"}
+                  else if wide{"h3image/generate"}
                   else if fibo{"fibo2/generate"}
                   else if qwen_image{"qwen-image-2.1/generate"}
                   else if moss{"moss-image/generate"}
@@ -7198,10 +7462,10 @@ pub fn main(args: view<str>) -> i32
                   else if outpaint_active {"outpaint"}
                   else if masked {"masked-edits"} else {"h3"}
                 let stem: string = text.concat(if id=="queue_take"{"take"}
-                  else if qwen_image or moss or fibo{"generate"}
+                  else if qwen_image or moss or fibo or wide{"generate"}
                   else if sheet {"character-sheet"} else {folder},
                   text.concat("-",string.from_int(time.monotonic_ns())))
-                let extension: str = if qwen_image or krea or moss or fibo or sheet or
+                let extension: str = if qwen_image or krea or moss or fibo or wide or sheet or
                   (id=="edit_run" and not edit_source_video) {".png"} else {".mp4"}
                 // a full path even when no output folder is set (MOSS and Fibo require one)
                 let output_base: string = if str.len(str.view(output_directory)) != 0 and str.starts_with(str.view(output_directory),"/") {
@@ -7224,6 +7488,47 @@ pub fn main(args: view<str>) -> i32
                 }
                 io.write(text.concat(if qwen_image{"mm-air automatic Qwen-Image-2.1 output="} else if krea {"mm-air automatic Krea output="} else if sheet {"mm-air automatic H3 character-sheet source="} else if swap {"mm-air automatic H3 character-swap output="} else {"mm-air automatic H3 output="},
                   text.concat(output_media,"\n")))
+              }
+              if model_index==parameters.h3image_model_index(){
+                var request=parameters.h3image_defaults()
+                let _=ref.swap(struct.borrow(request,field=prompt),string.copy(prompt))
+                let _=ref.swap(struct.borrow(request,field=output),string.copy(output_media))
+                let _=ref.swap(struct.borrow(request,field=loras),parameters.clone_loras(generate_loras))
+                let _=ref.swap(struct.borrow(request,field=expander),string.copy(str.view(generate_expander)))
+                struct.set(request,width,field=width)
+                struct.set(request,height,field=height)
+                struct.set(request,if seed<0{time.monotonic_ns()}else{cast.wrap(seed)},field=seed)
+                if id=="gen_save_parameters"{
+                  match parameters.encode_h3image(request){
+                    ok(value)=>{save_parameter_snapshot(session,output_directory,value)},
+                    err(message)=>{let _=desk.set_text(session,"status",message)},
+                  }
+                  continue
+                }
+                let absent=h3image.missing(str.view(generate_expander))
+                if str.len(str.view(absent))>0{
+                  generation_status(session,str.view(absent))
+                  continue
+                }
+                running_parameters=match parameters.encode_h3image(request){
+                  ok(value)=>value,
+                  err(message)=>{generation_status(session,message)
+                    continue},
+                }
+                var receiver=match channel.open(128,1024){
+                  ok(value)=>value,
+                  err(problem)=>{var held=problem
+                    generation_status(session,channel.message(held))
+                    continue},
+                }
+                var work=h3image.H3ImageJob{request:request,progress:channel.ticket(receiver)}
+                array.push(progress_receivers,receiver)
+                array.push(generations,task.spawn(work,fn=h3image.run))
+                let _=desk.set_bool(session,"generate_action","sensitive",false)
+                let _=desk.set_text(session,"gen_run_state","Generating")
+                let _=desk.set_text(session,"gen_batch_status","Running")
+                generation_status(session,"Starting MiniMax H3-Image")
+                continue
               }
               if model_index==parameters.fibo_dev_model_index(){
                 var request=parameters.copy_fibo(fibo_settings)

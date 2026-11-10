@@ -335,7 +335,8 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.read,io.write} {
   if array.len(struct.borrow(old_back,field=prompt_images))!=0 or old_back.text_strength!=1.0 or
      old_back.vision_size!=384 or old_back.prompt!="a lighthouse" { return 1 }
   // Fibo 2.0: Dev on Generate (index 6), Edit Turbo on Image Edit; defaults, round trip, refusals.
-  if parameters.fibo_dev_model_index()!=6 or not parameters.image_model(6) or parameters.image_model(7) { return 1 }
+  if parameters.fibo_dev_model_index()!=6 or not parameters.image_model(6) or parameters.image_model(8) { return 1 }
+  if parameters.h3image_model_index()!=7 or not parameters.image_model(7) or not parameters.uses_image_geometry(7) { return 1 }
   var fibo=parameters.fibo_defaults_for(false)
   if fibo.steps!=50 or fibo.guidance!=5.0 or fibo.width!=1024 { return 1 }
   let _=ref.swap(struct.borrow(fibo,field=prompt),string.copy("a red fox in snow"))
@@ -356,6 +357,47 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.read,io.write} {
   if not parameters.fibo_is_edit(edit_back) or array.len(struct.borrow(edit_back,field=images))!=2 or edit_back.width!=0 { return 1 }
   array.push(struct.borrow(fibo_edit,field=images),"/tmp/c.webp")
   match parameters.validate_fibo(fibo_edit){ok(_)=>{return 1},err(_)=>{},}
+  // MiniMax H3-Image: one request for text to image and edit; codes 61+ name the failing check.
+  var wide=parameters.h3image_defaults()
+  let _=ref.swap(struct.borrow(wide,field=prompt),string.copy("a lighthouse at dusk"))
+  let _=ref.swap(struct.borrow(wide,field=output),string.copy("/tmp/h3image.png"))
+  let wide_json=match parameters.encode_h3image(wide){ok(value)=>value,err(_)=>{return 61},}
+  if not parameters.is_h3image(wide_json) or parameters.is_fibo(wide_json) or parameters.is_moss(wide_json) or
+     parameters.is_qwen_image(wide_json) { return 62 }
+  var wide_back=match parameters.decode_h3image(wide_json){ok(value)=>value,err(_)=>{return 63},}
+  if parameters.h3image_is_edit(wide_back) or wide_back.width!=1024 or wide_back.seed!=42 or wide_back.expander!="off" { return 64 }
+  // the Qwen3-VL expander is for edits only; an unknown name is refused
+  let _=ref.swap(struct.borrow(wide,field=expander),string.copy("qwen"))
+  match parameters.validate_h3image(wide){ok(_)=>{return 65},err(_)=>{},}
+  let _=ref.swap(struct.borrow(wide,field=expander),string.copy("xhigh"))
+  match parameters.validate_h3image(wide){ok(_)=>{},err(_)=>{return 66},}
+  // an edit takes 1 to 16 pictures; width and height 0 keep the first picture's size
+  var wide_edit=parameters.h3image_defaults()
+  let _=ref.swap(struct.borrow(wide_edit,field=prompt),string.copy("Make it rain in Picture 1"))
+  let _=ref.swap(struct.borrow(wide_edit,field=output),string.copy("/tmp/h3image-edit.png"))
+  let _=ref.swap(struct.borrow(wide_edit,field=expander),string.copy("qwen"))
+  struct.set(wide_edit,0,field=width)
+  struct.set(wide_edit,0,field=height)
+  match parameters.validate_h3image(wide_edit){ok(_)=>{return 67},err(_)=>{},}
+  var picture:u64=0
+  loop{
+    if picture>=16{break}
+    array.push(struct.borrow(wide_edit,field=images),text.concat("/tmp/p",str.view(text.concat(str.view(string.from_int(cast.sat(picture))),".png"))))
+    picture=picture+1
+  }
+  let wide_edit_json=match parameters.encode_h3image(wide_edit){ok(value)=>value,err(_)=>{return 68},}
+  var wide_edit_back=match parameters.decode_h3image(wide_edit_json){ok(value)=>value,err(_)=>{return 69},}
+  if not parameters.h3image_is_edit(wide_edit_back) or array.len(struct.borrow(wide_edit_back,field=images))!=16 or
+     wide_edit_back.width!=0 or wide_edit_back.expander!="qwen" { return 70 }
+  array.push(struct.borrow(wide_edit,field=images),"/tmp/p16.png")
+  match parameters.validate_h3image(wide_edit){ok(_)=>{return 71},err(_)=>{},}
+  // size limits: 20 megapixels at most
+  struct.set(wide,5000,field=width)
+  struct.set(wide,5000,field=height)
+  match parameters.validate_h3image(wide){ok(_)=>{return 72},err(_)=>{},}
+  struct.set(wide,4096,field=width)
+  struct.set(wide,4096,field=height)
+  match parameters.validate_h3image(wide){ok(_)=>{},err(_)=>{return 73},}
   // Sampler controls (Sampler / Schedule / Noise / Bong math). Codes 41+ name the failing check.
   // A MOSS file saved before the fields reads as Default (ER-SDE) with the field defaults.
   let moss_old="{\"schema\":\"mm-air.moss-image.parameters.v1\",\"request\":{\"model\":\"moss-image-base\",\"prompt\":\"a cat\",\"negative\":\"\",\"output\":\"/tmp/m.png\",\"width\":1024,\"height\":1024,\"steps\":50,\"cfg\":3.0,\"shift\":5.0,\"seed\":42,\"fast\":false,\"loras\":[],\"prompt_images\":[],\"prompt_strength_percent\":[],\"text_strength\":1.0,\"vision_size\":384}}"

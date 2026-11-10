@@ -1,0 +1,295 @@
+// MiniMax H3-Image for MM-Air: text to image (Generate) and reference-image edit (Image Edit).
+// The model runs in this process through AIR's std.inference.h3image.session; this module only
+// resolves the folders, optionally rewrites the prompt first (the model's own expander, or the local
+// Qwen3-VL 8B for edits), builds the request and reports the result. LoRAs run unmerged.
+//
+// Folders come from the runtime configuration (environment or runtime.json) and fall back to
+// ~/models: MM_AIR_H3IMAGE_ROOT (MiniMax-H3-Image), MM_AIR_H3IMAGE_AIR_ROOT (MiniMax-H3-Image-air),
+// MM_AIR_H3IMAGE_PE_ROOT (MiniMax-H3-Image-PE-air).
+module app.mm_air.h3image
+import std.channel as channel
+import std.files as files
+import std.gpu as agpu
+import std.path as path
+import std.system as system
+import std.text as text
+import std.inference.h3.lora as lora
+import std.inference.h3image.conditioning as conditioning
+import std.inference.h3image.dit as dit
+import std.inference.h3image.pe as pe
+import std.inference.h3image.pe_edit as pe_edit
+import std.inference.h3image.pe_edit_vl as pe_edit_vl
+import std.inference.h3image.references as references
+import std.inference.h3image.request as hrequest
+import std.inference.h3image.session as hsession
+import std.inference.h3.presentation as presentation
+import ".air/deps/prompt/types.ai" as prompt_types
+import "generate.ai" as generation
+import "parameters.ai" as parameters
+import "prompt_lab.ai" as prompt_lab
+import "runtime_config.ai" as runtime_config
+
+pub type H3ImageJob = struct {request:parameters.H3ImageRequest,progress:channel.Ticket}
+
+fn home_folder(sub:str)->string effects{alloc,env}{
+  match env.get("HOME"){some(home)=>path.join(home,sub),none=>string.new(),}
+}
+
+fn folder(key:str,sub:str)->result<string,string> effects{alloc,env,fs.read,fs.meta}{
+  match try runtime_config.value(key){
+    some(value)=>{if text.trim(str.view(value))!=""{return result.ok(value)}},
+    none=>{},
+  }
+  result.ok(home_folder(sub))
+}
+
+fn present(file:str)->bool effects{fs.meta}{
+  match files.exists(file){ok(found)=>found,err(_)=>false,}
+}
+
+fn number(value:u64)->string effects{alloc}{string.from_int(cast.sat(value))}
+
+pub fn model_root()->result<string,string> effects{alloc,env,fs.read,fs.meta}{
+  folder("MM_AIR_H3IMAGE_ROOT","models/MiniMax-H3-Image")
+}
+pub fn air_root()->result<string,string> effects{alloc,env,fs.read,fs.meta}{
+  folder("MM_AIR_H3IMAGE_AIR_ROOT","models/MiniMax-H3-Image-air")
+}
+pub fn expander_root()->result<string,string> effects{alloc,env,fs.read,fs.meta}{
+  folder("MM_AIR_H3IMAGE_PE_ROOT","models/MiniMax-H3-Image-PE-air")
+}
+
+// Empty when every file the model needs is on this computer; else one short sentence.
+pub fn missing(expander:str)->string effects{alloc,env,fs.read,fs.meta}{
+  let root=match model_root(){ok(value)=>value,err(message)=>{return message},}
+  let air=match air_root(){ok(value)=>value,err(message)=>{return message},}
+  if not present(str.view(path.join(str.view(root),"pdd_fused_heads.safetensors"))) or
+      not present(str.view(path.join(str.view(root),"transformer/config.json"))){
+    return string.copy("MiniMax H3-Image is not installed on this computer")
+  }
+  if not present(str.view(path.join(str.view(air),"image_convrot_h256_blocks_50.safetensors"))) or
+      not present(str.view(path.join(str.view(air),"h3image-static.json"))){
+    return string.copy("MiniMax H3-Image files are not prepared on this computer")
+  }
+  var deployment=hsession.default_deployment(str.view(air))
+  if not present(str.view(struct.borrow(deployment,field=text_convrot_cache))) or
+      not present(str.view(struct.borrow(deployment,field=tokenizer_dir))) or
+      not present(str.view(struct.borrow(deployment,field=vae_manifest))){
+    return string.copy("MiniMax H3-Image text or picture files are missing")
+  }
+  if expander=="low" or expander=="xhigh"{
+    let pe_root=match expander_root(){ok(value)=>value,err(message)=>{return message},}
+    if not present(str.view(path.join(str.view(pe_root),"air-text-manifest.json"))){
+      return string.copy("The H3-Image prompt expander is not installed on this computer")
+    }
+  }
+  string.new()
+}
+
+fn effort_of(name:str)->pe.Effort effects{}{
+  if name=="low"{return pe.Effort.Low}
+  pe.Effort.Xhigh
+}
+
+fn failure(output:str,message:str)->generation.Outcome effects{alloc}{
+  generation.outcome(false,output,message)
+}
+
+// The expanded prompt, written beside the picture. The expander's GPU context, its weights and the
+// pinned copy are all released when this returns, before the image model loads.
+fn expand_with_model(request:ref<parameters.H3ImageRequest>,expander:str,pe_root:str,scratch:str,
+    aspect:str)->result<pe.Expansion,string> effects{alloc,env,fs.meta,fs.read,fs.write,gpu,net,process,time}{
+  var context:GpuContext=match agpu.open(0){ok(found)=>found,err(problem)=>{return result.err(string.copy(problem.message))},}
+  var stream:GpuStream=match agpu.compute_stream(context){ok(found)=>found,err(problem)=>{return result.err(string.copy(problem.message))},}
+  var store:pe.Store=try pe.open_store(context,pe_root)
+  var settings:pe.Settings=pe.defaults()
+  struct.set(settings,effort_of(expander),field=effort)
+  struct.set(settings,request.seed,field=seed)
+  if parameters.h3image_is_edit(request){
+    var images:array<string>=[]
+    var index:u64=0
+    loop{
+      if index>=array.len(struct.borrow(request,field=images)){break}
+      array.push(images,string.copy(str.view(array.borrow(struct.borrow(request,field=images),index))))
+      index=index+1
+    }
+    return pe_edit.expand_with_pe(context,stream,store,str.view(struct.borrow(request,field=prompt)),aspect,
+      images,scratch,1048576,settings)
+  }
+  pe.expand(context,stream,store,str.view(struct.borrow(request,field=prompt)),settings)
+}
+
+// The local Qwen3-VL 8B (the Prompt Lab's model) reads the pictures and rewrites the instruction.
+fn expand_with_qwen(request:ref<parameters.H3ImageRequest>,pe_root:str,scratch:str,aspect:str)
+    ->result<pe.Expansion,string> effects{alloc,env,fs.meta,fs.read,fs.write,gpu,net,process,time}{
+  var availability=prompt_lab.discover(prompt_types.ModelChoice.Qwen3VL8B)
+  if not availability.available{
+    return result.err("The local Qwen3-VL 8B is not installed on this computer")
+  }
+  let binary=match system.executable_path(){ok(value)=>value,err(_)=>{return result.err("Cannot find the application folder")},}
+  let manifests=try prompt_lab.manifest_directory(str.view(path.dirname(str.view(binary))))
+  var settings=pe_edit_vl.Settings{model_directory:string.copy(str.view(struct.borrow(availability,field=tokenizer_directory))),
+    manifest_directory:manifests,max_new_tokens:1024,temperature:0.7,top_p:0.8,seed:request.seed,max_pixels:1048576}
+  var images:array<string>=[]
+  var index:u64=0
+  loop{
+    if index>=array.len(struct.borrow(request,field=images)){break}
+    array.push(images,string.copy(str.view(array.borrow(struct.borrow(request,field=images),index))))
+    index=index+1
+  }
+  pe_edit_vl.expand(settings,pe_root,str.view(struct.borrow(request,field=prompt)),aspect,images,scratch)
+}
+
+fn device_total()->result<u64,string> effects{alloc,gpu}{
+  var context:GpuContext=match agpu.open(0){ok(found)=>found,err(problem)=>{return result.err(string.copy(problem.message))},}
+  result.ok(agpu.properties(context).total_memory)
+}
+
+pub fn run(job:H3ImageJob own)->generation.Outcome
+    effects{alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+  var owned=job
+  var ticket=ref.swap(struct.borrow(owned,field=progress),generation.no_progress())
+  var connection=match channel.connect(ticket,time.monotonic_ns()+30000000000){
+    ok(value)=>value,
+    err(_)=>{return failure(str.view(struct.borrow(struct.borrow(owned,field=request),field=output)),
+      "Cannot connect the MM-Air MiniMax H3-Image progress channel")},
+  }
+  var sender:option<channel.Sender> = option.some(connection)
+  var finished=run_inner(struct.borrow(owned,field=request),sender)
+  generation.finish_progress(sender,finished)
+  finished
+}
+
+fn run_inner(request:ref<parameters.H3ImageRequest>,sender:ref<option<channel.Sender>>)->generation.Outcome
+    effects{alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+  let started=time.monotonic_ns()
+  let output=string.copy(struct.borrow(request,field=output))
+  match parameters.validate_h3image(request){
+    err(message)=>{return failure(str.view(output),message)},ok(_)=>{},
+  }
+  let edit=parameters.h3image_is_edit(request)
+  let expander=string.copy(struct.borrow(request,field=expander))
+  let absent=missing(str.view(expander))
+  if str.len(str.view(absent))>0{return failure(str.view(output),str.view(absent))}
+  let root=match model_root(){ok(value)=>value,err(message)=>{return failure(str.view(output),message)},}
+  let air=match air_root(){ok(value)=>value,err(message)=>{return failure(str.view(output),message)},}
+  let pe_root=match expander_root(){ok(value)=>value,err(message)=>{return failure(str.view(output),message)},}
+  let scratch=path.join(system.temp_directory(),"mm-air-h3image")
+  let _made=files.mkdirs(str.view(scratch))
+
+  var images:array<string>=[]
+  var image_index:u64=0
+  loop{
+    if image_index>=array.len(struct.borrow(request,field=images)){break}
+    array.push(images,string.copy(str.view(array.borrow(struct.borrow(request,field=images),image_index))))
+    image_index=image_index+1
+  }
+
+  // The size of an edit that keeps the first picture's size.
+  var width=request.width
+  var height=request.height
+  if edit and (width==0 or height==0){
+    let first=match references.load_image(str.view(array.borrow(images,0)),str.view(scratch)){
+      ok(value)=>value,err(message)=>{return failure(str.view(output),message)},}
+    width=cast.wrap(first.width)
+    height=cast.wrap(first.height)
+  }
+
+  if width*height>parameters.h3image_max_pixels(){
+    return failure(str.view(output),"MiniMax H3-Image makes pictures up to 20 megapixels")
+  }
+
+  // Prompt expander: runs first and frees everything before the image model loads.
+  var prompt=string.copy(struct.borrow(request,field=prompt))
+  var note=string.new()
+  if expander!="off"{
+    let aspect=if edit and request.width!=0{pe_edit.reduced_ratio(width,height)}else{string.copy("adaptive")}
+    report_step(sender,if expander=="qwen"{"Rewriting the instruction with Qwen3-VL"}else{"Rewriting the prompt"})
+    let expand_started=time.monotonic_ns()
+    var expansion=match (if expander=="qwen"{expand_with_qwen(request,str.view(pe_root),str.view(scratch),str.view(aspect))}
+        else{expand_with_model(request,str.view(expander),str.view(pe_root),str.view(scratch),str.view(aspect))}){
+      ok(value)=>value,
+      err(message)=>{return failure(str.view(output),str.view(text.concat("Prompt expander: ",str.view(message))))},
+    }
+    prompt=string.copy(str.view(struct.borrow(expansion,field=caption)))
+    let sidecar=text.concat(str.view(output),".prompt.txt")
+    let _saved=files.write_text(str.view(sidecar),str.view(prompt))
+    note=text.concat(" · prompt rewritten in ",text.concat(str.view(number((time.monotonic_ns()-expand_started)/1000000000))," s"))
+  }
+
+  // The model's own request: steps 6, no guidance, no negative prompt.
+  var form:hrequest.Request=hrequest.request(str.view(prompt),width,height,images,str.view(output))
+  form.seed=cast.sat(request.seed)
+  match hrequest.validate(form){
+    ok(_)=>{},
+    err(problem)=>{return failure(str.view(output),str.view(problem.message))},
+  }
+  var adapters:array<lora.Request>=[]
+  var lora_index:u64=0
+  loop{
+    if lora_index>=array.len(struct.borrow(request,field=loras)){break}
+    let entry=array.borrow(struct.borrow(request,field=loras),lora_index)
+    if entry.enabled{
+      array.push(adapters,lora.Request{path:string.copy(struct.borrow(entry,field=path)),strength:cast.float(entry.strength)})
+    }
+    lora_index=lora_index+1
+  }
+
+  report_step(sender,"Reading the model")
+  var opened:hsession.Session=match hsession.open(str.view(root),hsession.default_deployment(str.view(air))){
+    ok(value)=>value,err(message)=>{return failure(str.view(output),message)},}
+  var grids:array<u64>=[]
+  var vision_rows:u64=0
+  var prepared:references.Intake=references.Intake{vae_images:[],patches:[],latent_grids:[]}
+  if edit{
+    prepared=match references.prepare(struct.borrow(form,field=references),str.view(scratch)){
+      ok(value)=>value,err(message)=>{return failure(str.view(output),message)},}
+    var k:u64=0
+    loop{
+      if k>=array.len(struct.borrow(prepared,field=latent_grids)){break}
+      let grid:conditioning.LatentGrid=array.get(struct.borrow(prepared,field=latent_grids),k)
+      array.push(grids,grid.height)
+      array.push(grids,grid.width)
+      let one:ref<presentation.VisionPatches>=array.borrow(struct.borrow(prepared,field=patches),k)
+      vision_rows=vision_rows+one.grid.height*one.grid.width/4
+      k=k+1
+    }
+  }
+  var made:hsession.Plan=match hsession.plan(opened,form,array.view(grids),vision_rows){
+    ok(value)=>value,err(message)=>{return failure(str.view(output),message)},}
+
+  // Memory: the card's own size, 1 GiB kept free, host memory minus 2 GiB for the system.
+  let device=match device_total(){ok(value)=>value,err(message)=>{return failure(str.view(output),message)},}
+  let host=match system.memory(){
+    ok(value)=>if value.available_bytes>2147483648{value.available_bytes-2147483648}else{0},
+    err(_)=>0,
+  }
+  let budget=hsession.Budget{device_bytes:device,device_reserve_bytes:1073741824,resident_weight_bytes:0,
+    pinned_weight_bytes:0,host_available_bytes:host}
+  match hsession.refusal(made,budget){
+    ok(_)=>{},
+    err(message)=>{return failure(str.view(output),message)},
+  }
+  // Best case (nothing else on the card): the blocks must at least fit as streamed from host memory.
+  match dit.plan_residency(made.sequence_rows,hrequest.fixed_steps(),made.timestep_tables,0,
+      device-budget.device_reserve_bytes,host,2,opened.dims){
+    ok(_)=>{},
+    err(_)=>{return failure(str.view(output),"This computer's graphics card or memory is too small for MiniMax H3-Image")},
+  }
+
+  report_step(sender,if edit{"Generating the edit"}else{"Generating the picture"})
+  match hsession.generate(opened,form,made,budget,prepared,adapters,str.view(scratch),""){
+    ok(timings)=>{
+      let seconds=number((time.monotonic_ns()-started)/1000000000)
+      let done=text.concat("MiniMax H3-Image ",text.concat(if edit{"edit"}else{"picture"},
+        text.concat(" completed in ",text.concat(str.view(seconds)," s"))))
+      generation.outcome_metrics(true,str.view(output),str.view(text.concat(str.view(done),str.view(note))),
+        (time.monotonic_ns()-started)/1000000,timings.peak_vram_bytes)
+    },
+    err(message)=>failure(str.view(output),message),
+  }
+}
+
+fn report_step(sender:ref<option<channel.Sender>>,message:str)->unit effects{alloc,net,time}{
+  generation.report(sender,message)
+}

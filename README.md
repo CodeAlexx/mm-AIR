@@ -1283,3 +1283,12 @@ The controlled 2026-09-10 native playback run reached 4.007 seconds with a
 HDMI monitor measured nonzero PCM (peak -11.46 dB, RMS -29.05 dB). This proves
 audio reached the selected output sink; it does not claim the generated audio's
 semantic content is correct.
+
+### MiniMax H3-Image (2026-11-10)
+
+Generate lists **MiniMax H3-Image** (prompt, size, seed, one LoRA with strength, Prompt expander Off / Low / Extra high).
+Image Edit lists it as a third model: 1 to 16 pictures in order, keep the first picture's size or set Width and Height,
+one LoRA, Prompt expander Off / Low / Extra high / Qwen3-VL 8B. It runs in this process through AIR's
+`std.inference.h3image.session` (`h3image.ai`); LoRAs stay unmerged. Folders: `MM_AIR_H3IMAGE_ROOT`,
+`MM_AIR_H3IMAGE_AIR_ROOT`, `MM_AIR_H3IMAGE_PE_ROOT` (defaults under `~/models`). If files are missing the screen says so
+in one line. Needs an AIR with `std.inference.h3image` (branch work/h3image until merged).
