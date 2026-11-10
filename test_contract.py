@@ -290,9 +290,9 @@ for required in (
 
 assert [item.text for item in tree.findall(".//object[@id='gen_model_list']/items/item")] == [
     "MiniMax H3 Base", "MiniMax H3 Reference", "Krea 2 Turbo", "Qwen-Image-2.1",
-    "MOSS-Image Base", "MOSS-Image SFT", "Fibo 2.0"]
+    "MOSS-Image Base", "MOSS-Image SFT", "Fibo 2.0", "MiniMax H3-Image"]
 assert [item.text for item in tree.findall(".//object[@id='qwen_edit_model_list']/items/item")] == [
-    "Qwen-Image-2.1", "Fibo 2.0 Edit Turbo"]
+    "Qwen-Image-2.1", "Fibo 2.0 Edit Turbo", "MiniMax H3-Image"]
 assert [item.text for item in tree.findall(".//object[@id='h3_resolution_list']/items/item")] == [
     "16:9 · 1344×768", "21:9 · 1536×672", "4:3 · 1024×768",
     "1:1 · 768×768", "3:4 · 768×1024", "9:16 · 768×1344",
