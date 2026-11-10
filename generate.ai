@@ -1074,12 +1074,12 @@ fn joined(root: str, suffix: str) -> string effects {alloc} {
   path.join(root, suffix)
 }
 
-fn outcome(succeeded: bool, output: str, message: str) -> Outcome effects {alloc} {
+pub fn outcome(succeeded: bool, output: str, message: str) -> Outcome effects {alloc} {
   Outcome {succeeded: succeeded, output: text.copy(output),
     message: text.copy(message),runtime_ms:0,peak_vram_bytes:0}
 }
 
-fn outcome_metrics(succeeded:bool,output:str,message:str,runtime_ms:u64,
+pub fn outcome_metrics(succeeded:bool,output:str,message:str,runtime_ms:u64,
                    peak_vram_bytes:u64)->Outcome effects{alloc}{
   Outcome{succeeded:succeeded,output:text.copy(output),message:text.copy(message),
     runtime_ms:runtime_ms,peak_vram_bytes:peak_vram_bytes}
@@ -1191,18 +1191,18 @@ fn apply_post(job:ref<Job>,generated:Outcome own,
   apply_relayvsr(job,restored,sender)
 }
 
-fn no_progress() -> channel.Ticket effects {alloc} {
+pub fn no_progress() -> channel.Ticket effects {alloc} {
   channel.Ticket {port: 0, token: string.new(), capacity: 0, max_message: 0}
 }
 
-fn report(sender: ref<option<channel.Sender>>, message: str) -> unit effects {alloc,net,time} {
+pub fn report(sender: ref<option<channel.Sender>>, message: str) -> unit effects {alloc,net,time} {
   match sender {
     some(value) => { let _ = channel.offer(value,1,str.bytes(message)) },
     none => {},
   }
   ()
 }
-fn finish_progress(sender:ref<option<channel.Sender>>,finished:ref<Outcome>) -> unit effects {alloc,net,time} {
+pub fn finish_progress(sender:ref<option<channel.Sender>>,finished:ref<Outcome>) -> unit effects {alloc,net,time} {
   var empty: option<channel.Sender> = option.none()
   var owned: option<channel.Sender> = ref.swap(sender,empty)
   match owned {
