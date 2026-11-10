@@ -1,0 +1,80 @@
+# UI text that already breaks the 'users are not developers' rule (tools/ui-text-check.py).
+# Shrink this list; never add to it to make the check pass. kind<TAB>text
+developer-word	4B local · resident BF16 · one request at a time
+developer-word	CK-INT8 target
+developer-word	Cancelling Qwen; H3 remains blocked until teardown completes
+developer-word	Choose a LoRA .safetensors file
+developer-word	Conditioner projection
+developer-word	Delta Color is bypassed for latent chains because no seam VAE round-trip occurs. Rolling repair is available in Edit → Repair Frames.
+developer-word	Generate H3 take · Dense INT8
+developer-word	H3 LoRA selected from its original path · transformer projection set to Row-scaled INT8
+developer-word	Krea VAE checkpoint file
+developer-word	Krea VAE configuration file
+developer-word	Krea tokenizer folder
+developer-word	Matched latent steps
+developer-word	Prompt Lab Qwen3-VL 32B row-INT8 folder
+developer-word	Scene Plan sends these exact ordered frame, video-latent, and audio-latent spans to Qwen. Current Generate remains one H3 latent; multi-window execution is not mislabeled as active.
+developer-word	SeedVR2 VAE file
+developer-word	Set MM_AIR_FACE_SWAP_LORA_DIR to the folder holding the swap .safetensors files
+developer-word	Target: official dense ControlNet · AIR row-scale INT8 · execution not linked
+developer-word	Transformer projection
+developer-word	VAE align
+developer-word	Wait for Qwen Director teardown before starting H3
+developer-word	Working crop geometry appears after mask validation; no full-frame fallback.
+identifier	Fibo 2.0 pipeline file (AIR models/fibo2/presets/pipeline.json)
+identifier	H3 application presets file (h3_app.json)
+identifier	H3 deployment layout file (h3_deployment.json)
+identifier	H3 guide-video VFX edit LoRA file (minimax_h3_vfx_edit_v1.0_r128, or _ffp for an edited first frame)
+identifier	H3 guide-video character swap LoRA file (minimax_h3_character_swap_v1.1_ref2va_fro)
+identifier	H3 guide-video head swap LoRA file (minimax_h3_head_swap_v1.0_r32)
+identifier	H3 guide-video motion transfer LoRA file (minimax_h3_motion_transfer_v1.0_ref2va)
+identifier	H3 guide-video sharpness LoRA file (minimax_h3_lms_v1.0_r64)
+identifier	H3 guide-video style transfer LoRA file (minimax_h3_style_transfer_v1.0_r64)
+identifier	H3 training adapter V2 for motion transfer (minimax_h3_ref2va_training_adapter_v2, loaded first)
+identifier	Set MM_AIR_FACE_SWAP_LORA_DIR to the folder holding the swap .safetensors files
+long	Add a source video and character picture(s), then Build Prompt.
+long	Choose a source video, enter the bad frame range, then Preview Repair Plan.
+long	Custom dimensions and duration; frames and H3 padding are automatic.
+long	Delta Color is bypassed for latent chains because no seam VAE round-trip occurs. Rolling repair is available in Edit → Repair Frames.
+long	Fibo 2.0 pipeline file (AIR models/fibo2/presets/pipeline.json)
+long	Generator unloads first. The pre-upscale MP4 is retained beside the final result.
+long	H3 Character Swap LoRA file (applied at run time; pick a newer one any time)
+long	H3 guide-video VFX edit LoRA file (minimax_h3_vfx_edit_v1.0_r128, or _ffp for an edited first frame)
+long	H3 guide-video character swap LoRA file (minimax_h3_character_swap_v1.1_ref2va_fro)
+long	H3 guide-video head swap LoRA file (minimax_h3_head_swap_v1.0_r32)
+long	H3 guide-video motion transfer LoRA file (minimax_h3_motion_transfer_v1.0_ref2va)
+long	H3 guide-video style transfer LoRA file (minimax_h3_style_transfer_v1.0_r64)
+long	H3 training adapter V2 for motion transfer (minimax_h3_ref2va_training_adapter_v2, loaded first)
+long	Load 1–10 ordered images, describe the change, generate the edit
+long	Localized image and video edits with source-preserving reconstruction
+long	Looks at the sources and rewrites the edit request first. Qwen-Image-2.1-PE-I2I thinks first (about 2 min) and also picks the output aspect ratio. Untick to send the request as typed.
+long	Official dense Union checkpoint for the current full-embed H3 base.
+long	One Krea or H3 LoRA overlay · enable, adjust strength or remove
+long	Pose control: skeleton .png (used as is) or keypoints .json (empty = off)
+long	Pose scale: 1.0 default, 1.25 to 1.5 stronger. Output takes the pose size. Keypoints are drawn at their own canvas, line 3 / joint 4 (assumption)
+long	Qwen-Image-2.1 face / head / body swap LoRA folder (BFS-Best-Face-Swap)
+long	Qwen-Image-2.1-PE-T2I rewrites the prompt; it thinks first and also picks the aspect ratio. Untick to send the prompt as typed at the size you set.
+long	Ref2VA orbit from up to 9 references; saves the source MP4 and a stitched PNG. Select H3 schedule and precision below.
+long	Runs the distilled Turbo checkpoint at its fixed 8 steps, several times faster. Untick to use base Qwen-Image-2.1 with the schedule and steps below.
+long	Saved paths apply to the next generation. Running jobs keep their current settings.
+long	Scene Plan sends these exact ordered frame, video-latent, and audio-latent spans to Qwen. Current Generate remains one H3 latent; multi-window execution is not mislabeled as active.
+long	Select a finished take to approve it for the edit and play it in the monitor.
+long	Sequential Motion Context chain · resumable · runs to your target duration.
+long	Shared character references lead every shot and override conflicting prose identities.
+long	Side panels stay beside the canvas. Smaller values leave more room for your image.
+long	Source 1 is the target image, source 2 the reference face / head / person. Choosing a swap fills in the instruction the LoRA was trained on, turns Turbo and prompt enhancement off, and runs the LoRA unmerged at the strength below.
+long	Target: official dense ControlNet · AIR row-scale INT8 · execution not linked
+long	Text-prompted local detection + video tracking. You can paint corrections afterward.
+long	The matched + taper count must equal the selected 5/22/39-frame context grid. Audio context remains exact and separate.
+long	This task takes no pictures. Pick Reference (Ref2VA) or a first/last-frame task to attach them.
+long	Working crop geometry appears after mask validation; no full-frame fallback.
+paragraph	Delta Color is bypassed for latent chains because no seam VAE round-trip occurs. Rolling repair is available in Edit → Repair Frames.
+paragraph	Generator unloads first. The pre-upscale MP4 is retained beside the final result.
+paragraph	Pose scale: 1.0 default, 1.25 to 1.5 stronger. Output takes the pose size. Keypoints are drawn at their own canvas, line 3 / joint 4 (assumption)
+paragraph	Ref2VA orbit from up to 9 references; saves the source MP4 and a stitched PNG. Select H3 schedule and precision below.
+paragraph	Saved paths apply to the next generation. Running jobs keep their current settings.
+paragraph	Scene Plan sends these exact ordered frame, video-latent, and audio-latent spans to Qwen. Current Generate remains one H3 latent; multi-window execution is not mislabeled as active.
+paragraph	Side panels stay beside the canvas. Smaller values leave more room for your image.
+paragraph	Text-prompted local detection + video tracking. You can paint corrections afterward.
+paragraph	The matched + taper count must equal the selected 5/22/39-frame context grid. Audio context remains exact and separate.
+paragraph	This task takes no pictures. Pick Reference (Ref2VA) or a first/last-frame task to attach them.

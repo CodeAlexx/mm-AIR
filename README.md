@@ -1204,15 +1204,22 @@ the selected result, and `Ctrl+Shift+R` resets Generate controls.
 Checks (from this repository):
 
 ```sh
-tools/check.sh            # no GPU, model or display: static contract (test_contract.py)
-                          # and a compile of every hand-run test program
+tools/check.sh            # no GPU, model or display: static contract (test_contract.py),
+                          # a compile of every hand-run test program, and screen wording
 tools/check.sh --tests    # the above, then `airproj test`: builds and runs the declared tests
 ```
 
-`air.project.json` declares the programs (`targets.bin`) and the automatic tests
-(`targets.test`). Test programs that need inputs (a model, a clip, a display, a
-Windows desktop) are listed with what they need in `tests/hand-run.txt`; the contract
-fails when a test file is in neither place. Examples of hand-run programs:
+`air.project.json` declares the programs (`targets.bin`), the automatic tests
+(`targets.test`) and the programs that are run by hand with inputs (`targets.check`:
+verified by `airproj check`, never built). `tests/hand-run.txt` says what each hand-run
+program or script needs; the contract fails when a test file is in neither place.
+
+Screen wording is checked against one rule: users are not developers (controls, short
+labels and status; no paragraphs, developer words, identifiers or file names). AIR's
+`tools/ui-text-check.py` reports what breaks it; `tests/ui-text-baseline.txt` lists the 80
+findings that exist today, so only new ones fail. Shorten that list; do not add to it.
+
+Examples of hand-run programs:
 
 ```sh
 airc=$AIR_TOOLCHAIN/bin/airc

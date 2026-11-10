@@ -1,7 +1,7 @@
 # Test programs that need inputs (a model, a clip, a display, a Windows desktop) and so are run by
-# hand, not by `airproj test`. One per line: FILE | what it needs. tools/check.sh compiles every .ai
-# listed here; test_contract.py fails when a test file is neither declared in air.project.json nor
-# listed here.
+# hand, not by `airproj test`. One per line: FILE | what it needs. The .ai programs are declared
+# under targets.check in air.project.json, so `airproj check` and the agent preflight verify them
+# and nothing builds them; test_contract.py fails when a test file is neither declared nor listed.
 tests/auto_mask_native.ai | PLUGIN MODEL SOURCE OUTPUT
 tests/flux1_worker_gpu.ai | GPU; FLUX.1 worker bridge with real weights
 tests/guide_edit_generate.ai | GPU; guide-video edit adapters with real weights

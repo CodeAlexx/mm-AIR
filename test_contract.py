@@ -230,8 +230,9 @@ assert 'video_vae_checkpoint: under(c, struct.borrow(l, field=video_vae))' in h3
 assert 'video_decoder_aux_checkpoint: under(d, struct.borrow(l, field=video_decoder_aux))' in h3_deployment
 
 # MM-Air is built by airproj from air.project.json. Every test file is either declared
-# there (built, and for targets.test run, by airproj) or listed in tests/hand-run.txt with
-# what it needs, so no test can sit in the repository unseen by any check.
+# there (targets.bin built, targets.test built and run, targets.check verified only) or, for
+# scripts, listed in tests/hand-run.txt, which also says what every hand-run program needs.
+# No test can sit in the repository unseen by any check.
 import json
 project = json.loads(PROJECT.read_text())
 declared = {entry["entry"] for kind in project["targets"].values() for entry in kind}
@@ -242,13 +243,22 @@ hand_run = [line.split("|")[0].strip() for line in HAND_RUN.read_text().splitlin
 assert len(hand_run) == len(set(hand_run)), "tests/hand-run.txt lists a file twice"
 for name in hand_run:
     assert (ROOT / name).is_file(), f"tests/hand-run.txt names a missing file: {name}"
-    assert name not in declared, f"{name} is both declared and listed as hand-run"
-helpers = {"tests/air_root.py", "tests/hand-run.txt", "tests/h3_presets_fixture.ai"}
+    # A hand-run AIR program is a `targets.check` entry: airproj verifies it with every other
+    # entry point and never builds it. Scripts are only listed.
+    if name.endswith(".ai"):
+        assert name in {entry["entry"] for entry in project["targets"].get("check", [])}, (
+            f"{name} must be declared under targets.check")
+    else:
+        assert name not in declared, f"{name} is both declared and listed as hand-run"
+helpers = {"tests/air_root.py", "tests/hand-run.txt", "tests/h3_presets_fixture.ai",
+           "tests/ui-text-baseline.txt"}
 present = {f"tests/{p.name}" for p in (ROOT / "tests").iterdir() if p.is_file()}
 present |= {p.name for p in ROOT.glob("test_*.py")} - {"test_contract.py"}
 unaccounted = sorted(present - declared - set(hand_run) - helpers)
 assert not unaccounted, f"test files neither declared nor listed as hand-run: {unaccounted}"
 assert not (ROOT / "CMakeLists.txt").exists(), "MM-Air is built by airproj, not CMake"
+for entry in project["targets"].get("check", []):
+    assert entry["entry"] in hand_run, f"{entry['entry']} is check-only; say what it needs in tests/hand-run.txt"
 
 for page in ("generate", "edit", "movie", "control", "prompt"):
     assert f"<property name=\"name\">{page}</property>" in ui

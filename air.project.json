@@ -140,6 +140,24 @@
       {"name": "native-h3-generate", "entry": "tests/native_h3_generate.ai"},
       {"name": "mm-air-safe-mode-check", "entry": "tests/safe_mode.ai"}
     ],
+    "check": [
+      {"name": "auto-mask-native", "entry": "tests/auto_mask_native.ai"},
+      {"name": "flux1-worker-gpu", "entry": "tests/flux1_worker_gpu.ai"},
+      {"name": "guide-edit-generate", "entry": "tests/guide_edit_generate.ai"},
+      {"name": "h3-lora-admission", "entry": "tests/h3_lora_admission.ai"},
+      {"name": "h3-lora-failure", "entry": "tests/h3_lora_failure.ai"},
+      {"name": "masked-reference-capture", "entry": "tests/masked_reference_capture.ai"},
+      {"name": "masked-reference-generate", "entry": "tests/masked_reference_generate.ai"},
+      {"name": "movie-continuation-generate", "entry": "tests/movie_continuation_generate.ai"},
+      {"name": "native-clipboard", "entry": "tests/native_clipboard.ai"},
+      {"name": "native-h3-worker", "entry": "tests/native_h3_worker.ai"},
+      {"name": "native-krea-generate", "entry": "tests/native_krea_generate.ai"},
+      {"name": "native-movie-stitch", "entry": "tests/native_movie_stitch.ai"},
+      {"name": "sam31-subject-mask", "entry": "tests/sam31_subject_mask.ai"},
+      {"name": "swap-part-audio", "entry": "tests/swap_part_audio.ai"},
+      {"name": "ui-layout", "entry": "tests/ui_layout.ai"},
+      {"name": "video-encode-bench", "entry": "tests/video_encode_bench.ai"}
+    ],
     "test": [
       {"name": "mm-air-flux1-contract", "entry": "tests/flux1_contract.ai"},
       {"name": "movie-project", "entry": "tests/movie_project.ai"},
