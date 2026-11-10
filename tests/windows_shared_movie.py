@@ -1,6 +1,6 @@
 """Edit and reopen a real shared Movie project through the native Windows UI.
 
-python apps/mm-air/tests/windows_shared_movie.py APP.exe air-ui.exe --runtime-directory DIR
+python tests/windows_shared_movie.py APP.exe air-ui.exe --runtime-directory DIR
 Uses a temporary project library, never the user's current project or clipboard.
 """
 import argparse

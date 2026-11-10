@@ -20,8 +20,11 @@ import sys
 import time
 from types import SimpleNamespace
 
-ROOT = Path(__file__).resolve().parents[3]
+APP = Path(__file__).resolve().parents[1]
 sys.dont_write_bytecode = True
+sys.path.insert(0, str(APP / "tests"))
+from air_root import air_root
+ROOT = air_root()
 sys.path.insert(0, str(ROOT / "tests"))
 from desktop_x11 import X11, png, wait_for  # noqa: E402
 
@@ -47,7 +50,7 @@ def prepare_bin(args, scratch: Path) -> Path:
     providers = Path(args.binary).parent / ".air"
     if providers.exists():  # RUNPATH $ORIGIN/.air/providers
         shutil.copytree(providers, bindir / ".air", symlinks=True)
-    app = ROOT / "apps/mm-air"
+    app = APP
     shutil.copy2(app / "desktop.ui", share / "desktop.ui")
     shutil.copy2(app / "desktop.css", share / "desktop.css")
     shutil.copy2(app / "presets/swap-masks.json", share / "swap-masks.json")

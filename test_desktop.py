@@ -11,8 +11,11 @@ import tempfile
 import time
 from types import SimpleNamespace
 
-ROOT = Path(__file__).resolve().parents[2]
+APP = Path(__file__).resolve().parent
 sys.dont_write_bytecode = True
+sys.path.insert(0, str(APP / "tests"))
+from air_root import air_root
+ROOT = air_root()
 sys.path.insert(0, str(ROOT / "tests"))
 from desktop_x11 import X11, png, wait_for
 

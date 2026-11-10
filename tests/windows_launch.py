@@ -16,7 +16,9 @@ def main():
     parser.add_argument('application',type=Path)
     parser.add_argument('adapter',type=Path)
     args=parser.parse_args()
-    source=Path(__file__).resolve().parents[3]/'toolkits/desktop/test_windows.py'
+    sys.path.insert(0,str(Path(__file__).resolve().parent))
+    from air_root import air_root
+    source=air_root()/'toolkits/desktop/test_windows.py'
     spec=importlib.util.spec_from_file_location('native_desktop_test',source)
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
     bind=module.bind

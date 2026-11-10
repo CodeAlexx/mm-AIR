@@ -5,7 +5,11 @@ import re
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parent
-AIR_ROOT = ROOT.parents[1]
+import sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(ROOT / "tests"))
+from air_root import air_root
+AIR_ROOT = air_root()
 UI = ROOT / "desktop.ui"
 CSS = ROOT / "desktop.css"
 MAIN = ROOT / "main.ai"
@@ -123,7 +127,7 @@ app_cmake = APP_CMAKE.read_text()
 sam3_cmake = SAM3_CMAKE.read_text()
 
 assert "PNG / JPEG / WebP" in ui
-assert "PNG/JPEG/WebP images or videos" in ui
+assert "Add images or videos (or drop them here)" in ui
 assert "parameters.qwen_condition_image" in main
 assert "ordered Qwen Image Edit images · PNG, JPEG, or WebP" in main
 assert "ordered Qwen Image Edit PNGs" not in main
@@ -165,8 +169,8 @@ assert float(duration_props["upper"]) >= 4294967295/24
 assert float(duration_props["step-increment"]) <= 1/24+1e-12
 expected_h3_defaults = {
     "gen_task": "0", "gen_profile": "2",
-    "gen_conditioner_projection": "1",
-    "gen_transformer_projection": "2", "gen_attention": "4",
+    "gen_conditioner_projection": "2",
+    "gen_transformer_projection": "2", "gen_attention": "3",
 }
 for control, expected in expected_h3_defaults.items():
     widget = tree.find(f".//object[@id='{control}']")
@@ -182,7 +186,7 @@ for control in ("qwen_edit_references", "qwen_edit_remove_source",
                 "qwen_edit_width", "qwen_edit_height", "movie_width", "movie_height"):
     assert tree.find(f".//object[@id='{control}']") is not None, control
 assert "2048×2048 · 40 steps · seed 42" not in ui
-assert "run_request_images_configured" in generate
+assert "run_request_images_adapted" in generate
 assert "array.len(qwen_edit_references)>=10" in main
 for seed_id in ("gen_seed", "qwen_edit_seed"):
     seed_widget = tree.find(f".//object[@id='{seed_id}']")
@@ -199,7 +203,7 @@ assert "if not qwen_edit_seed_locked" in main
 for control in ("result_fullscreen", "result_fullscreen_picture",
                 "result_fullscreen_close", "gen_delete_result"):
     assert tree.find(f".//object[@id='{control}']") is not None, control
-assert 'codec.field_text(command,"label","")' in main
+assert 'codec.field_text(command, "label", struct.borrow(tile, field=label))' in main
 assert 'desktop_files.trash_file' in main
 assert 'proc.check(["gio","trash"' not in main
 
@@ -222,8 +226,8 @@ assert 'geometry_widgets(session,width,height,seconds,false,false)' in use_as_h3
 # the official FP16 encoder source. Keep those two checkpoint lifetimes and
 # paths distinct at the in-process H3 session boundary.
 assert 'h3_deployment.sources(deployment_roots' in generate
-assert 'video_vae_checkpoint: joined(str.view(checkpoint_root), "video_vae/source/model.safetensors")' in h3_deployment
-assert 'video_decoder_aux_checkpoint: joined(str.view(donor_root), "shared/video-vae/derived-fp16.safetensors")' in h3_deployment
+assert 'video_vae_checkpoint: under(c, struct.borrow(l, field=video_vae))' in h3_deployment
+assert 'video_decoder_aux_checkpoint: under(d, struct.borrow(l, field=video_decoder_aux))' in h3_deployment
 
 # Rebuilding the external AIR toolchain provider must invalidate MM-Air's
 # custom command so airc republishes the matching provider beside the binary.
@@ -272,7 +276,7 @@ assert [item.text for item in tree.findall(".//object[@id='h3_resolution_list']/
     "1:1 · 768×768", "3:4 · 768×1024", "9:16 · 768×1344",
     "Donor · 832×480", "Custom"]
 assert [item.text for item in tree.findall(".//object[@id='seedvr2_method_list']/items/item")] == [
-    "SeedVR2 3B", "SeedVR2 7B"]
+    "SeedVR2 3B", "SeedVR2 7B", "RelayVSR 2x", "RelayVSR 4x"]
 assert 'krea_session.run_to_png' in generate
 assert 'task.spawn(work,fn=generation.run_krea)' in main
 assert 'desk.clear_video(session,"result_video")' in main
@@ -310,7 +314,6 @@ for widget in (
     assert tree.find(f".//object[@id='{widget}']") is not None, widget
 assert 'prompt_lab.scene_instruction' in main
 assert 'director.scene_plan_instruction' in prompt_lab
-assert 'Current Generate remains one native H3 latent' in ui
 assert 'prompt.Task.CharacterSwap' in character_swap
 assert 'prompt.attachment(source_video,prompt.AttachmentKind.Video,1)' in character_swap
 assert 'prompt.AttachmentKind.Image,index+1' in character_swap
@@ -346,7 +349,7 @@ for widget in (
 assert [item.text for item in tree.findall(".//object[@id='edit_mode_list']/items/item")] == [
     "Image Edit", "Video Edit", "Character Replace · no mask",
     "Masked Character Replace", "Prompt-guided Local Edit", "Video Outpaint",
-    "Repair Frames", "Motion Repair"]
+    "Repair Frames", "Motion Repair", "Video Swap · auto person"]
 assert tree.find(".//object[@id='edit_mode']/property[@name='selected']").text == "2"
 assert 'character_swap.masked_request' in main
 assert 'character_swap.local_image_request' in main
@@ -364,7 +367,7 @@ assert 'source_video:source_video' in masked_runtime
 assert '"-c:v","png"' in masked_runtime
 assert 'desk.seek(session,"edit_source_video"' in main
 assert 'desk.mask_paint(session,"edit_canvas"' in main
-assert 'task.spawn(work,fn=auto_mask.run)' in main
+assert 'task.spawn(work,fn=sam31_mask.run)' in main
 assert 'automask.mask_media' in auto_mask
 assert '"-vf","fps=24"' in auto_mask
 assert 'the host application stayed open' in auto_mask
@@ -375,7 +378,7 @@ assert 'PABannier/sam3.cpp.git' in sam3_cmake
 assert '01832ef85fcc8eb6488f1d01cd247f07e96ff5a9' in sam3_cmake
 assert '--version-script=${AIR_SAM3_VERSION_SCRIPT}' in sam3_cmake
 assert 'LINKER:-Bsymbolic' in sam3_cmake
-assert re.search(r'global:\s*air_sam3_mask_media;\s*local:\s*\*;', sam3_exports)
+assert re.search(r'global:\s*air_sam3_mask_media;\s*air_sam3_track_media;\s*local:\s*\*;', sam3_exports)
 assert 'no full-frame fallback' in main
 assert 'prompt_types.Task.Outpaint' in outpaint
 assert 'outpaint.prompt_request' in main
