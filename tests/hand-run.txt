@@ -1,0 +1,33 @@
+# Test programs that need inputs (a model, a clip, a display, a Windows desktop) and so are run by
+# hand, not by `airproj test`. One per line: FILE | what it needs. tools/check.sh compiles every .ai
+# listed here; test_contract.py fails when a test file is neither declared in air.project.json nor
+# listed here.
+tests/auto_mask_native.ai | PLUGIN MODEL SOURCE OUTPUT
+tests/flux1_worker_gpu.ai | GPU; FLUX.1 worker bridge with real weights
+tests/guide_edit_generate.ai | GPU; guide-video edit adapters with real weights
+tests/masked_reference_capture.ai | GPU; checkpoint diagnostic for the masked edit path
+tests/masked_reference_generate.ai | GPU; imported-mask edit with real weights
+tests/movie_continuation_generate.ai | GPU; one take plus one continuation, then the stitch
+tests/native_clipboard.ai | Windows clipboard station (run via air_ui_clipboard_test)
+tests/native_h3_worker.ai | GPU; H3 worker with real weights
+tests/native_krea_generate.ai | GPU; PARAMETERS.json
+tests/native_movie_stitch.ai | CLIP1 CLIP2 OUTPUT SCRATCH (driven by test_native_movie_stitch.py)
+tests/sam31_subject_mask.ai | GPU; SAM31_MODEL SOURCE.mp4 FRAMES OUT_PREFIX
+tests/swap_part_audio.ai | PRESET SOURCE OUTPUT_DIR PART SECONDS OFFSET_SECONDS
+tests/ui_layout.ai | AIR-UI desktop.ui desktop.css [VIDEO THUMBNAIL]; needs a display
+tests/video_encode_bench.ai | GPU; CHECKPOINT MANIFEST OUT.f32 FRAMES [BASELINE.f32]
+tests/gallery_selection.sh | APP AIR_UI XVFB LAYOUT CSS VIDEO_A VIDEO_B; private X11 display
+tests/people_strip.sh | SOURCE DIR WIDTH HEIGHT FRAMES OUT.png
+tests/video_swap_gui.py | Linux; private Xvfb display, drives Edit > Video Swap
+tests/windows_edit_prepare.py | Windows; APP.exe air-ui.exe
+tests/windows_image_generate.py | Windows; APP.exe air-ui.exe, real model
+tests/windows_image_zoom.py | Windows; APP.exe air-ui.exe --runtime-directory DIR
+tests/windows_launch.py | Windows; APP.exe air-ui.exe
+tests/windows_movie_generate.py | Windows; APP.exe air-ui.exe, real model
+tests/windows_prompt_lab.py | Windows; APP.exe air-ui.exe
+tests/windows_settings.py | Windows; APP.exe air-ui.exe
+tests/windows_shared_movie.py | Windows; APP.exe air-ui.exe --runtime-directory DIR
+test_desktop.py | Linux; --binary mm-air, private Xvfb display, all workspaces
+test_native_library.py | --binary mm-air-library-check and fixtures
+test_native_movie_stitch.py | --binary native-movie-stitch --ffmpeg-bin DIR --output FILE --report FILE
+test_native_parameters.py | --binary of the parameters test

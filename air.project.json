@@ -142,6 +142,7 @@
     ],
     "test": [
       {"name": "mm-air-flux1-contract", "entry": "tests/flux1_contract.ai"},
+      {"name": "movie-project", "entry": "tests/movie_project.ai"},
       {
         "name": "native-generate",
         "entry": "tests/native_generate.ai"

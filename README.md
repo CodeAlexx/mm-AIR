@@ -9,8 +9,8 @@ prompt enhancers, a Qwen3-VL Prompt Lab, editing, and a Movie workspace.
 This repository publishes the **MM-Air application source only**. **AIR itself
 is private, under development, and not ready for public release.** This is a
 development snapshot, not a standalone, publicly buildable release. The source
-expects an AIR checkout beside it (`../../AIR`, for example `C:\MM-Air\src`
-next to `C:\AIR`). Windows builds use x64 MSVC (`tools/build-windows-app.cmd`,
+expects an AIR checkout beside it (`~/mm-AIR` next to `~/AIR` on Linux; `C:\MM-Air\src`
+next to `C:\AIR` on Windows). Windows builds use x64 MSVC (`tools/build-windows-app.cmd`,
 paths in `tools/local-paths.cmd`).
 
 Selected generated images and movies have a **Copy to Downloads** action.
@@ -106,11 +106,9 @@ four-segment Drift Control A/B reduced mean luma discontinuity across its three
 shot boundaries from 11.912 to 7.792 (34.6%), while remaining explicitly a
 seam aid rather than a guarantee against long-range palette drift.
 
-The application resolves `air-minimax-h3` as an `airproj` path dependency and
-imports its public `session.ai` entry directly into the MM-Air binary. The CMake
-target asks that AIR toolchain to verify the locked package graph before every
-application build; there is no copied H3 implementation or H3 native wrapper in
-MM-Air.
+H3 inference is AIR's own `std.inference.h3` library, imported directly into the
+MM-Air binary. `airproj` verifies the locked package graph before every build;
+there is no copied H3 implementation or H3 native wrapper in MM-Air.
 
 ### Safe mode, downloads, output folder (2026-11-09)
 
@@ -189,7 +187,7 @@ Deployment provides the pinned creator snapshot and AIR manifests:
 ```sh
 QWEN_IMAGE21_ROOT=/models/Qwen-Image-2.1 \
 QWEN_IMAGE21_MANIFEST_DIR="$AIR_ROOT/models/qwenimage21/manifests" \
-  build-gcc15/bin/mm-air
+  build/release/bin/mm-air
 ```
 
 While a request is live the Generate screen reports prompt encoding,
@@ -344,7 +342,7 @@ MM_AIR_SEEDVR2_7B_DIT=/models/seedvr2-7b/diffusion_models/seedvr2_7b_fp16.safete
 MM_AIR_SEEDVR2_VAE=/models/seedvr2-3b/vae/seedvr2_ema_vae_fp16.safetensors \
 MM_AIR_SEEDVR2_MANIFEST_ROOT=/models/seedvr2-3b/manifests \
 MM_AIR_SEEDVR2_7B_MANIFEST_ROOT=/models/seedvr2-7b/manifests \
-  build-mm-air/bin/mm-air
+  build/release/bin/mm-air
 ```
 
 The 7B model uses the same reusable AIR media/VAE path, but its own 36-layer
@@ -1129,9 +1127,9 @@ generation); use two existing PNG files as its final arguments:
 
 ```sh
 MM_AIR_TEST_IMAGE_REFERENCE=1 MM_AIR_TEST_SCALE=2 \
-  bash apps/mm-air/tests/gallery_selection.sh \
-  build-mm-air/bin/mm-air build-mm-air/bin/air-ui "$XVFB" \
-  apps/mm-air/desktop.ui apps/mm-air/desktop.css "$PNG_A" "$PNG_B"
+  bash tests/gallery_selection.sh \
+  build/release/bin/mm-air build/release/bin/air-ui "$XVFB" \
+  desktop.ui desktop.css "$PNG_A" "$PNG_B"
 ```
 
 History and thumbnails live under `XDG_DATA_HOME/mm-air`, falling back to
@@ -1143,61 +1141,43 @@ value.
 The linked paths and controls are not, by themselves, numerical or production
 parity claims. A saved, inspected MM-Air MP4 remains the delivery evidence.
 
-Build and run:
+Build and run (Linux). MM-Air is built by `airproj` from `air.project.json`; AIR sits
+beside this repository (`../AIR`, or `AIR_ROOT`) with its tools already built
+(`$AIR_ROOT/build-release`, or `AIR_TOOLCHAIN`):
 
 ```sh
-# The desktop tree is separate from the toolchain tree: configuring build-gcc15 itself
-# with AIR_DESKTOP=ON would rewrite the toolchain's cache (and a later toolchain
-# reconfigure turns the desktop targets back off).
-AIR_ROOT="$(cd "${AIR_ROOT:-.}" && pwd)"
-CC="${CC:-gcc-15}"
-CXX="${CXX:-g++-15}"
-cmake -S . -B build-mm-air -G Ninja \
-  -DAIR_DESKTOP=ON \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_C_COMPILER="$CC" \
-  -DCMAKE_CXX_COMPILER="$CXX" \
-  -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.4/bin/nvcc \
-  -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-13 \
-  -DCMAKE_CUDA_ARCHITECTURES=86 \
-  -DMM_AIR_TOOLCHAIN="$AIR_ROOT/build-gcc15" \
-  -DMM_AIR_H3_MANIFEST_DIR="$AIR_ROOT/build-gcc15/h3-manifests" \
-  -DMM_AIR_H3_MODEL_ROOT=/models/MiniMax-H3/FL2VA \
-  -DMM_AIR_PROMPT_MANIFEST_DIR="$AIR_ROOT/build-gcc15/prompt-manifests" \
-  -DPKG_CONFIG_EXECUTABLE="$AIR_ROOT/build-dev/desktop-sdk/pkg-config"
+tools/build-linux.sh            # every declared program -> build/release/bin
+build/release/bin/mm-air        # or the launcher that sets the scratch folder
+```
 
-# A pixi GCC 15 toolchain needs the host driver, cuDNN, and C++ runtime visible
-# while linking the final desktop executable.
-export LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:$HOME/dif-vendor/cudnn/lib:$HOME/.pixi/envs/gcc-15/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
-export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:$HOME/dif-vendor/cudnn/lib:$HOME/.pixi/envs/gcc-15/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-cmake --build build-mm-air --target mm_air_desktop -j2
+The script also links `desktop.ui`, `desktop.css` and `presets/swap-masks.json` into
+`build/release/bin/share/mm-air`, where the app reads its screens, and copies AIR's
+window host `air-ui` beside the app when it is missing (built once by AIR's
+`toolkits/desktop/build.sh`). Windows builds use `tools/build-windows-app.cmd`.
 
+Model locations are settings, saved in `~/.local/share/mm-air/runtime.json`
+(`%LOCALAPPDATA%\mm-air\runtime.json` on Windows) from the Settings screen; the same
+names can be given as environment variables:
+
+```sh
 MM_AIR_H3_CHECKPOINT_ROOT=/models/MiniMax-H3/FL2VA \
 MM_AIR_H3_REFERENCE_ROOT=/models/MiniMax-H3/Ref2VA \
 MM_AIR_H3_DONOR_ROOT=/artifacts/h3-flref-product \
-MM_AIR_H3_MANIFEST_ROOT="$AIR_ROOT/build-gcc15/h3-manifests" \
+MM_AIR_H3_MANIFEST_ROOT=/models/MiniMax-H3/air-manifests \
 MM_AIR_H3_DEPLOYMENT="$AIR_ROOT/models/h3/presets/h3_deployment.json" \
 MM_AIR_H3_APP_PRESET="$AIR_ROOT/models/h3/presets/h3_app.json" \
-MM_AIR_PROMPT_MANIFEST_ROOT="$AIR_ROOT/build-gcc15/prompt-manifests" \
-AIR_QWEN3_VL_4B_DIR=/models/Qwen3-VL-4B-Instruct \
-MM_AIR_SAM3_MODEL="$HOME/.serenity/models/sam3/sam3-q4_0.ggml" \
-  build-mm-air/bin/mm-air
+MM_AIR_PROMPT_MANIFEST_ROOT=/models/Qwen3-VL-8B-Instruct/air-manifests \
+  build/release/bin/mm-air
 ```
 
-`mm_air_desktop` depends on both `mm_air_h3_manifests` and
-`mm_air_prompt_manifests`, so the build above generates every runtime manifest into
-their configured directories. Keep the explicit runtime roots equal to those directories.
-Focused refreshes are:
+The manifest folders are written once per model by AIR's own writers:
 
 ```sh
-cmake --build build-mm-air --target mm_air_h3_manifests -j2
-cmake --build build-mm-air --target mm_air_prompt_manifests -j2
+"$AIR_TOOLCHAIN/bin/airc" run "$AIR_ROOT/stdlib/inference/h3/write_manifests.ai" --mode release -- \
+  "$AIR_ROOT/models/h3/presets/h3_deployment.json" /models/MiniMax-H3/FL2VA /models/MiniMax-H3/air-manifests
+"$AIR_TOOLCHAIN/bin/airc" run "$AIR_ROOT/toolkits/prompt/write_manifests.ai" --mode release -- \
+  /models/Qwen3-VL-8B-Instruct/air-manifests
 ```
-
-The 2026-09-10 focused clean-tree check generated all 16 declared files, including
-the 21,220-byte `h3-audio-encoder.json`; an immediate repeat reported no work, and
-removing only that output in the isolated test tree caused the target to regenerate
-and restore it.
 
 The environment variables are deployment configuration: checkpoint and
 cache locations are deployment configuration, not personal paths compiled into
@@ -1221,31 +1201,28 @@ starts a valid configured H3 request, and `Ctrl+Q` closes the app.
 `Ctrl+Shift+S` saves parameters, `Ctrl+Shift+L` loads them, `Ctrl+R` reuses
 the selected result, and `Ctrl+Shift+R` resets Generate controls.
 
-Focused native regressions (from the MM-Air repository):
+Checks (from this repository):
 
 ```sh
-AIR_ROOT="$(cd "${AIR_ROOT:-../AIR}" && pwd)"
-"$AIR_ROOT/build-gcc15/bin/airproj" --project apps/mm-air \
-  --toolchain "$AIR_ROOT/build-gcc15" test
+tools/check.sh            # no GPU, model or display: static contract (test_contract.py)
+                          # and a compile of every hand-run test program
+tools/check.sh --tests    # the above, then `airproj test`: builds and runs the declared tests
+```
 
-# The library/history check accepts an owned scratch directory and optional
-# existing video/audio fixtures, so it is an explicit binary rather than an
-# argument-free airproj test target.
-"$AIR_ROOT/build-gcc15/bin/airc" run apps/mm-air/tests/library.ai \
-  --mode release --cc gcc-15 -- /tmp/mm-air-library-check \
-  /path/to/video.mp4 /path/to/audio.wav
+`air.project.json` declares the programs (`targets.bin`) and the automatic tests
+(`targets.test`). Test programs that need inputs (a model, a clip, a display, a
+Windows desktop) are listed with what they need in `tests/hand-run.txt`; the contract
+fails when a test file is in neither place. Examples of hand-run programs:
 
-"$AIR_ROOT/build-gcc15/bin/airc" run apps/mm-air/tests/parameters.ai \
-  --mode release --cc gcc-15
-
-"$AIR_ROOT/build-gcc15/bin/airc" run apps/mm-air/tests/character_sheet_video.ai \
-  --mode release --cc gcc-15 -- /path/to/h3.mp4 /tmp/character-sheet.png 6
+```sh
+airc=$AIR_TOOLCHAIN/bin/airc
+"$airc" run tests/library.ai --mode release -- /path/to/scratch /path/to/video.mp4 /path/to/audio.wav
+"$airc" run tests/character_sheet_video.ai --mode release -- /path/to/h3.mp4 /path/to/sheet.png 6
 
 # The playback fixture must be a 10-second video with a real audio stream.
-"$AIR_ROOT/build-gcc15/bin/airc" run apps/mm-air/tests/ui_layout.ai \
-  --mode release --cc gcc-15 -- \
-  "$PWD/build-mm-air/bin/air-ui" "$PWD/apps/mm-air/desktop.ui" \
-  "$PWD/apps/mm-air/desktop.css" /path/to/video.mp4 /path/to/thumbnail.png
+"$airc" run tests/ui_layout.ai --mode release -- \
+  "$PWD/build/release/bin/air-ui" "$PWD/desktop.ui" "$PWD/desktop.css" \
+  /path/to/video.mp4 /path/to/thumbnail.png
 ```
 
 The native widget test round-trips 960x544, 10 seconds, a seed above the exact
@@ -1260,10 +1237,10 @@ substitute for a generated MP4.
 Click-only history regression (no generation):
 
 ```sh
-MM_AIR_TEST_SCALE=2 bash apps/mm-air/tests/gallery_selection.sh \
-  "$PWD/build-mm-air/bin/mm-air" "$PWD/build-mm-air/bin/air-ui" \
-  "$AIR_ROOT/build-dev/desktop-sdk/usr/bin/Xvfb" \
-  "$PWD/apps/mm-air/desktop.ui" "$PWD/apps/mm-air/desktop.css" \
+MM_AIR_TEST_SCALE=2 bash tests/gallery_selection.sh \
+  "$PWD/build/release/bin/mm-air" "$PWD/build/release/bin/air-ui" \
+  "$(command -v Xvfb)" \
+  "$PWD/desktop.ui" "$PWD/desktop.css" \
   /path/to/first.mp4 /path/to/second.mp4
 ```
 

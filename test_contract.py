@@ -26,7 +26,8 @@ AUTO_MASK = SAM3_ROOT / "mask.ai"
 SAM3_NATIVE = SAM3_ROOT / "native/air_sam3.cpp"
 SAM3_EXPORTS = SAM3_ROOT / "native/air_sam3.map"
 MOVIE_PROJECT = ROOT / "movie_project.ai"
-APP_CMAKE = ROOT / "CMakeLists.txt"
+PROJECT = ROOT / "air.project.json"
+HAND_RUN = ROOT / "tests/hand-run.txt"
 SAM3_CMAKE = SAM3_ROOT / "CMakeLists.txt"
 
 tree = ET.parse(UI)
@@ -123,7 +124,6 @@ auto_mask = AUTO_MASK.read_text()
 sam3_native = SAM3_NATIVE.read_text()
 sam3_exports = SAM3_EXPORTS.read_text()
 movie_project = MOVIE_PROJECT.read_text()
-app_cmake = APP_CMAKE.read_text()
 sam3_cmake = SAM3_CMAKE.read_text()
 
 assert "PNG / JPEG / WebP" in ui
@@ -229,14 +229,26 @@ assert 'h3_deployment.sources(deployment_roots' in generate
 assert 'video_vae_checkpoint: under(c, struct.borrow(l, field=video_vae))' in h3_deployment
 assert 'video_decoder_aux_checkpoint: under(d, struct.borrow(l, field=video_decoder_aux))' in h3_deployment
 
-# Rebuilding the external AIR toolchain provider must invalidate MM-Air's
-# custom command so airc republishes the matching provider beside the binary.
-for artifact in (
-    "${MM_AIR_TOOLCHAIN}/runtime/libair_rt.a",
-    "${MM_AIR_TOOLCHAIN}/providers/nvidia/libair_gpu_nvidia.so",
-):
-    assert artifact in app_cmake, f"missing MM-Air toolchain dependency: {artifact}"
-assert "list(APPEND MM_AIR_TOOL_DEPS air_gpu_nvidia)" in app_cmake
+# MM-Air is built by airproj from air.project.json. Every test file is either declared
+# there (built, and for targets.test run, by airproj) or listed in tests/hand-run.txt with
+# what it needs, so no test can sit in the repository unseen by any check.
+import json
+project = json.loads(PROJECT.read_text())
+declared = {entry["entry"] for kind in project["targets"].values() for entry in kind}
+for entry in sorted(declared):
+    assert (ROOT / entry).is_file(), f"air.project.json names a missing file: {entry}"
+hand_run = [line.split("|")[0].strip() for line in HAND_RUN.read_text().splitlines()
+            if line.strip() and not line.startswith("#")]
+assert len(hand_run) == len(set(hand_run)), "tests/hand-run.txt lists a file twice"
+for name in hand_run:
+    assert (ROOT / name).is_file(), f"tests/hand-run.txt names a missing file: {name}"
+    assert name not in declared, f"{name} is both declared and listed as hand-run"
+helpers = {"tests/air_root.py", "tests/hand-run.txt", "tests/h3_presets_fixture.ai"}
+present = {f"tests/{p.name}" for p in (ROOT / "tests").iterdir() if p.is_file()}
+present |= {p.name for p in ROOT.glob("test_*.py")} - {"test_contract.py"}
+unaccounted = sorted(present - declared - set(hand_run) - helpers)
+assert not unaccounted, f"test files neither declared nor listed as hand-run: {unaccounted}"
+assert not (ROOT / "CMakeLists.txt").exists(), "MM-Air is built by airproj, not CMake"
 
 for page in ("generate", "edit", "movie", "control", "prompt"):
     assert f"<property name=\"name\">{page}</property>" in ui
@@ -283,7 +295,6 @@ assert 'desk.clear_video(session,"result_video")' in main
 assert 'gen_use_image_reference' in main
 assert 'task.spawn(work,fn=prompt_lab.run)' in main
 assert 'prompt_lab.cancel' in main
-assert 'mm_air_prompt_manifests' in app_cmake
 assert 'Cancelling Qwen; H3 remains blocked until teardown completes' in main
 for widget in ("gen_character_sheet_mode", "gen_character_sheet_style",
                "gen_character_sheet_apply"):

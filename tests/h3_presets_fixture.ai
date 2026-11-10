@@ -1,5 +1,5 @@
 // The repository's H3 application presets for MM-Air tests (AIR_APP_ROOT is
-// apps/mm-air when airproj runs a test).
+// this repository when airproj runs a test; AIR sits beside it).
 module app.mm_air.tests.h3_presets_fixture
 
 import std.inference.h3.request as h3
@@ -8,7 +8,7 @@ import std.path as path
 pub fn presets() -> h3.Presets effects {alloc, env, fs.read, io.write} {
   let root: string = match env.get("AIR_APP_ROOT") {
     some(value) => value,
-    none => { panic "AIR_APP_ROOT must name the apps/mm-air project" },
+    none => { panic "AIR_APP_ROOT must name the MM-Air project folder" },
   }
   let file: string = path.join(str.view(root), "../AIR/models/h3/presets/h3_app.json")
   match h3.load_presets(str.view(file)) {

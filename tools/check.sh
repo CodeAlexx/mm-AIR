@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# MM-Air's checks that need no GPU, model or display. Run before every push:
+#   tools/check.sh          static contract + compile every hand-run test program
+#   tools/check.sh --tests  the above, then `airproj test` (builds and runs the declared tests)
+# AIR is found at $AIR_ROOT or ../AIR; its built tools at $AIR_TOOLCHAIN or $AIR_ROOT/build-release.
+set -euo pipefail
+app=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+air=$(cd -- "${AIR_ROOT:-$app/../AIR}" && pwd)
+tools=${AIR_TOOLCHAIN:-$air/build-release}
+[[ -x $tools/bin/airc ]] || { echo "no airc in $tools/bin (set AIR_TOOLCHAIN)" >&2; exit 2; }
+cd "$app"
+
+AIR_ROOT=$air python3 -B test_contract.py
+
+failed=0
+while IFS='|' read -r file _; do
+  file=${file// /}
+  [[ $file == tests/*.ai ]] || continue
+  if ! out=$("$tools/bin/airc" check "$file" 2>&1); then
+    echo "$file: does not compile"; echo "$out" | tail -5; failed=1
+  fi
+done < <(grep -v '^#' tests/hand-run.txt)
+[[ $failed == 0 ]] || exit 1
+echo "hand-run test programs compile"
+
+if [[ ${1:-} == --tests ]]; then
+  "$tools/bin/airproj" --project "$app" --toolchain "$tools" test
+fi
