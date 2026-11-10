@@ -8,6 +8,7 @@
 // MM_AIR_H3IMAGE_PE_ROOT (MiniMax-H3-Image-PE-air).
 module app.mm_air.h3image
 import std.channel as channel
+import std.compute_offload as offload
 import std.files as files
 import std.gpu as agpu
 import std.path as path
@@ -52,11 +53,33 @@ fn number(value:u64)->string effects{alloc}{string.from_int(cast.sat(value))}
 pub fn model_root()->result<string,string> effects{alloc,env,fs.read,fs.meta}{
   folder("MM_AIR_H3IMAGE_ROOT","models/MiniMax-H3-Image")
 }
+// The other three roots follow the model folder unless the runtime configuration names them.
+fn derived(key:str,model:str,make:u64)->result<string,string> effects{alloc,env,fs.read,fs.meta}{
+  match try runtime_config.value(key){
+    some(value)=>{if text.trim(str.view(value))!=""{return result.ok(value)}},
+    none=>{},
+  }
+  result.ok(if make==0{hsession.default_air_root(model)}else if make==1{hsession.default_text_root(model)}
+    else{hsession.default_pe_root(model)})
+}
 pub fn air_root()->result<string,string> effects{alloc,env,fs.read,fs.meta}{
-  folder("MM_AIR_H3IMAGE_AIR_ROOT","models/MiniMax-H3-Image-air")
+  let model=try model_root()
+  derived("MM_AIR_H3IMAGE_AIR_ROOT",str.view(model),0)
+}
+pub fn text_root()->result<string,string> effects{alloc,env,fs.read,fs.meta}{
+  let model=try model_root()
+  derived("MM_AIR_H3IMAGE_TEXT_ROOT",str.view(model),1)
 }
 pub fn expander_root()->result<string,string> effects{alloc,env,fs.read,fs.meta}{
-  folder("MM_AIR_H3IMAGE_PE_ROOT","models/MiniMax-H3-Image-PE-air")
+  let model=try model_root()
+  derived("MM_AIR_H3IMAGE_PE_ROOT",str.view(model),2)
+}
+
+// The deployment of every run and every check: all paths come from the four roots.
+fn deployment()->result<hsession.Deployment,string> effects{alloc,env,fs.read,fs.meta}{
+  let air=try air_root()
+  let text_folder=try text_root()
+  result.ok(hsession.deployment_from_roots(str.view(air),str.view(text_folder)))
 }
 
 // Empty when every file the model needs is on this computer; else one short sentence.
@@ -71,11 +94,15 @@ pub fn missing(expander:str)->string effects{alloc,env,fs.read,fs.meta}{
       not present(str.view(path.join(str.view(air),"h3image-static.json"))){
     return string.copy("MiniMax H3-Image files are not prepared on this computer")
   }
-  var deployment=hsession.default_deployment(str.view(air))
-  if not present(str.view(struct.borrow(deployment,field=text_convrot_cache))) or
-      not present(str.view(struct.borrow(deployment,field=tokenizer_dir))) or
-      not present(str.view(struct.borrow(deployment,field=vae_manifest))){
-    return string.copy("MiniMax H3-Image text or picture files are missing")
+  var layout=match deployment(){ok(value)=>value,err(message)=>{return message},}
+  let encoder=path.join(str.view(struct.borrow(layout,field=text_root)),"text_encoder")
+  if not present(str.view(struct.borrow(layout,field=text_convrot_cache))) or
+      not present(str.view(struct.borrow(layout,field=tokenizer_dir))) or not present(str.view(encoder)){
+    return string.copy("MiniMax H3-Image text files are missing")
+  }
+  if not present(str.view(struct.borrow(layout,field=vae_manifest))) or
+      not present(str.view(struct.borrow(layout,field=vae_encoder_manifest))){
+    return string.copy("MiniMax H3-Image picture files are missing")
   }
   if expander=="low" or expander=="xhigh"{
     let pe_root=match expander_root(){ok(value)=>value,err(message)=>{return message},}
@@ -105,6 +132,17 @@ fn expand_with_model(request:ref<parameters.H3ImageRequest>,expander:str,pe_root
   var settings:pe.Settings=pe.defaults()
   struct.set(settings,effort_of(expander),field=effort)
   struct.set(settings,request.seed,field=seed)
+  var done:result<pe.Expansion,string>=run_expander(request,context,stream,store,settings,aspect,scratch)
+  // The pinned host copy (17.5 GB) is closed here, before the image model reads anything: it does not fit
+  // beside the text encoder and the DiT's pinned tail.
+  let held:offload.Offloader=ref.swap(struct.borrow(store,field=offloader),offload.Offloader{raw:option.none()})
+  match offload.close(held){ok(_)=>{},err(problem)=>{return result.err(string.copy(problem.message))},}
+  done
+}
+
+fn run_expander(request:ref<parameters.H3ImageRequest>,context:ref<GpuContext>,stream:ref<GpuStream>,store:ref<pe.Store>,
+    settings:ref<pe.Settings>,aspect:str,scratch:str)->result<pe.Expansion,string>
+    effects{alloc,env,fs.meta,fs.read,fs.write,gpu,net,process,time}{
   if parameters.h3image_is_edit(request){
     var images:array<string>=[]
     var index:u64=0
@@ -236,7 +274,7 @@ fn run_inner(request:ref<parameters.H3ImageRequest>,sender:ref<option<channel.Se
   }
 
   report_step(sender,"Reading the model")
-  var opened:hsession.Session=match hsession.open(str.view(root),hsession.default_deployment(str.view(air))){
+  var opened:hsession.Session=match hsession.open(str.view(root),match deployment(){ok(value)=>value,err(message)=>{return failure(str.view(output),message)},}){
     ok(value)=>value,err(message)=>{return failure(str.view(output),message)},}
   var grids:array<u64>=[]
   var vision_rows:u64=0

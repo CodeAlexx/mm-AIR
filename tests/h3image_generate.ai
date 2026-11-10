@@ -5,11 +5,11 @@ import std.channel as channel
 import std.text as text
 
 // One real MM-Air MiniMax H3-Image job through the application's own worker (h3image.run, the code the
-// Generate and Image Edit buttons start): OUTPUT.png PROMPT SEED SIZE(WxH or keep) EXPANDER(off|low|xhigh|qwen) [IMAGE.png ...]
+// Generate and Image Edit buttons start): OUTPUT.png PROMPT SEED SIZE(WxH or keep) EXPANDER(off|low|xhigh|qwen) [IMAGE.png | lora=FILE.safetensors ...]
 pub fn main(args:view<str>)->i32
     effects {alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
   if view.len(args)<6 {
-    io.ewrite("usage: h3image-generate OUTPUT.png PROMPT SEED WxH|keep off|low|xhigh|qwen [IMAGE.png ...]\n")
+    io.ewrite("usage: h3image-generate OUTPUT.png PROMPT SEED WxH|keep off|low|xhigh|qwen [IMAGE.png | lora=FILE.safetensors ...]\n")
     return 1
   }
   let seed=match text.parse_u64(view.get(args,3)){some(value)=>value,none=>{return 2},}
@@ -31,7 +31,13 @@ pub fn main(args:view<str>)->i32
   var index:u64=6
   loop{
     if index>=view.len(args){break}
-    array.push(struct.borrow(request,field=images),string.copy(view.get(args,index)))
+    let argument=view.get(args,index)
+    if str.starts_with(argument,"lora=") {
+      array.push(struct.borrow(request,field=loras),parameters.LoraEntry{path:string.copy(str.slice(argument,5,str.len(argument))),
+        strength:1.0,enabled:true})
+    } else {
+      array.push(struct.borrow(request,field=images),string.copy(argument))
+    }
     index=index+1
   }
   var receiver=match channel.open(128,1024){ok(value)=>value,err(_)=>{return 5},}
