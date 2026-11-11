@@ -825,6 +825,7 @@ fn filter_parameters(session:ref<desk.Session>,query:str,model:u32,swap_mode:u32
     (wanted == "" or
     text.contains("resolution width height duration seconds frames fps size geometry custom",wanted)))
   let _=desk.set_bool(session,"gen_resolution","visible",not image_model)
+  let _=desk.set_bool(session,"gen_h3image_size","visible",wide)
   let _=desk.set_bool(session,"gen_duration_row","visible",not image_model)
   let sixteen:bool=krea or moss or fibo or wide
   let _=desk.set_number(session,"gen_width_adjustment","lower",if sixteen{16.0}else{32.0})
@@ -990,6 +991,10 @@ fn show_prompt_window_plan(session:ref<desk.Session>,total_seconds:f64,
       false
     },
   }
+}
+fn h3image_size_widget(session: ref<desk.Session>, width: u64, height: u64) -> unit effects {alloc,net,time} {
+  let _=desk.set_number(session,"gen_h3image_size","selected",cast.float(parameters.h3image_size_index(width,height)))
+  ()
 }
 fn geometry_widgets(session: ref<desk.Session>, width: u64, height: u64, seconds: f64, krea: bool, qwen_image:bool)
     -> unit effects {alloc,net,time} {
@@ -1678,6 +1683,9 @@ pub fn main(args: view<str>) -> i32
   // MOSS-Image (and the other DiT image models) keep their own size and output between model switches.
   var saved_image_width:u64=1024
   var saved_image_height:u64=1024
+  // MiniMax H3-Image keeps its own size: its range starts at 4 MP, above the other image models.
+  var saved_h3image_width:u64=parameters.h3image_size(parameters.h3image_default_size_index()).width
+  var saved_h3image_height:u64=parameters.h3image_size(parameters.h3image_default_size_index()).height
   var saved_image_output:string=string.new()
   var moss_settings:parameters.MossRequest=parameters.moss_defaults(parameters.moss_base_model_index())
   var fibo_settings:parameters.FiboRequest=parameters.fibo_defaults_for(false)
@@ -2176,8 +2184,9 @@ pub fn main(args: view<str>) -> i32
                     seed_valid=true
                     width=request.width
                     height=request.height
-                    saved_image_width=width
-                    saved_image_height=height
+                    saved_h3image_width=width
+                    saved_h3image_height=height
+                    h3image_size_widget(session,width,height)
                     output_media=string.copy(struct.borrow(request,field=output))
                     saved_image_output=string.copy(output_media)
                     generate_expander=string.copy(struct.borrow(request,field=expander))
@@ -4688,6 +4697,10 @@ pub fn main(args: view<str>) -> i32
                   saved_qwen_width=width
                   saved_qwen_height=height
                   saved_qwen_output=string.copy(output_media)
+                } else if previous_model==parameters.h3image_model_index(){
+                  saved_h3image_width=width
+                  saved_h3image_height=height
+                  saved_image_output=string.copy(output_media)
                 } else {
                   saved_image_width=width
                   saved_image_height=height
@@ -4701,6 +4714,10 @@ pub fn main(args: view<str>) -> i32
                 if model_index==parameters.krea_model_index(){
                   width=saved_krea_width
                   height=saved_krea_height
+                }else if model_index==parameters.h3image_model_index(){
+                  width=saved_h3image_width
+                  height=saved_h3image_height
+                  h3image_size_widget(session,width,height)
                 }else if parameters.uses_image_geometry(model_index){
                   width=saved_image_width
                   height=saved_image_height
@@ -4723,6 +4740,10 @@ pub fn main(args: view<str>) -> i32
                   saved_krea_width=width
                   saved_krea_height=height
                   saved_krea_output=string.copy(output_media)
+                }else if previous_model==parameters.h3image_model_index(){
+                  saved_h3image_width=width
+                  saved_h3image_height=height
+                  saved_image_output=string.copy(output_media)
                 }else if parameters.uses_image_geometry(previous_model){
                   saved_image_width=width
                   saved_image_height=height
@@ -4907,6 +4928,20 @@ pub fn main(args: view<str>) -> i32
               edit_model_status(session,qwen_edit_fibo,qwen_edit_h3image,str.view(qwen_edit_expander))
               continue
             }
+            if id=="gen_h3image_size"{
+              if model_index!=parameters.h3image_model_index(){continue}
+              let choice:u64=cast.sat(desk.number(event,"value"))
+              if choice>=parameters.h3image_size_count(){continue}
+              let size=parameters.h3image_size(choice)
+              width=size.width
+              height=size.height
+              saved_h3image_width=width
+              saved_h3image_height=height
+              let _=desk.set_number(session,"gen_width","value",cast.float(width))
+              let _=desk.set_number(session,"gen_height","value",cast.float(height))
+              geometry_widgets(session,width,height,seconds,false,true)
+              continue
+            }
             if id=="gen_h3image_expander"{
               generate_expander=expander_name(cast.sat(desk.number(event,"value")))
               continue
@@ -5002,7 +5037,11 @@ pub fn main(args: view<str>) -> i32
                 saved_krea_width=width
                 saved_krea_height=height
               }
-              if parameters.uses_image_geometry(model_index){
+              if model_index==parameters.h3image_model_index(){
+                saved_h3image_width=width
+                saved_h3image_height=height
+                h3image_size_widget(session,width,height)
+              }else if parameters.uses_image_geometry(model_index){
                 saved_image_width=width
                 saved_image_height=height
               }
@@ -5023,7 +5062,11 @@ pub fn main(args: view<str>) -> i32
                 saved_krea_width=width
                 saved_krea_height=height
               }
-              if parameters.uses_image_geometry(model_index){
+              if model_index==parameters.h3image_model_index(){
+                saved_h3image_width=width
+                saved_h3image_height=height
+                h3image_size_widget(session,width,height)
+              }else if parameters.uses_image_geometry(model_index){
                 saved_image_width=width
                 saved_image_height=height
               }

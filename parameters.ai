@@ -274,11 +274,44 @@ pub fn h3image_schema() -> str effects {} { "mm-air.h3image.parameters.v1" }
 pub fn h3image_max_images() -> u64 effects {} { 16 }
 // Largest picture: the model works 4 to 20 megapixels (agent assumption: 20 MP as the app limit; 4096x4096 was measured).
 pub fn h3image_max_pixels() -> u64 effects {} { 20000000 }
+// The sizes the H3-Image size list offers, in list order: the creator's 16 MP sizes (best
+// quality), then 4 MP sizes (the low end of the model's range, about four times faster).
+// The entry after the last one is "Custom". desktop.ui's h3image_size_list has the same order.
+pub type H3ImageSize = struct {width:u64,height:u64}
+pub fn h3image_size_count() -> u64 effects {} { 16 }
+pub fn h3image_default_size_index() -> u64 effects {} { 8 }
+pub fn h3image_size(index:u64) -> H3ImageSize effects {} {
+  if index==0 {return H3ImageSize {width:4096,height:4096}}
+  if index==1 {return H3ImageSize {width:4736,height:3552}}
+  if index==2 {return H3ImageSize {width:3552,height:4736}}
+  if index==3 {return H3ImageSize {width:5024,height:3360}}
+  if index==4 {return H3ImageSize {width:3360,height:5024}}
+  if index==5 {return H3ImageSize {width:5472,height:3072}}
+  if index==6 {return H3ImageSize {width:3072,height:5472}}
+  if index==7 {return H3ImageSize {width:6272,height:2688}}
+  if index==8 {return H3ImageSize {width:2048,height:2048}}
+  if index==9 {return H3ImageSize {width:2304,height:1728}}
+  if index==10 {return H3ImageSize {width:1728,height:2304}}
+  if index==11 {return H3ImageSize {width:2496,height:1664}}
+  if index==12 {return H3ImageSize {width:1664,height:2496}}
+  if index==13 {return H3ImageSize {width:2720,height:1536}}
+  if index==14 {return H3ImageSize {width:1536,height:2720}}
+  H3ImageSize {width:3136,height:1344}
+}
+// The list entry for a size; h3image_size_count() (Custom) when it is not one of them.
+pub fn h3image_size_index(width:u64,height:u64) -> u64 effects {} {
+  var index:u64=0
+  loop{if index>=h3image_size_count(){break}
+    let size=h3image_size(index)
+    if size.width==width and size.height==height {return index}
+    index=index+1}
+  h3image_size_count()
+}
 pub fn h3image_expander_valid(name:str,edit:bool) -> bool effects {} {
   name=="off" or name=="low" or name=="xhigh" or (edit and name=="qwen")
 }
 pub fn h3image_defaults() -> H3ImageRequest effects {alloc} {
-  H3ImageRequest {prompt:"",output:"",images:[],width:1024,height:1024,seed:42,loras:[],expander:"off"}
+  H3ImageRequest {prompt:"",output:"",images:[],width:2048,height:2048,seed:42,loras:[],expander:"off"}
 }
 pub fn h3image_is_edit(request:ref<H3ImageRequest>) -> bool effects {} {
   array.len(struct.borrow(request,field=images))>0

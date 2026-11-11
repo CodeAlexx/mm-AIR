@@ -358,6 +358,19 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.read,io.write} {
   array.push(struct.borrow(fibo_edit,field=images),"/tmp/c.webp")
   match parameters.validate_fibo(fibo_edit){ok(_)=>{return 1},err(_)=>{},}
   // MiniMax H3-Image: one request for text to image and edit; codes 61+ name the failing check.
+  // The H3-Image size list: every entry inside the model's 4-20 MP range, sides in 32-pixel steps,
+  // each found again by its size, and the default is 2048x2048.
+  var size_index:u64=0
+  loop{if size_index>=parameters.h3image_size_count(){break}
+    let size=parameters.h3image_size(size_index)
+    if size.width%32!=0 or size.height%32!=0 { return 1 }
+    if size.width*size.height<3900000 or size.width*size.height>parameters.h3image_max_pixels() { return 1 }
+    if parameters.h3image_size_index(size.width,size.height)!=size_index { return 1 }
+    size_index=size_index+1}
+  if parameters.h3image_size_index(1024,1024)!=parameters.h3image_size_count() { return 1 }
+  let default_size=parameters.h3image_size(parameters.h3image_default_size_index())
+  if default_size.width!=2048 or default_size.height!=2048 { return 1 }
+  if parameters.h3image_defaults().width!=2048 or parameters.h3image_defaults().height!=2048 { return 1 }
   var wide=parameters.h3image_defaults()
   let _=ref.swap(struct.borrow(wide,field=prompt),string.copy("a lighthouse at dusk"))
   let _=ref.swap(struct.borrow(wide,field=output),string.copy("/tmp/h3image.png"))
@@ -365,7 +378,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.read,io.write} {
   if not parameters.is_h3image(wide_json) or parameters.is_fibo(wide_json) or parameters.is_moss(wide_json) or
      parameters.is_qwen_image(wide_json) { return 62 }
   var wide_back=match parameters.decode_h3image(wide_json){ok(value)=>value,err(_)=>{return 63},}
-  if parameters.h3image_is_edit(wide_back) or wide_back.width!=1024 or wide_back.seed!=42 or wide_back.expander!="off" { return 64 }
+  if parameters.h3image_is_edit(wide_back) or wide_back.width!=2048 or wide_back.seed!=42 or wide_back.expander!="off" { return 64 }
   // the Qwen3-VL expander is for edits only; an unknown name is refused
   let _=ref.swap(struct.borrow(wide,field=expander),string.copy("qwen"))
   match parameters.validate_h3image(wide){ok(_)=>{return 65},err(_)=>{},}
