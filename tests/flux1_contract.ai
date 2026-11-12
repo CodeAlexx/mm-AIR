@@ -9,7 +9,7 @@ import std.widgets as w
 import std.text as text
 
 pub fn main(args:view<str>) -> i32 effects {alloc,io.write} {
-  if parameters.flux1_model_index()!=7 {return 1}
+  if parameters.flux1_model_index()!=9 {return 1}
   var value:parameters.Flux1Request=parameters.flux1_defaults()
   value.prompt="a red fox in a forest"
   value.output="C:/AIR-output/fox.png"

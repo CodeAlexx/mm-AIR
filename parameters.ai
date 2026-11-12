@@ -29,9 +29,9 @@ pub fn image_model(model:u32) -> bool effects {} { model>=2 and model<=8 }
 pub fn uses_image_geometry(model:u32) -> bool effects {} {
   is_moss_model(model) or model==fibo_dev_model_index() or model==h3image_model_index()
 }
-// The Windows presenter's FLUX.1 id. Nothing reads it and it is never saved; it now has the same number as
-// P-H3-Image's place on the desktop dropdown (left as it was: existing numbers are not moved).
-pub fn flux1_model_index() -> u32 effects {} { 8 }
+// The Windows presenter's FLUX.1 id. Nothing reads it and it is never saved; it has its own number, after the
+// desktop dropdown positions.
+pub fn flux1_model_index() -> u32 effects {} { 9 }
 pub type Flux1Request=struct {prompt:string,output:string,width:u64,height:u64,steps:u64,seed:u64,guidance:f64} derive codec(strict)
 type Flux1File=struct {schema:string,request:Flux1Request} derive codec(strict)
 pub fn flux1_defaults() -> Flux1Request effects {alloc} {
