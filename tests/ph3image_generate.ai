@@ -1,0 +1,46 @@
+module app.mm_air.tests.ph3image_generate
+import "../ph3image.ai" as ph3image
+import "../parameters.ai" as parameters
+import std.channel as channel
+import std.text as text
+
+// One real MM-Air P-H3-Image job through the application's own worker (ph3image.run, the code the
+// Generate and Image Edit buttons start): OUTPUT.png PROMPT SEED SIZE(WxH or keep) UPSAMPLER(on|off) [IMAGE.png ...]
+pub fn main(args:view<str>)->i32
+    effects {alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
+  if view.len(args)<6 {
+    io.ewrite("usage: ph3image-job OUTPUT.png PROMPT SEED WxH|keep on|off [IMAGE.png ...]\n")
+    return 1
+  }
+  let seed=match text.parse_u64(view.get(args,3)){some(value)=>value,none=>{return 2},}
+  var request=parameters.ph3image_defaults()
+  let _a=ref.swap(struct.borrow(request,field=output),string.copy(view.get(args,1)))
+  let _b=ref.swap(struct.borrow(request,field=prompt),string.copy(view.get(args,2)))
+  let upsampler=view.get(args,5)
+  if upsampler!="on" and upsampler!="off" {return 4}
+  struct.set(request,upsampler=="on",field=upsample)
+  struct.set(request,seed,field=seed)
+  let size=view.get(args,4)
+  if size=="keep" {
+    struct.set(request,0,field=width)
+    struct.set(request,0,field=height)
+  } else {
+    var parts=text.split(size,"x")
+    if array.len(parts)!=2 {return 3}
+    struct.set(request,match text.parse_u64(str.view(array.borrow(parts,0))){some(v)=>v,none=>0},field=width)
+    struct.set(request,match text.parse_u64(str.view(array.borrow(parts,1))){some(v)=>v,none=>0},field=height)
+  }
+  var index:u64=6
+  loop{
+    if index>=view.len(args){break}
+    array.push(struct.borrow(request,field=images),string.copy(view.get(args,index)))
+    index=index+1
+  }
+  var receiver=match channel.open(128,1024){ok(value)=>value,err(_)=>{return 5},}
+  var work=ph3image.PH3ImageJob{request:request,progress:channel.ticket(receiver)}
+  var outcome=ph3image.run(work)
+  let _=channel.close(receiver)
+  io.write(text.concat("MM-Air P-H3-Image: ",outcome.message))
+  io.write("\n")
+  if outcome.succeeded{0}else{6}
+}

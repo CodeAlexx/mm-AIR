@@ -187,7 +187,7 @@ for control in ("qwen_edit_references", "qwen_edit_remove_source",
     assert tree.find(f".//object[@id='{control}']") is not None, control
 assert "2048×2048 · 40 steps · seed 42" not in ui
 assert "run_request_images_adapted" in generate
-assert "array.len(qwen_edit_references)>=edit_limit(qwen_edit_h3image)" in main
+assert "array.len(qwen_edit_references)>=edit_limit(qwen_edit_h3image,qwen_edit_ph3image)" in main
 for seed_id in ("gen_seed", "qwen_edit_seed"):
     seed_widget = tree.find(f".//object[@id='{seed_id}']")
     assert seed_widget.find("property[@name='text']").text == "Random"
@@ -290,9 +290,9 @@ for required in (
 
 assert [item.text for item in tree.findall(".//object[@id='gen_model_list']/items/item")] == [
     "MiniMax H3 Base", "MiniMax H3 Reference", "Krea 2 Turbo", "Qwen-Image-2.1",
-    "MOSS-Image Base", "MOSS-Image SFT", "Fibo 2.0", "MiniMax H3-Image"]
+    "MOSS-Image Base", "MOSS-Image SFT", "Fibo 2.0", "MiniMax H3-Image", "P-H3-Image"]
 assert [item.text for item in tree.findall(".//object[@id='qwen_edit_model_list']/items/item")] == [
-    "Qwen-Image-2.1", "Fibo 2.0 Edit Turbo", "MiniMax H3-Image"]
+    "Qwen-Image-2.1", "Fibo 2.0 Edit Turbo", "MiniMax H3-Image", "P-H3-Image"]
 assert [item.text for item in tree.findall(".//object[@id='h3_resolution_list']/items/item")] == [
     "16:9 · 1344×768", "21:9 · 1536×672", "4:3 · 1024×768",
     "1:1 · 768×768", "3:4 · 768×1024", "9:16 · 768×1344",

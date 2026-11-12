@@ -23,12 +23,14 @@ pub fn is_moss_model(model:u32) -> bool effects {} { model==4 or model==5 }
 // Every Generate model that outputs a PNG (not H3).
 pub fn fibo_dev_model_index() -> u32 effects {} { 6 }
 pub fn h3image_model_index() -> u32 effects {} { 7 }
-pub fn image_model(model:u32) -> bool effects {} { model>=2 and model<=7 }
+pub fn ph3image_model_index() -> u32 effects {} { 8 }
+pub fn image_model(model:u32) -> bool effects {} { model>=2 and model<=8 }
 // Image models that share Generate's Sampling panel and remembered size (not Krea or Qwen).
 pub fn uses_image_geometry(model:u32) -> bool effects {} {
   is_moss_model(model) or model==fibo_dev_model_index() or model==h3image_model_index()
 }
-// The Windows presenter's FLUX.1 id; it is not on the desktop dropdown, so it stays clear of it.
+// The Windows presenter's FLUX.1 id. Nothing reads it and it is never saved; it now has the same number as
+// P-H3-Image's place on the desktop dropdown (left as it was: existing numbers are not moved).
 pub fn flux1_model_index() -> u32 effects {} { 8 }
 pub type Flux1Request=struct {prompt:string,output:string,width:u64,height:u64,steps:u64,seed:u64,guidance:f64} derive codec(strict)
 type Flux1File=struct {schema:string,request:Flux1Request} derive codec(strict)
@@ -377,6 +379,130 @@ pub fn decode_h3image(source:str) -> result<H3ImageRequest,string> effects {allo
   if file.schema!=h3image_schema() {return result.err("Unsupported MiniMax H3-Image parameter file")}
   let _=try validate_h3image(struct.borrow(file,field=request))
   result.ok(struct.replace(file,h3image_defaults(),field=request))
+}
+
+// P-H3-Image: text to image on Generate, edit of 1 to 8 pictures on Image Edit (one request type;
+// `images` empty is text to image, Picture 1 is the one edited). Steps, guidance and negative prompt are
+// the model's own and are not stored. width/height 0 (edits only) keep Picture 1's size. `upsample`: the
+// model's prompt upsampler rewrites the prompt first.
+pub type PH3ImageRequest = struct {
+  prompt:string,output:string,images:array<string>,width:u64,height:u64,seed:u64,upsample:bool
+} derive codec(strict)
+type PH3ImageFile=struct {schema:string,request:PH3ImageRequest} derive codec(strict)
+pub fn ph3image_schema() -> str effects {} { "mm-air.ph3image.parameters.v1" }
+pub fn ph3image_max_images() -> u64 effects {} { 8 }
+// Largest picture: the area of the largest listed size, 2912x2912 (agent assumption: nothing larger was run).
+pub fn ph3image_max_pixels() -> u64 effects {} { 8479744 }
+// The sizes the creator's pipeline lists, in list order; the entry after the last one is "Custom"
+// (text to image). desktop.ui's ph3image_size_list has the same order.
+pub fn ph3image_size_count() -> u64 effects {} { 7 }
+pub fn ph3image_default_size_index() -> u64 effects {} { 0 }
+pub fn ph3image_size(index:u64) -> H3ImageSize effects {} {
+  if index==0 {return H3ImageSize {width:2912,height:2912}}
+  if index==1 {return H3ImageSize {width:3360,height:2496}}
+  if index==2 {return H3ImageSize {width:2496,height:3360}}
+  if index==3 {return H3ImageSize {width:3552,height:2368}}
+  if index==4 {return H3ImageSize {width:2368,height:3552}}
+  if index==5 {return H3ImageSize {width:3872,height:2176}}
+  H3ImageSize {width:2176,height:3872}
+}
+pub fn ph3image_size_index(width:u64,height:u64) -> u64 effects {} {
+  var index:u64=0
+  loop{if index>=ph3image_size_count(){break}
+    let size=ph3image_size(index)
+    if size.width==width and size.height==height {return index}
+    index=index+1}
+  ph3image_size_count()
+}
+// Edit output sizes. desktop.ui's ph3image_edit_size_list lists "Picture 1 size" first, then these.
+pub fn ph3image_edit_size_count() -> u64 effects {} { 7 }
+pub fn ph3image_edit_size(index:u64) -> H3ImageSize effects {} {
+  if index==0 {return H3ImageSize {width:2048,height:2048}}
+  if index==1 {return H3ImageSize {width:2368,height:1760}}
+  if index==2 {return H3ImageSize {width:1760,height:2368}}
+  if index==3 {return H3ImageSize {width:2496,height:1664}}
+  if index==4 {return H3ImageSize {width:1664,height:2496}}
+  if index==5 {return H3ImageSize {width:2720,height:1536}}
+  H3ImageSize {width:1536,height:2720}
+}
+pub fn ph3image_edit_size_index(width:u64,height:u64) -> u64 effects {} {
+  var index:u64=0
+  loop{if index>=ph3image_edit_size_count(){break}
+    let size=ph3image_edit_size(index)
+    if size.width==width and size.height==height {return index}
+    index=index+1}
+  ph3image_edit_size_count()
+}
+pub fn ph3image_defaults() -> PH3ImageRequest effects {alloc} {
+  PH3ImageRequest {prompt:"",output:"",images:[],width:2912,height:2912,seed:42,upsample:true}
+}
+pub fn ph3image_is_edit(request:ref<PH3ImageRequest>) -> bool effects {} {
+  array.len(struct.borrow(request,field=images))>0
+}
+pub fn validate_ph3image(request:ref<PH3ImageRequest>) -> result<unit,string> effects {alloc} {
+  let edit=ph3image_is_edit(request)
+  if text.trim(struct.borrow(request,field=prompt))=="" {
+    return result.err(if edit{"Write the edit instruction first"}else{"Write a prompt first"})
+  }
+  let count=array.len(struct.borrow(request,field=images))
+  if count>ph3image_max_images() {return result.err("P-H3-Image takes 1 to 8 pictures")}
+  var index:u64=0
+  loop{
+    if index>=count{break}
+    let lower=text.lower_ascii(str.view(array.borrow(struct.borrow(request,field=images),index)))
+    if not (text.ends_with(str.view(lower),".png") or text.ends_with(str.view(lower),".jpg") or
+        text.ends_with(str.view(lower),".jpeg") or text.ends_with(str.view(lower),".webp")){
+      return result.err("P-H3-Image reads PNG, JPEG or WebP pictures")
+    }
+    index=index+1
+  }
+  if edit {
+    let keep_size:bool=request.width==0 and request.height==0
+    if not keep_size and ph3image_edit_size_index(request.width,request.height)==ph3image_edit_size_count() {
+      return result.err("Choose an edit size from the list")
+    }
+  } else {
+    // Sides: 256 px as the smallest is an agent assumption; 32-pixel steps are the model's rule.
+    if request.width<256 or request.height<256 or request.width%32!=0 or request.height%32!=0 {
+      return result.err("P-H3-Image width and height must be multiples of 32, 256 px or more")
+    }
+    if request.width*request.height>ph3image_max_pixels() {
+      return result.err("P-H3-Image makes pictures up to 8 megapixels")
+    }
+  }
+  if not path.is_absolute(struct.borrow(request,field=output)) or
+      text.lower_ascii(path.extension(struct.borrow(request,field=output)))!=".png" {
+    return result.err("P-H3-Image output must be an absolute PNG path")
+  }
+  result.ok(())
+}
+pub fn copy_ph3image(request:ref<PH3ImageRequest>) -> PH3ImageRequest effects {alloc} {
+  var images:array<string> = []
+  var index:u64=0
+  loop{
+    if index>=array.len(struct.borrow(request,field=images)){break}
+    array.push(images,string.copy(str.view(array.borrow(struct.borrow(request,field=images),index))))
+    index=index+1
+  }
+  PH3ImageRequest {prompt:string.copy(struct.borrow(request,field=prompt)),
+    output:string.copy(struct.borrow(request,field=output)),images:images,width:request.width,height:request.height,
+    seed:request.seed,upsample:request.upsample}
+}
+pub fn encode_ph3image(request:ref<PH3ImageRequest>) -> result<string,string> effects {alloc} {
+  let _=try validate_ph3image(request)
+  var file:PH3ImageFile=PH3ImageFile {schema:string.copy(ph3image_schema()),request:copy_ph3image(request)}
+  match PH3ImageFile_encode(file) {ok(value)=>result.ok(value),err(_)=>result.err("P-H3-Image parameter encoding failed"),}
+}
+pub fn is_ph3image(source:str) -> bool effects {alloc} {
+  var doc:json.Document=match json.parse(source) {ok(value)=>value,err(_)=>{return false},}
+  match string_field(doc,"schema") {ok(value)=>value==ph3image_schema(),err(_)=>false,}
+}
+pub fn decode_ph3image(source:str) -> result<PH3ImageRequest,string> effects {alloc} {
+  var file:PH3ImageFile=match PH3ImageFile_decode(source) {ok(value)=>value,
+    err(_)=>{return result.err("P-H3-Image parameters do not match the saved format")},}
+  if file.schema!=ph3image_schema() {return result.err("Unsupported P-H3-Image parameter file")}
+  let _=try validate_ph3image(struct.borrow(file,field=request))
+  result.ok(struct.replace(file,ph3image_defaults(),field=request))
 }
 
 pub fn moss_schema() -> str effects {} { "mm-air.moss-image.parameters.v1" }

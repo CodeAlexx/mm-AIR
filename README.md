@@ -1292,3 +1292,19 @@ one LoRA, Prompt expander Off / Low / Extra high / Qwen3-VL 8B. It runs in this 
 `std.inference.h3image.session` (`h3image.ai`); LoRAs stay unmerged. Folders: `MM_AIR_H3IMAGE_ROOT`,
 `MM_AIR_H3IMAGE_AIR_ROOT`, `MM_AIR_H3IMAGE_PE_ROOT` (defaults under `~/models`). If files are missing the screen says so
 in one line. Needs an AIR with `std.inference.h3image` (branch work/h3image until merged).
+
+### P-H3-Image (2026-11-11)
+
+Generate lists **P-H3-Image** at the end of the model list (prompt, size, seed, Prompt upsampler on/off). Sizes:
+2912×2912 (default), 3360×2496, 2496×3360, 3552×2368, 2368×3552, 3872×2176, 2176×3872, or Custom (sides in
+32-pixel steps). Image Edit lists it as a fourth model: 1 to 8 pictures in order, Picture 1 is the one edited; Size is
+Picture 1's size or 2048×2048, 2368×1760, 1760×2368, 2496×1664, 1664×2496, 2720×1536, 1536×2720. The model's 8 steps
+are fixed; there is no guidance, negative prompt or LoRA control for it. With the Prompt upsampler on, the prompt that
+was rendered is written beside the picture as `<picture>.png.prompt.txt` (as for MiniMax H3-Image). It runs in this
+process through AIR's `std.inference.ph3image.session` (`ph3image.ai`). Folders: `MM_AIR_PH3IMAGE_ROOT`,
+`MM_AIR_PH3IMAGE_AIR_ROOT` (defaults `~/models/P-H3-Image`, `~/models/P-H3-Image-air`). If files are missing the screen
+says so in one line. Saved settings use their own schema (`mm-air.ph3image.parameters.v1`); the model takes list
+position 8 and no earlier position moved. Test: `ph3image-job OUTPUT.png PROMPT SEED WxH|keep on|off [IMAGE ...]`
+(`tests/ph3image_generate.ai`, the worker the two buttons start). Agent assumptions: Custom is limited to 256 px or
+more per side and to the area of 2912×2912; 1 GiB of the card is kept free and host memory minus 2 GiB is offered
+(the MiniMax H3-Image values).

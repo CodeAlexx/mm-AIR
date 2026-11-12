@@ -335,7 +335,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.read,io.write} {
   if array.len(struct.borrow(old_back,field=prompt_images))!=0 or old_back.text_strength!=1.0 or
      old_back.vision_size!=384 or old_back.prompt!="a lighthouse" { return 1 }
   // Fibo 2.0: Dev on Generate (index 6), Edit Turbo on Image Edit; defaults, round trip, refusals.
-  if parameters.fibo_dev_model_index()!=6 or not parameters.image_model(6) or parameters.image_model(8) { return 1 }
+  if parameters.fibo_dev_model_index()!=6 or not parameters.image_model(6) or parameters.image_model(9) { return 1 }
   if parameters.h3image_model_index()!=7 or not parameters.image_model(7) or not parameters.uses_image_geometry(7) { return 1 }
   var fibo=parameters.fibo_defaults_for(false)
   if fibo.steps!=50 or fibo.guidance!=5.0 or fibo.width!=1024 { return 1 }
@@ -411,6 +411,76 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.read,io.write} {
   struct.set(wide,4096,field=width)
   struct.set(wide,4096,field=height)
   match parameters.validate_h3image(wide){ok(_)=>{},err(_)=>{return 73},}
+  // P-H3-Image: a new place on the model list (8); the places before it are unchanged. Codes 81+ name the failing check.
+  if parameters.ph3image_model_index()!=8 or not parameters.image_model(8) or parameters.uses_image_geometry(8) { return 81 }
+  if parameters.h3image_model_index()!=7 or parameters.fibo_dev_model_index()!=6 or parameters.moss_sft_model_index()!=5 or
+     parameters.moss_base_model_index()!=4 or parameters.qwen_image_model_index()!=3 or parameters.krea_model_index()!=2 { return 82 }
+  // the two size lists: sides in 32-pixel steps, each found again by its size; the default is 2912x2912
+  var tall_index:u64=0
+  loop{if tall_index>=parameters.ph3image_size_count(){break}
+    let size=parameters.ph3image_size(tall_index)
+    if size.width%32!=0 or size.height%32!=0 or size.width*size.height>parameters.ph3image_max_pixels() { return 83 }
+    if parameters.ph3image_size_index(size.width,size.height)!=tall_index { return 83 }
+    let edit_size=parameters.ph3image_edit_size(tall_index)
+    if edit_size.width%32!=0 or edit_size.height%32!=0 { return 84 }
+    if parameters.ph3image_edit_size_index(edit_size.width,edit_size.height)!=tall_index { return 84 }
+    tall_index=tall_index+1}
+  if parameters.ph3image_size_count()!=7 or parameters.ph3image_edit_size_count()!=7 { return 85 }
+  if parameters.ph3image_size_index(1024,1024)!=7 or parameters.ph3image_edit_size_index(2912,2912)!=7 { return 85 }
+  if parameters.ph3image_size(6).width!=2176 or parameters.ph3image_size(6).height!=3872 or
+     parameters.ph3image_edit_size(0).width!=2048 or parameters.ph3image_edit_size(6).height!=2720 { return 85 }
+  var tall=parameters.ph3image_defaults()
+  if tall.width!=2912 or tall.height!=2912 or not tall.upsample { return 86 }
+  let _=ref.swap(struct.borrow(tall,field=prompt),string.copy("a lighthouse at dusk"))
+  let _=ref.swap(struct.borrow(tall,field=output),string.copy("/out/ph3image.png"))
+  let tall_json=match parameters.encode_ph3image(tall){ok(value)=>value,err(_)=>{return 87},}
+  if not parameters.is_ph3image(tall_json) or parameters.is_h3image(tall_json) or parameters.is_fibo(tall_json) or
+     parameters.is_moss(tall_json) or parameters.is_qwen_image(tall_json) or parameters.is_ph3image(wide_json) { return 88 }
+  var tall_back=match parameters.decode_ph3image(tall_json){ok(value)=>value,err(_)=>{return 89},}
+  if parameters.ph3image_is_edit(tall_back) or tall_back.width!=2912 or tall_back.seed!=42 or not tall_back.upsample { return 90 }
+  struct.set(tall,false,field=upsample)
+  let tall_off=match parameters.encode_ph3image(tall){ok(value)=>value,err(_)=>{return 91},}
+  var tall_off_back=match parameters.decode_ph3image(tall_off){ok(value)=>value,err(_)=>{return 91},}
+  if tall_off_back.upsample { return 91 }
+  // Custom: multiples of 32, up to the largest listed area
+  struct.set(tall,1024,field=width)
+  struct.set(tall,1024,field=height)
+  match parameters.validate_ph3image(tall){ok(_)=>{},err(_)=>{return 92},}
+  struct.set(tall,1000,field=width)
+  match parameters.validate_ph3image(tall){ok(_)=>{return 93},err(_)=>{},}
+  struct.set(tall,4096,field=width)
+  struct.set(tall,4096,field=height)
+  match parameters.validate_ph3image(tall){ok(_)=>{return 94},err(_)=>{},}
+  // an edit takes 1 to 8 pictures; width and height 0 keep Picture 1's size, else a listed edit size
+  var tall_edit=parameters.ph3image_defaults()
+  let _=ref.swap(struct.borrow(tall_edit,field=prompt),string.copy("Make it rain in Picture 1"))
+  let _=ref.swap(struct.borrow(tall_edit,field=output),string.copy("/out/ph3image-edit.png"))
+  struct.set(tall_edit,0,field=width)
+  struct.set(tall_edit,0,field=height)
+  match parameters.validate_ph3image(tall_edit){ok(_)=>{return 95},err(_)=>{},}
+  var tall_picture:u64=0
+  loop{
+    if tall_picture>=8{break}
+    array.push(struct.borrow(tall_edit,field=images),text.concat("/in/p",str.view(text.concat(str.view(string.from_int(cast.sat(tall_picture))),".png"))))
+    tall_picture=tall_picture+1
+  }
+  let tall_edit_json=match parameters.encode_ph3image(tall_edit){ok(value)=>value,err(_)=>{return 96},}
+  var tall_edit_back=match parameters.decode_ph3image(tall_edit_json){ok(value)=>value,err(_)=>{return 97},}
+  if not parameters.ph3image_is_edit(tall_edit_back) or array.len(struct.borrow(tall_edit_back,field=images))!=8 or
+     tall_edit_back.width!=0 or tall_edit_back.height!=0 { return 98 }
+  struct.set(tall_edit,2048,field=width)
+  struct.set(tall_edit,2048,field=height)
+  match parameters.validate_ph3image(tall_edit){ok(_)=>{},err(_)=>{return 99},}
+  struct.set(tall_edit,2912,field=width)
+  struct.set(tall_edit,2912,field=height)
+  match parameters.validate_ph3image(tall_edit){ok(_)=>{return 100},err(_)=>{},}
+  struct.set(tall_edit,0,field=width)
+  struct.set(tall_edit,0,field=height)
+  array.push(struct.borrow(tall_edit,field=images),"/in/p8.png")
+  match parameters.validate_ph3image(tall_edit){ok(_)=>{return 111},err(_)=>{},}
+  // an H3-Image file is not read as P-H3-Image and the other way round
+  match parameters.decode_ph3image(wide_json){ok(_)=>{return 102},err(_)=>{},}
+  match parameters.decode_h3image(tall_json){ok(_)=>{return 103},err(_)=>{},}
   // Sampler controls (Sampler / Schedule / Noise / Bong math). Codes 41+ name the failing check.
   // A MOSS file saved before the fields reads as Default (ER-SDE) with the field defaults.
   let moss_old="{\"schema\":\"mm-air.moss-image.parameters.v1\",\"request\":{\"model\":\"moss-image-base\",\"prompt\":\"a cat\",\"negative\":\"\",\"output\":\"/tmp/m.png\",\"width\":1024,\"height\":1024,\"steps\":50,\"cfg\":3.0,\"shift\":5.0,\"seed\":42,\"fast\":false,\"loras\":[],\"prompt_images\":[],\"prompt_strength_percent\":[],\"text_strength\":1.0,\"vision_size\":384}}"
