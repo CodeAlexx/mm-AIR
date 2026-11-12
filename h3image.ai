@@ -316,7 +316,7 @@ fn run_inner(request:ref<parameters.H3ImageRequest>,sender:ref<option<channel.Se
   }
 
   report_step(sender,if edit{"Generating the edit"}else{"Generating the picture"})
-  match hsession.generate(opened,form,made,budget,prepared,adapters,str.view(scratch),""){
+  match hsession.generate_reporting(opened,form,made,budget,prepared,adapters,str.view(scratch),"",sender){
     ok(timings)=>{
       let seconds=number((time.monotonic_ns()-started)/1000000000)
       let done=text.concat("MiniMax H3-Image ",text.concat(if edit{"edit"}else{"picture"},

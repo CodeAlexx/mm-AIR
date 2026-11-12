@@ -145,7 +145,7 @@ fn run_inner(request:ref<parameters.PH3ImageRequest>,sender:ref<option<channel.S
   var budget=psession.Budget{device_reserve_bytes:1073741824,host_available_bytes:host}
 
   generation.report(sender,if edit{"Generating the edit"}else{"Generating the picture"})
-  match psession.generate(deployment,form,budget){
+  match psession.generate_reporting(deployment,form,budget,sender){
     ok(measured)=>{
       var timings=measured
       var note=string.new()
