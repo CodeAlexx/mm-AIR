@@ -298,6 +298,21 @@ fn relayvsr_controls(session:ref<desk.Session>,relay:bool)->unit effects{alloc,n
 }
 
 // `origin`: the source the pictures were cut from (people found in a video), else empty.
+// "1696×2528" for a picture or video, empty when its size cannot be read.
+fn picture_size(filename:str)->string effects{alloc,env,fs.meta,fs.read,fs.write,process,time}{
+  let work=path.join(system.temp_directory(),text.concat("mm-air-size-probe-",string.from_int(time.monotonic_ns())))
+  let answer=match media_io.probe("/nonexistent/air-image-provider",filename,str.view(work)){
+    ok(info)=>{
+      let width:u64=cast.sat(info.width)
+      let height:u64=cast.sat(info.height)
+      text.concat(str.view(string.from_int(width)),str.view(text.concat("×",str.view(string.from_int(height)))))
+    },
+    err(_)=>string.new(),
+  }
+  let _=files.remove(str.view(work))
+  answer
+}
+
 fn show_path_gallery(session:ref<desk.Session>,safe:ref<safe_mode.State>,id:str,paths:ref<array<string>>,origin:str)
     ->unit effects{alloc,env,fs.meta,fs.read,fs.write,net,process,time}{
   var command=desk.command("items",id)
@@ -313,7 +328,11 @@ fn show_path_gallery(session:ref<desk.Session>,safe:ref<safe_mode.State>,id:str,
       continue}
     codec.begin_object(command)
     codec.field_text(command,"key",string.from_int(index))
-    codec.field_text(command,"label",struct.borrow(tile,field=label))
+    // Each tile names its picture's size, so sources can be told apart before an edit.
+    let size=picture_size(str.view(array.borrow(paths,index)))
+    let label=if str.len(str.view(size))==0 {string.copy(struct.borrow(tile,field=label))}
+      else {text.concat(str.view(text.concat(str.view(size)," · ")),struct.borrow(tile,field=label))}
+    codec.field_text(command,"label",str.view(label))
     codec.field_text(command,"name",str.view(path.basename(str.view(array.borrow(paths,index)))))
     codec.field_text(command,"path",struct.borrow(tile,field=path))
     codec.field_text(command,"icon","image-x-generic-symbolic")
