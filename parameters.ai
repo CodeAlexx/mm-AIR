@@ -82,7 +82,20 @@ pub fn is_retired_flux3(source:str)->bool effects {alloc}{
   match string_field(doc,"schema"){ok(value)=>value=="mm-air.flux3-klein.parameters",err(_)=>false,}
 }
 pub fn retired_flux3_message()->str effects {} {
-  "Made with FLUX 3 Image Klein, which MM-Air no longer includes: its prompt and seed were restored; the model stays as selected."
+  "FLUX 3 Klein settings restored into the selected model: prompt, seed, size and source pictures"
+}
+// A number field of a retired FLUX 3 Klein entry (width, height, steps); 0 when absent.
+pub fn retired_flux3_number(source:str,name:str)->u64 effects {alloc} {
+  var document=match json.parse(source){ok(value)=>value,err(_)=>{return 0},}
+  match json.get(document,json.root(),name){some(index)=>match json.as_u64(document,index){some(value)=>value,none=>0,},none=>0,}
+}
+// The source pictures of a retired FLUX 3 Klein edit, in order (empty for text to image).
+pub fn retired_flux3_references(source:str)->array<string> effects {alloc} {
+  var document=match json.parse(source){ok(value)=>value,err(_)=>{return []},}
+  match json.get(document,json.root(),"references"){
+    some(_)=>match strings(document,"references",64){ok(values)=>values,err(_)=>[],},
+    none=>[],
+  }
 }
 // The prompt and seed of a retired FLUX 3 Klein entry, which carry over to any model.
 pub fn retired_flux3_prompt(source:str)->string effects {alloc} {

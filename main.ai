@@ -260,20 +260,24 @@ fn show_items(session:ref<desk.Session>,safe:ref<safe_mode.State>,id: str, items
 
 // Generated-output galleries are visual selectors. Paths and filenames remain
 // in the item records for actions, but do not consume presentation space.
-fn show_gallery_items(session:ref<desk.Session>,safe:ref<safe_mode.State>,id:str,
+fn show_gallery_items(session:ref<desk.Session>,safe:ref<safe_mode.State>,newest:bool,id:str,
     items:ref<array<library.Item>>) -> unit effects {alloc,env,fs.meta,fs.read,fs.write,net,process,time} {
   var command=desk.command("items",id)
   codec.field_u64(command,"thumbnail_width",136)
   codec.field_u64(command,"thumbnail_height",136)
   codec.key(command,"items")
   codec.begin_array(command)
-  var i:u64=0
+  // History's order choice: Newest first (default) or Oldest first, like a file browser.
+  // Keys stay the item's position in the catalog either way.
+  let count:u64=array.len(items)
+  var step:u64=0
   loop {
-    if i == array.len(items){break}
+    if step == count{break}
+    let i:u64=if newest{count-1-step}else{step}
+    step=step+1
     let item=array.borrow(items,i)
     var tile:safe_mode.Tile=safe_mode.tile(safe,item)
-    if not tile.show{i=i+1
-      continue}
+    if not tile.show{continue}
     codec.begin_object(command)
     codec.field_text(command,"key",string.from_int(i))
     // Empty, or the small 18+ marker on adult items while Safe mode is off or unlocked.
@@ -283,7 +287,6 @@ fn show_gallery_items(session:ref<desk.Session>,safe:ref<safe_mode.State>,id:str
     codec.field_text(command,"path",struct.borrow(tile,field=path))
     codec.field_text(command,"icon","image-x-generic-symbolic")
     codec.end_object(command)
-    i=i+1
   }
   codec.end_array(command)
   let _=desk.submit(session,command)
@@ -1944,6 +1947,7 @@ pub fn main(args: view<str>) -> i32
   var seed:i64=random_seed()
   var seed_valid: bool = true
   var seed_locked:bool=false
+  var history_newest:bool=true
   var seedvr2_enabled:bool=false
   var seedvr2_run_after:bool=true
   var seedvr2_variant:u32=0
@@ -2075,7 +2079,7 @@ pub fn main(args: view<str>) -> i32
           lora_editor(session,generate_loras,selected_lora)
           lora_family_now = string.copy(lora_family(model_index))
         }
-        show_gallery_items(session,safe,"gen_history",history)
+        show_gallery_items(session,safe,history_newest,"gen_history",history)
         show_prompt_session(session,prompt_state)
         show_prompt_model(session,prompt_model_index)
         show_movie(session,safe,movie_state)
@@ -2101,15 +2105,46 @@ pub fn main(args: view<str>) -> i32
                 prompt=string.copy(str.view(restored_prompt))
                 let _=desk.set_text(session,"gen_prompt_buffer",prompt)
               }
-              match parameters.retired_flux3_seed(str.view(pending_parameters)){
-                some(value)=>{
+              let klein_width=parameters.retired_flux3_number(str.view(pending_parameters),"width")
+              let klein_height=parameters.retired_flux3_number(str.view(pending_parameters),"height")
+              var klein_sources=parameters.retired_flux3_references(str.view(pending_parameters))
+              let klein_seed=parameters.retired_flux3_seed(str.view(pending_parameters))
+              if array.len(klein_sources)!=0{
+                // A Klein edit: its instruction, pictures, seed and size go to Image Edit with the
+                // edit model that is selected there.
+                qwen_edit_prompt=string.copy(str.view(restored_prompt))
+                let _=desk.set_text(session,"qwen_edit_prompt_buffer",str.view(qwen_edit_prompt))
+                qwen_edit_references=copy_paths(klein_sources)
+                qwen_edit_source=string.copy(str.view(array.borrow(qwen_edit_references,0)))
+                qwen_edit_selected=0
+                match klein_seed{some(value)=>{
+                  qwen_edit_seed=cast.wrap(value)
+                  let _=desk.set_text(session,"qwen_edit_seed",str.view(string.from_int(value)))},none=>{},}
+                if klein_width!=0 and klein_height!=0{
+                  qwen_edit_width=klein_width
+                  qwen_edit_height=klein_height
+                  let _=desk.set_number(session,"qwen_edit_width","value",cast.float(qwen_edit_width))
+                  let _=desk.set_number(session,"qwen_edit_height","value",cast.float(qwen_edit_height))
+                }
+                update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image,qwen_edit_ph3image))
+                select_mode(session,"image_edit")
+              }else{
+                match klein_seed{some(value)=>{
                   seed=value
                   seed_valid=true
-                  let _=desk.set_text(session,"gen_seed",string.from_int(seed))
-                },
-                none=>{},
+                  let _=desk.set_text(session,"gen_seed",string.from_int(seed))},none=>{},}
+                if klein_width!=0 and klein_height!=0 and parameters.image_model(model_index){
+                  width=klein_width
+                  height=klein_height
+                  let _=desk.set_number(session,"gen_width","value",cast.float(width))
+                  let _=desk.set_number(session,"gen_height","value",cast.float(height))
+                  if model_index==parameters.h3image_model_index(){h3image_size_widget(session,width,height)}
+                  if model_index==parameters.ph3image_model_index(){ph3image_size_widget(session,width,height)}
+                  geometry_widgets(session,width,height,seconds,model_index==parameters.krea_model_index(),
+                    model_index==parameters.qwen_image_model_index())
+                }
+                select_mode(session,"generate")
               }
-              select_mode(session,"generate")
               let _=desk.set_text(session,"status",parameters.retired_flux3_message())
               pending_parameters=string.new()
               continue
@@ -2786,8 +2821,8 @@ pub fn main(args: view<str>) -> i32
                           struct.borrow(held, field=path), struct.borrow(held, field=thumbnail),
                           struct.borrow(held, field=parameters), struct.borrow(held, field=postprocess)))
                         array.push(history, held)
-                        show_gallery_items(session,safe,"gen_current",current)
-                        show_gallery_items(session,safe,"gen_history",history)
+                        show_gallery_items(session,safe,history_newest,"gen_current",current)
+                        show_gallery_items(session,safe,history_newest,"gen_history",history)
                         let _ = desk.set_bool(session,"gen_current_empty","visible",safe_mode.visible_count(safe,current)==0)
                         let _ = desk.set_bool(session,"gen_history_empty","visible",safe_mode.visible_count(safe,history)==0)
                         match library.save_history(history) { ok(_) => {}, err(message) => { io.ewrite(text.concat(message, "\n")) } }
@@ -2978,8 +3013,8 @@ pub fn main(args: view<str>) -> i32
                         struct.borrow(held, field=parameters),
                         struct.borrow(held,field=postprocess)))
                       array.push(history, held)
-                      show_gallery_items(session,safe,"gen_current",current)
-                      show_gallery_items(session,safe,"gen_history",history)
+                      show_gallery_items(session,safe,history_newest,"gen_current",current)
+                      show_gallery_items(session,safe,history_newest,"gen_history",history)
                       let _ = desk.set_bool(session,"gen_current_empty","visible",safe_mode.visible_count(safe,current)==0)
                       let _ = desk.set_bool(session,"gen_history_empty","visible",safe_mode.visible_count(safe,history)==0)
                       match library.save_history(history) {
@@ -3292,8 +3327,8 @@ pub fn main(args: view<str>) -> i32
           // Safe mode switched, unlocked, relocked (minutes ran out) or its sources/marks changed:
           // redraw every gallery and clear previews that are now kept out.
           if safe_mode.changed(safe) {
-            show_gallery_items(session,safe,"gen_current",current)
-            show_gallery_items(session,safe,"gen_history",history)
+            show_gallery_items(session,safe,history_newest,"gen_current",current)
+            show_gallery_items(session,safe,history_newest,"gen_history",history)
             let _=desk.set_bool(session,"gen_current_empty","visible",safe_mode.visible_count(safe,current)==0)
             let _=desk.set_bool(session,"gen_history_empty","visible",safe_mode.visible_count(safe,history)==0)
             show_items(session,safe,"gen_visual_refs",visual_references)
@@ -5431,6 +5466,11 @@ pub fn main(args: view<str>) -> i32
               }
             }
             if id=="gen_seed_lock"{seed_locked=desk.boolean(event,"value")}
+            if id=="gen_history_order"{
+              history_newest=desk.number(event,"value")==0.0
+              show_gallery_items(session,safe,history_newest,"gen_current",current)
+              show_gallery_items(session,safe,history_newest,"gen_history",history)
+            }
             continue
           }
           if kind == "action" {
@@ -7102,8 +7142,8 @@ pub fn main(args: view<str>) -> i32
               selected_result=string.new()
               saved_parameters=string.new()
               show_result_details(session,"")
-              show_gallery_items(session,safe,"gen_current",current)
-              show_gallery_items(session,safe,"gen_history",history)
+              show_gallery_items(session,safe,history_newest,"gen_current",current)
+              show_gallery_items(session,safe,history_newest,"gen_history",history)
               let _=desk.set_bool(session,"gen_current_empty","visible",safe_mode.visible_count(safe,current)==0)
               let _=desk.set_bool(session,"gen_history_empty","visible",safe_mode.visible_count(safe,history)==0)
               let _=safe_mode.picture(session,safe,"result_picture","")
@@ -7333,7 +7373,7 @@ pub fn main(args: view<str>) -> i32
               match library.clear_history() {
                 ok(_) => {
                   history = []
-                  show_gallery_items(session,safe,"gen_history",history)
+                  show_gallery_items(session,safe,history_newest,"gen_history",history)
                   let _ = desk.set_bool(session, "gen_history_empty", "visible", true)
                   let _ = desk.set_text(session, "status", "History cleared; generated media files were kept")
                 },

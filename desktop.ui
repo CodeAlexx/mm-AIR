@@ -143,6 +143,7 @@
   <object class="GtkStringList" id="krea_resolution_list"><items><item>1:1 · 1024×1024</item><item>Custom</item></items></object>
   <object class="GtkStringList" id="krea_scheduler_list"><items><item>Creator Turbo Flow</item></items></object>
   <object class="GtkStringList" id="krea_sampler_list"><items><item>Euler</item></items></object>
+  <object class="GtkStringList" id="history_order_list"><items><item>Newest first</item><item>Oldest first</item></items></object>
   <object class="GtkStringList" id="gen_task_list">
     <items><item>Text to video + audio</item><item>First frame to video</item><item>First + last frame</item><item>Reference to video</item><item>Last frame to video</item></items>
   </object>
@@ -736,6 +737,7 @@
                   <child><object class="GtkLabel" id="gen_batch_status"><property name="label">Idle</property><property name="ellipsize">end</property><property name="max-width-chars">14</property><style><class name="muted"/></style></object></child>
                   <child><object class="GtkButton" id="clear_history"><property name="label">Clear history</property><style><class name="quiet-button"/></style></object></child>
                 </object></child>
+                <child><object class="GtkDropDown" id="gen_history_order"><property name="model">history_order_list</property><property name="selected">0</property><property name="margin-start">13</property><property name="margin-end">13</property><property name="margin-bottom">8</property><property name="tooltip-text">Order of Current Generations and History</property></object></child>
                 <child><object class="GtkSeparator"/></child>
                 <child><object class="GtkBox"><property name="vexpand">true</property><property name="orientation">vertical</property><property name="spacing">6</property>
                   <child><object class="GtkLabel" id="gen_history_empty"><property name="label">No saved generations</property><style><class name="muted"/></style></object></child>
