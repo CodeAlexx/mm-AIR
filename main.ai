@@ -298,6 +298,14 @@ fn relayvsr_controls(session:ref<desk.Session>,relay:bool)->unit effects{alloc,n
 }
 
 // `origin`: the source the pictures were cut from (people found in a video), else empty.
+// A file name with a video extension (the swap source of a saved Character Swap run).
+fn is_video_name(filename: str) -> bool effects {alloc} {
+  let lower = text.lower_ascii(filename)
+  text.ends_with(str.view(lower), ".mp4") or text.ends_with(str.view(lower), ".mov") or
+    text.ends_with(str.view(lower), ".mkv") or text.ends_with(str.view(lower), ".webm") or
+    text.ends_with(str.view(lower), ".avi") or text.ends_with(str.view(lower), ".m4v")
+}
+
 // "1696×2528" for a picture or video, empty when its size cannot be read.
 fn picture_size(filename:str)->string effects{alloc,env,fs.meta,fs.read,fs.write,process,time}{
   let work=path.join(system.temp_directory(),text.concat("mm-air-size-probe-",string.from_int(time.monotonic_ns())))
@@ -2152,10 +2160,40 @@ pub fn main(args: view<str>) -> i32
                     show_qwen_turbo(session,qwen_turbo)
                     let restored_seed:i64=cast.sat(request.seed)
                     let _=desk.set_text(session,"qwen_edit_seed",str.view(string.from_int(restored_seed)))
-                    update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image,qwen_edit_ph3image))
                     qwen_edit_fibo=false
                     qwen_edit_h3image=false
                     qwen_edit_ph3image=false
+                    qwen_edit_selected=0
+                    qwen_edit_enhance=request.enhance
+                    let _=desk.set_bool(session,"qwen_edit_enhance","active",qwen_edit_enhance)
+                    // A face / head / body swap run saved its swap LoRA: bring the preset, its
+                    // strength and the two slots back (source 1 the target, source 2 the face).
+                    qwen_swap=0
+                    var lora_index:u64=0
+                    loop{
+                      if lora_index>=array.len(struct.borrow(request,field=loras)){break}
+                      let entry=array.borrow(struct.borrow(request,field=loras),lora_index)
+                      var preset_index:u64=0
+                      loop{
+                        if preset_index>=face_swap.count(){break}
+                        match face_swap.preset(preset_index){
+                          some(found)=>{if text.contains(str.view(path.basename(str.view(struct.borrow(entry,field=path)))),str.view(found.stem)){
+                            qwen_swap=preset_index+1
+                            qwen_swap_strength=entry.strength}},
+                          none=>{},
+                        }
+                        preset_index=preset_index+1
+                      }
+                      lora_index=lora_index+1
+                    }
+                    let _=desk.set_number(session,"qwen_edit_swap","selected",cast.float(qwen_swap))
+                    let _=desk.set_number(session,"qwen_edit_swap_strength","value",qwen_swap_strength)
+                    if qwen_swap>0{
+                      swap_target=string.copy(str.view(array.borrow(qwen_edit_references,0)))
+                      swap_face=if array.len(qwen_edit_references)>1{string.copy(str.view(array.borrow(qwen_edit_references,1)))}else{string.new()}
+                      show_swap_slots(session,safe,true,str.view(swap_target),str.view(swap_face))
+                    }else{show_swap_slots(session,safe,false,"","")}
+                    update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image,qwen_edit_ph3image))
                     let _=desk.set_number(session,"qwen_edit_model","selected",0.0)
                     show_edit_model(session,false,false,false)
                     show_qwen_sampling(session,qwen_turbo,(qwen_edit_fibo or qwen_edit_h3image or qwen_edit_ph3image),qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
@@ -2207,8 +2245,19 @@ pub fn main(args: view<str>) -> i32
                     let _=desk.set_text(session,"gen_seed",string.from_int(seed))
                     show_qwen_recipe(session,qwen_image_scheduler,qwen_image_sampler)
                     let _=desk.set_text(session,"gen_prompt_buffer",str.view(prompt))
+                    enhance_prompt=request.enhance
+                    let _=desk.set_bool(session,"gen_enhance_prompt","active",enhance_prompt)
+                    character_sheet_mode=character_sheet.off()
+                    let _=desk.set_number(session,"gen_character_sheet_mode","selected",0.0)
+                    generation_mode=character_swap.standard()
+                    let _=desk.set_number(session,"gen_mode","selected",0.0)
                     model_widgets(session,parameters.qwen_image_model_index(),character_sheet_mode,generation_mode)
                     show_lora_library(session,parameters.qwen_image_model_index())
+                    generate_loras=parameters.clone_loras(struct.borrow(request,field=loras))
+                    selected_lora=18446744073709551615
+                    show_loras(session,generate_loras,selected_lora)
+                    lora_editor(session,generate_loras,selected_lora)
+                    lora_family_now=string.copy(lora_family(model_index))
                     geometry_widgets(session,width,height,seconds,false,true)
                     select_mode(session,"generate")
                     let _=desk.set_text(session,"status","Qwen Generate parameters restored")
@@ -2243,6 +2292,9 @@ pub fn main(args: view<str>) -> i32
                     let _=desk.set_number(session,"qwen_edit_model","selected",3.0)
                     show_edit_model(session,false,false,true)
                     update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(false,true))
+                    qwen_swap=0
+                    let _=desk.set_number(session,"qwen_edit_swap","selected",0.0)
+                    show_swap_slots(session,safe,false,"","")
                     select_mode(session,"image_edit")
                     let _=desk.set_text(session,"status","P-H3-Image edit settings restored")
                   }else{
@@ -2323,6 +2375,9 @@ pub fn main(args: view<str>) -> i32
                     show_edit_model(session,false,true,false)
                     show_edit_lora(session,qwen_edit_lora)
                     update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(true,false))
+                    qwen_swap=0
+                    let _=desk.set_number(session,"qwen_edit_swap","selected",0.0)
+                    show_swap_slots(session,safe,false,"","")
                     select_mode(session,"image_edit")
                     let _=desk.set_text(session,"status","MiniMax H3-Image edit settings restored")
                   }else{
@@ -2401,6 +2456,9 @@ pub fn main(args: view<str>) -> i32
                     let _=desk.set_number(session,"qwen_edit_model","selected",1.0)
                     show_edit_model(session,true,false,false)
                     update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image,qwen_edit_ph3image))
+                    qwen_swap=0
+                    let _=desk.set_number(session,"qwen_edit_swap","selected",0.0)
+                    show_swap_slots(session,safe,false,"","")
                     select_mode(session,"image_edit")
                     let _=desk.set_text(session,"status","Fibo 2.0 edit settings restored")
                   }else{
@@ -2437,6 +2495,8 @@ pub fn main(args: view<str>) -> i32
                     let _=desk.set_text(session,"gen_prompt_buffer",prompt)
                     model_widgets(session,model_index,character_sheet_mode,generation_mode)
                     show_lora_library(session,model_index)
+                    lora_family_now = string.copy(lora_family(model_index))
+                    lora_editor(session,generate_loras,selected_lora)
                     if lora_family(model_index) != str.view(lora_family_now) {
                       generate_loras = []
                       selected_lora = 18446744073709551615
@@ -2493,6 +2553,8 @@ pub fn main(args: view<str>) -> i32
                   let _=desk.set_text(session,"gen_prompt_buffer",prompt)
                   model_widgets(session,model_index,character_sheet_mode,generation_mode)
                   show_lora_library(session,model_index)
+                  lora_family_now = string.copy(lora_family(model_index))
+                  lora_editor(session,generate_loras,selected_lora)
                   if lora_family(model_index) != str.view(lora_family_now) {
                     generate_loras = []
                     selected_lora = 18446744073709551615
@@ -2547,7 +2609,10 @@ pub fn main(args: view<str>) -> i32
                   let _ = desk.set_number(session,"gen_mode","selected",0.0)
                   model_widgets(session,parameters.krea_model_index(),character_sheet_mode,generation_mode)
                   show_lora_library(session,parameters.krea_model_index())
+                  lora_family_now = string.copy(lora_family(parameters.krea_model_index()))
+                  lora_editor(session,generate_loras,selected_lora)
                   geometry_widgets(session,width,height,seconds,true,false)
+                  select_mode(session,"generate")
                   let _ = desk.set_text(session,"status","Krea Generate parameters restored")
                 },
                 err(message) => { let _ = desk.set_text(session,"status",message) },
@@ -2609,6 +2674,9 @@ pub fn main(args: view<str>) -> i32
                         io.ewrite(text.concat(message, "\n"))
                       },
                     }
+                  } else if i == 0 and task_index == h3.task_l2va() {
+                    last_reference_media = string.copy(filename)
+                    let _ = accept_media(session,safe,"choose_last_reference", filename)
                   } else if i == 0 {
                     reference_media = string.copy(filename)
                     let _ = accept_media(session,safe,"choose_reference", filename)
@@ -2637,10 +2705,51 @@ pub fn main(args: view<str>) -> i32
                 reference_actions(session, true, "", array.len(audio_references))
                 character_sheet_mode = character_sheet.off()
                 let _ = desk.set_number(session,"gen_character_sheet_mode","selected",0.0)
-                generation_mode = character_swap.standard()
-                let _ = desk.set_number(session,"gen_mode","selected",0.0)
+                // A Character Swap run (Reference model, Ref2VA, the source video first, then the
+                // character pictures) comes back in Character Swap mode with the video and pictures
+                // in its own slots, so either can be changed, like any setting, before Generate.
+                let swap_run: bool = model_index == h3.model_reference() and
+                  task_index == h3.task_ref2va() and array.len(references) >= 2 and
+                  is_video_name(str.view(array.borrow(references, 0)))
+                if swap_run {
+                  generation_mode = character_swap.enabled()
+                  swap_source_video = string.copy(str.view(array.borrow(references, 0)))
+                  match library.prep_reference(array.borrow(references, 0), "") {
+                    ok(item) => { var prepared = item
+                      show_swap_source(session,safe,prepared,str.view(swap_source_video)) },
+                    err(message) => { io.ewrite(text.concat(message, "\n")) },
+                  }
+                  swap_character_references = []
+                  var picture: u64 = 1
+                  loop {
+                    if picture >= array.len(references) { break }
+                    match library.prep_reference(array.borrow(references, picture), "") {
+                      ok(item) => { array.push(swap_character_references, item) },
+                      err(message) => {
+                        array.push(swap_character_references,
+                          library.item(array.borrow(references, picture), "", ""))
+                        io.ewrite(text.concat(message, "\n"))
+                      },
+                    }
+                    picture = picture + 1
+                  }
+                  show_items(session,safe,"gen_swap_character_refs",swap_character_references)
+                  // The restored prompt is the one the run used; Build Prompt makes a new one.
+                  swap_prompt_built = true
+                  let _ = desk.set_bool(session,"gen_swap_open_prompt","sensitive",true)
+                } else {
+                  generation_mode = character_swap.standard()
+                }
+                let _ = desk.set_number(session,"gen_mode","selected",cast.float(generation_mode))
                 apply_parameter_widgets(session, restored)
-                let _ = desk.set_text(session, "status", "Generate parameters restored")
+                model_widgets(session,model_index,character_sheet_mode,generation_mode)
+                show_lora_library(session,model_index)
+                lora_family_now = string.copy(lora_family(model_index))
+                lora_editor(session,generate_loras,selected_lora)
+                select_mode(session,"generate")
+                let _ = desk.set_text(session, "status", if swap_run {
+                  "Character Swap settings restored · change the video, pictures or any setting, then Generate"
+                } else { "Generate parameters restored" })
               },
             }
             pending_parameters = string.new()
@@ -6947,6 +7056,12 @@ pub fn main(args: view<str>) -> i32
             }
             if id == "gen_reuse_parameters" {
               pending_parameters = string.copy(saved_parameters)
+              // Reuse means the same parameters, seed included: lock the restored seed on both
+              // screens so the next Generate does not draw a new one (New or Lock off does).
+              seed_locked = true
+              qwen_edit_seed_locked = true
+              let _ = desk.set_bool(session,"gen_seed_lock","active",true)
+              let _ = desk.set_bool(session,"qwen_edit_seed_lock","active",true)
               continue
             }
             if id=="gen_delete_result"{
