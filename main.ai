@@ -5466,11 +5466,7 @@ pub fn main(args: view<str>) -> i32
               }
             }
             if id=="gen_seed_lock"{seed_locked=desk.boolean(event,"value")}
-            if id=="gen_history_order"{
-              history_newest=desk.number(event,"value")==0.0
-              show_gallery_items(session,safe,history_newest,"gen_current",current)
-              show_gallery_items(session,safe,history_newest,"gen_history",history)
-            }
+
             continue
           }
           if kind == "action" {
@@ -7098,6 +7094,16 @@ pub fn main(args: view<str>) -> i32
             }
             if id == "gen_load_parameters" {
               let _ = desk.dialog(session, id, "open", "Load Generate parameters", "", "")
+              continue
+            }
+            // The arrow in the History header: down is newest first, up is oldest first.
+            if id == "gen_history_order" {
+              history_newest = not history_newest
+              let _ = desk.set_text(session,"gen_history_order",if history_newest {"↓"} else {"↑"})
+              let _ = desk.set_string(session,"gen_history_order","tooltip-text",
+                if history_newest {"Newest first · click for oldest first"} else {"Oldest first · click for newest first"})
+              show_gallery_items(session,safe,history_newest,"gen_current",current)
+              show_gallery_items(session,safe,history_newest,"gen_history",history)
               continue
             }
             if id == "gen_reuse_parameters" {
