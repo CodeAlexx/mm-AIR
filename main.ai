@@ -371,7 +371,8 @@ fn show_path_gallery(session:ref<desk.Session>,safe:ref<safe_mode.State>,id:str,
 }
 
 // Most pictures one Image Edit run takes: 10 for Qwen and Fibo, 16 for MiniMax H3-Image, 8 for P-H3-Image.
-fn edit_limit(wide:bool,ph3:bool)->u64 effects{}{if ph3{8}else if wide{16}else{10}}
+// Pictures an Image Edit model takes: P-H3 8, H3-Image 16, Fibo Edit 5 (its own limit), Qwen 10.
+fn edit_limit(fibo:bool,wide:bool,ph3:bool)->u64 effects{}{if ph3{8}else if wide{16}else if fibo{parameters.fibo_max_images()}else{10}}
 
 // MiniMax H3-Image prompt expander choices, in list order (Generate lists the first three).
 fn expander_name(index:u64)->string effects{alloc}{
@@ -648,8 +649,18 @@ fn show_edit_model(session:ref<desk.Session>,fibo:bool,is_h3i:bool,ph3:bool)->un
     index=index+1}
   let _=desk.set_bool(session,"qwen_edit_lora_library","visible",false)
   let _=desk.set_text(session,"qwen_edit_choose_source",
-    if ph3{"＋ Add PNG / JPEG / WebP · up to 8"}else if is_h3i{"＋ Add PNG / JPEG / WebP · up to 16"}else{"＋ Add PNG / JPEG / WebP · up to 10"})
+    if ph3{"＋ Add PNG / JPEG / WebP · up to 8"}else if is_h3i{"＋ Add PNG / JPEG / WebP · up to 16"}else if fibo{"＋ Add PNG / JPEG / WebP · up to 5"}else{"＋ Add PNG / JPEG / WebP · up to 10"})
   let _=desk.set_text(session,"qwen_edit_chip",if ph3{"P-H3-IMAGE"}else if is_h3i{"MINIMAX H3-IMAGE"}else if fibo{"FIBO 2.0 EDIT TURBO"}else{"QWEN-IMAGE-2.1"})
+  ()
+}
+
+// Width and Height are greyed out while "Keep the first image's size" is ticked: the
+// first picture's own size is used and the two boxes are not read.
+fn edit_size_state(session:ref<desk.Session>,keep:bool)->unit effects{alloc,net,time}{
+  let _=desk.set_bool(session,"qwen_edit_width","sensitive",not keep)
+  let _=desk.set_bool(session,"qwen_edit_height","sensitive",not keep)
+  let _=desk.set_bool(session,"qwen_edit_width_label","sensitive",not keep)
+  let _=desk.set_bool(session,"qwen_edit_height_label","sensitive",not keep)
   ()
 }
 
@@ -2084,8 +2095,9 @@ pub fn main(args: view<str>) -> i32
         let _=desk.set_number(session,"qwen_edit_steps","value",cast.float(qwen_image_steps))
         layout_memory.restore(session)
         show_edit_model(session,qwen_edit_fibo,qwen_edit_h3image,qwen_edit_ph3image)
+        edit_size_state(session,(qwen_edit_fibo or qwen_edit_h3image) and qwen_edit_match_source)
         show_qwen_sampling(session,qwen_turbo,(qwen_edit_fibo or qwen_edit_h3image or qwen_edit_ph3image),qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
-        update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image,qwen_edit_ph3image))
+        update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_fibo,qwen_edit_h3image,qwen_edit_ph3image))
         select_mode(session, "generate")
         source_widgets(session, task_index)
         model_widgets(session,model_index,character_sheet_mode,generation_mode)
@@ -2145,7 +2157,7 @@ pub fn main(args: view<str>) -> i32
                   let _=desk.set_number(session,"qwen_edit_width","value",cast.float(qwen_edit_width))
                   let _=desk.set_number(session,"qwen_edit_height","value",cast.float(qwen_edit_height))
                 }
-                update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image,qwen_edit_ph3image))
+                update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_fibo,qwen_edit_h3image,qwen_edit_ph3image))
                 select_mode(session,"image_edit")
               }else{
                 match klein_seed{some(value)=>{
@@ -2247,9 +2259,11 @@ pub fn main(args: view<str>) -> i32
                       swap_face=if array.len(qwen_edit_references)>1{string.copy(str.view(array.borrow(qwen_edit_references,1)))}else{string.new()}
                       show_swap_slots(session,safe,true,str.view(swap_target),str.view(swap_face))
                     }else{show_swap_slots(session,safe,false,"","")}
-                    update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image,qwen_edit_ph3image))
+                    update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_fibo,qwen_edit_h3image,qwen_edit_ph3image))
                     let _=desk.set_number(session,"qwen_edit_model","selected",0.0)
                     show_edit_model(session,false,false,false)
+                    edit_model_status(session,false,false,str.view(qwen_edit_expander),false,qwen_edit_ph3_upsample)
+                    edit_size_state(session,(false or false) and qwen_edit_match_source)
                     show_qwen_sampling(session,qwen_turbo,(qwen_edit_fibo or qwen_edit_h3image or qwen_edit_ph3image),qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
                     select_mode(session,"image_edit")
                     let _=desk.set_text(session,"status","Qwen Image Edit parameters restored")
@@ -2345,7 +2359,9 @@ pub fn main(args: view<str>) -> i32
                     qwen_edit_ph3image=true
                     let _=desk.set_number(session,"qwen_edit_model","selected",3.0)
                     show_edit_model(session,false,false,true)
-                    update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(false,true))
+                    edit_model_status(session,false,false,str.view(qwen_edit_expander),true,qwen_edit_ph3_upsample)
+                    edit_size_state(session,(false or false) and qwen_edit_match_source)
+                    update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(false,false,true))
                     qwen_swap=0
                     let _=desk.set_number(session,"qwen_edit_swap","selected",0.0)
                     show_swap_slots(session,safe,false,"","")
@@ -2427,8 +2443,10 @@ pub fn main(args: view<str>) -> i32
                     qwen_edit_lora=parameters.clone_loras(struct.borrow(request,field=loras))
                     let _=desk.set_number(session,"qwen_edit_model","selected",2.0)
                     show_edit_model(session,false,true,false)
+                    edit_model_status(session,false,true,str.view(qwen_edit_expander),false,qwen_edit_ph3_upsample)
+                    edit_size_state(session,(false or true) and qwen_edit_match_source)
                     show_edit_lora(session,qwen_edit_lora)
-                    update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(true,false))
+                    update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(false,true,false))
                     qwen_swap=0
                     let _=desk.set_number(session,"qwen_edit_swap","selected",0.0)
                     show_swap_slots(session,safe,false,"","")
@@ -2509,7 +2527,9 @@ pub fn main(args: view<str>) -> i32
                     qwen_edit_ph3image=false
                     let _=desk.set_number(session,"qwen_edit_model","selected",1.0)
                     show_edit_model(session,true,false,false)
-                    update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image,qwen_edit_ph3image))
+                    edit_model_status(session,true,false,str.view(qwen_edit_expander),false,qwen_edit_ph3_upsample)
+                    edit_size_state(session,(true or false) and qwen_edit_match_source)
+                    update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_fibo,qwen_edit_h3image,qwen_edit_ph3image))
                     qwen_swap=0
                     let _=desk.set_number(session,"qwen_edit_swap","selected",0.0)
                     show_swap_slots(session,safe,false,"","")
@@ -3948,7 +3968,7 @@ pub fn main(args: view<str>) -> i32
                 var rejected:bool=false
                 loop{
                   if chosen_index>=array.len(chosen) or
-                     array.len(qwen_edit_references)>=edit_limit(qwen_edit_h3image,qwen_edit_ph3image){break}
+                     array.len(qwen_edit_references)>=edit_limit(qwen_edit_fibo,qwen_edit_h3image,qwen_edit_ph3image){break}
                   let candidate=array.borrow(chosen,chosen_index)
                   match media.inspect(str.view(candidate),8589934592){
                     err(_)=>{rejected=true},
@@ -3964,7 +3984,7 @@ pub fn main(args: view<str>) -> i32
                 if array.len(qwen_edit_references)!=0{
                   qwen_edit_source=string.copy(str.view(array.borrow(qwen_edit_references,0)))
                 }
-                update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image,qwen_edit_ph3image))
+                update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_fibo,qwen_edit_h3image,qwen_edit_ph3image))
                 let count_i64:i64=cast.sat(array.len(qwen_edit_references))
                 var source_status=string.copy(
                   if qwen_edit_ph3image{"Only valid PNG, JPEG, or WebP images were added · maximum 8"}
@@ -5228,7 +5248,7 @@ pub fn main(args: view<str>) -> i32
               }else{
                 show_swap_slots(session,safe,false,"","")
                 let _=desk.set_text(session,"qwen_edit_source_empty","SOURCE IMAGE")
-                update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image,qwen_edit_ph3image))
+                update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_fibo,qwen_edit_h3image,qwen_edit_ph3image))
               }
               if qwen_swap>0{
                 // The swap files were trained on the base model with their own instruction:
@@ -5259,8 +5279,9 @@ pub fn main(args: view<str>) -> i32
               qwen_edit_h3image=picked_model==2.0
               qwen_edit_ph3image=picked_model==3.0
               show_edit_model(session,qwen_edit_fibo,qwen_edit_h3image,qwen_edit_ph3image)
+              edit_size_state(session,(qwen_edit_fibo or qwen_edit_h3image) and qwen_edit_match_source)
               show_qwen_sampling(session,qwen_turbo,(qwen_edit_fibo or qwen_edit_h3image or qwen_edit_ph3image),qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
-              update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image,qwen_edit_ph3image))
+              update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_fibo,qwen_edit_h3image,qwen_edit_ph3image))
               if qwen_edit_h3image{show_edit_lora(session,qwen_edit_lora)
                 show_lora_library_into(session,"qwen_edit_lora_library",parameters.h3image_model_index())}
               edit_model_status(session,qwen_edit_fibo,qwen_edit_h3image,str.view(qwen_edit_expander),qwen_edit_ph3image,qwen_edit_ph3_upsample)
@@ -5325,6 +5346,7 @@ pub fn main(args: view<str>) -> i32
             }
             if id=="qwen_edit_match_source"{
               qwen_edit_match_source=desk.boolean(event,"value")
+              edit_size_state(session,(qwen_edit_fibo or qwen_edit_h3image) and qwen_edit_match_source)
               continue
             }
             if id=="gen_enhance_prompt"{
@@ -5570,7 +5592,7 @@ pub fn main(args: view<str>) -> i32
               qwen_edit_selected=0
               qwen_edit_source=if array.len(qwen_edit_references)==0{string.new()}
                 else{string.copy(str.view(array.borrow(qwen_edit_references,0)))}
-              update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image,qwen_edit_ph3image))
+              update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_fibo,qwen_edit_h3image,qwen_edit_ph3image))
               continue
             }
             if id=="qwen_edit_clear_sources"{
@@ -5587,7 +5609,7 @@ pub fn main(args: view<str>) -> i32
               qwen_edit_references=array.new()
               qwen_edit_source=string.new()
               qwen_edit_selected=0
-              update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_h3image,qwen_edit_ph3image))
+              update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_fibo,qwen_edit_h3image,qwen_edit_ph3image))
               let _=desk.set_text(session,"qwen_edit_status",
                 if qwen_edit_ph3image{"Add 1–8 PNG, JPEG, or WebP pictures to begin"}
                 else if qwen_edit_h3image{"Add 1–16 PNG, JPEG, or WebP pictures to begin"}
