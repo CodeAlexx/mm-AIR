@@ -2156,6 +2156,33 @@ pub fn main(args: view<str>) -> i32
                   qwen_edit_height=klein_height
                   let _=desk.set_number(session,"qwen_edit_width","value",cast.float(qwen_edit_width))
                   let _=desk.set_number(session,"qwen_edit_height","value",cast.float(qwen_edit_height))
+                }else{
+                  // The Klein edit ran at its first picture's own size: the same size in the
+                  // selected edit model (its keep-size choice, Picture 1 size, or that size typed in).
+                  if qwen_edit_fibo or qwen_edit_h3image{
+                    qwen_edit_match_source=true
+                    let _=desk.set_bool(session,"qwen_edit_match_source","active",true)
+                  }else if qwen_edit_ph3image{
+                    qwen_edit_ph3_size=0
+                    let _=desk.set_number(session,"qwen_edit_ph3image_size","selected",0.0)
+                  }else{
+                    let work=path.join(system.temp_directory(),text.concat("mm-air-size-probe-",string.from_int(time.monotonic_ns())))
+                    match media_io.probe("/nonexistent/air-image-provider",str.view(qwen_edit_source),str.view(work)){
+                      ok(info)=>{
+                        let picture_width:u64=cast.sat(info.width)
+                        let picture_height:u64=cast.sat(info.height)
+                        if picture_width>=64 and picture_height>=64{
+                          qwen_edit_width=picture_width/16*16
+                          qwen_edit_height=picture_height/16*16
+                          let _=desk.set_number(session,"qwen_edit_width","value",cast.float(qwen_edit_width))
+                          let _=desk.set_number(session,"qwen_edit_height","value",cast.float(qwen_edit_height))
+                        }
+                      },
+                      err(_)=>{},
+                    }
+                    let _=files.remove(str.view(work))
+                  }
+                  edit_size_state(session,(qwen_edit_fibo or qwen_edit_h3image) and qwen_edit_match_source)
                 }
                 update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_fibo,qwen_edit_h3image,qwen_edit_ph3image))
                 select_mode(session,"image_edit")
