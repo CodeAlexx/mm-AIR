@@ -82,7 +82,16 @@ pub fn is_retired_flux3(source:str)->bool effects {alloc}{
   match string_field(doc,"schema"){ok(value)=>value=="mm-air.flux3-klein.parameters",err(_)=>false,}
 }
 pub fn retired_flux3_message()->str effects {} {
-  "These settings were made with FLUX 3 Image Klein, which MM-Air no longer includes. Nothing was restored."
+  "Made with FLUX 3 Image Klein, which MM-Air no longer includes: its prompt and seed were restored; the model stays as selected."
+}
+// The prompt and seed of a retired FLUX 3 Klein entry, which carry over to any model.
+pub fn retired_flux3_prompt(source:str)->string effects {alloc} {
+  var document=match json.parse(source){ok(value)=>value,err(_)=>{return string.new()},}
+  text_at(document,json.root(),"prompt")
+}
+pub fn retired_flux3_seed(source:str)->option<i64> effects {alloc} {
+  var document=match json.parse(source){ok(value)=>value,err(_)=>{return option.none()},}
+  match json.get(document,json.root(),"seed"){some(index)=>json.as_i64(document,index),none=>option.none(),}
 }
 
 pub type LoraEntry = struct {path:string,strength:f64,enabled:bool} derive codec(strict)
@@ -1225,4 +1234,52 @@ pub fn decode_h3(source: str) -> result<H3Parameters,string> effects {alloc} {
   }
   var loras: array<LoraEntry> = try decode_loras(document)
   result.ok(H3Parameters {request: request,loras: loras})
+}
+
+// What made a result, for the line under the Generate preview: the model and settings on
+// the first line and the prompt on the second. Works for every saved schema, including
+// retired ones, and returns nothing for text that is not a parameter file.
+fn text_at(document:ref<json.Document>,object:u64,name:str)->string effects{alloc}{
+  match json.get(document,object,name){some(i)=>match json.as_string(document,i){some(v)=>v,none=>string.new(),},none=>string.new(),}
+}
+fn number_at(document:ref<json.Document>,object:u64,name:str)->string effects{alloc}{
+  match json.get(document,object,name){some(i)=>match json.number_text(document,i){some(v)=>v,none=>string.new(),},none=>string.new(),}
+}
+fn result_model(schema:str,model:str,index:str)->string effects{alloc}{
+  if schema=="mm-air.generate.parameters"{return string.copy(if index=="1"{"MiniMax H3 Reference"}else{"MiniMax H3 Base"})}
+  if schema=="mm-air.krea2.parameters"{return string.copy("Krea 2 Turbo")}
+  if schema=="mm-air.flux3-klein.parameters"{return string.copy("FLUX 3 Image Klein (no longer in MM-Air)")}
+  if schema=="mm-air.qwen-image-2.1.parameters"{return string.copy("Qwen-Image-2.1")}
+  if schema==fibo_schema(){return string.copy(if model==fibo_edit_name(){"Fibo 2.0 Edit Turbo"}else{"Fibo 2.0"})}
+  if schema==h3image_schema(){return string.copy("MiniMax H3-Image")}
+  if schema==ph3image_schema(){return string.copy("P-H3-Image")}
+  if schema==moss_schema(){return text.concat("MOSS-Image · ",model)}
+  if schema=="mm-air.flux1-dev.parameters.v1"{return string.copy("FLUX.1 Dev")}
+  string.copy(schema)
+}
+fn h3_task_name(index:str)->str effects{}{
+  if index=="0"{"Text to video + audio"}else if index=="1"{"First frame to video"}else if index=="2"{"First + last frame"}
+  else if index=="3"{"Reference to video"}else if index=="4"{"Last frame to video"}else{""}
+}
+fn part(before:str,value:str,after:str)->string effects{alloc}{
+  if value==""{return string.new()}
+  text.concat(str.view(text.concat(before,value)),after)
+}
+pub fn result_summary(source:str)->array<string> effects{alloc}{
+  var document=match json.parse(source){ok(value)=>value,err(_)=>{return []},}
+  let schema=text_at(document,json.root(),"schema")
+  if schema==""{return []}
+  var object:u64=json.root()
+  match json.get(document,json.root(),"request"){some(index)=>{object=index},none=>{},}
+  var line=result_model(str.view(schema),str.view(text_at(document,object,"model")),str.view(number_at(document,object,"model")))
+  if text_at(document,object,"mode")=="edit"{string.append(line," edit")}
+  if schema=="mm-air.generate.parameters"{string.append(line,str.view(part(" · ",h3_task_name(str.view(number_at(document,object,"task"))),"")))}
+  let width=number_at(document,object,"width")
+  let height=number_at(document,object,"height")
+  if width!="0" and height!=""{string.append(line,str.view(part(" · ",str.view(width),text.concat("×",str.view(height)))))}
+  string.append(line,str.view(part(" · ",str.view(number_at(document,object,"seconds"))," s")))
+  string.append(line,str.view(part(" · ",str.view(number_at(document,object,"steps"))," steps")))
+  string.append(line,str.view(part(" · seed ",str.view(number_at(document,object,"seed")),"")))
+  let prompt=text.replace(str.view(text.replace(str.view(text_at(document,object,"prompt")),"\x{0D}"," ")),"\x{0A}"," ")
+  [line,prompt]
 }

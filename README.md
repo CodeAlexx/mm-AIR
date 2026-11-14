@@ -204,8 +204,8 @@ the direct runtime and edit route, not the visual quality of the required
 
 FLUX 3 Image Klein is no longer on Generate's model list or in Image Edit's
 **EDIT MODEL** dropdown (owner request). Its saved parameter files and history
-entries (schema `mm-air.flux3-klein.parameters`) are refused by name on Load or
-Reuse; they never restore as another model. Existing FLUX 3 PNGs stay in the
+entries (schema `mm-air.flux3-klein.parameters`) never restore as another model:
+Reuse puts only their prompt and seed on Generate and keeps the selected model. Existing FLUX 3 PNGs stay in the
 gallery and output folders.
 
 ### MOSS-Image Base and SFT (2026-11-05)
@@ -1053,6 +1053,11 @@ a 4,296,010,552-byte peak. Both returned `fully_unloaded=true`; no compute proce
   **Reference** and **Trash**. Select a result and use **Reuse** to restore its
   request: H3, Krea and Qwen-Image entries each restore through their own parameter
   schema. Clearing history removes only the catalog, not media.
+- Selecting a result shows what made it under the preview: the model, task, size,
+  length, steps and seed on one line and the prompt on the next (both selectable).
+- Videos in the preview have play/pause, back to start, a seek bar and the time
+  (GTK's own controls on Linux, the AIR Windows host's bar on Windows); a click on the
+  video also plays or pauses.
 - Selecting an image result enables **Reference**. This explicit
   action appends the original image to the existing visual-reference list and
   selects H3 Ref2VA. It preserves the prompt, seed, geometry, audio references,

@@ -1070,8 +1070,20 @@ fn clear_reference(session:ref<desk.Session>,safe:ref<safe_mode.State>,last: boo
   let _ = desk.set_bool(session, if last { "clear_last_reference" } else { "clear_reference" }, "sensitive", false)
 }
 
+// The model, settings and prompt that made the selected result, under the preview.
+fn show_result_details(session:ref<desk.Session>,saved:str) -> unit effects {alloc,net,time} {
+  var summary=parameters.result_summary(saved)
+  let shown:bool=array.len(summary)==2
+  if not shown { summary = [string.new(),string.new()] }
+  let _ = desk.set_text(session,"result_details",str.view(array.borrow(summary,0)))
+  let _ = desk.set_text(session,"result_prompt",str.view(array.borrow(summary,1)))
+  let _ = desk.set_bool(session,"result_details","visible",shown)
+  let _ = desk.set_bool(session,"result_prompt","visible",shown and str.len(str.view(array.borrow(summary,1)))!=0)
+}
+
 // The result monitor with nothing selected (also when Safe mode keeps the pick out).
 fn clear_result_view(session:ref<desk.Session>,safe:ref<safe_mode.State>) -> unit effects {alloc,fs.read,net,time} {
+  show_result_details(session,"")
   let _ = safe_mode.picture(session,safe,"result_picture","")
   let _ = safe_mode.play(session,safe,"result_video","")
   let _ = desk.clear_video(session,"result_video")
@@ -1136,6 +1148,7 @@ fn show_source(session:ref<desk.Session>,safe:ref<safe_mode.State>,filename: str
         let _ = desk.set_bool(session, "result_placeholder", "visible", false)
         let _ = desk.set_bool(session, "result_empty_title", "visible", false)
       } else { show_result(session,safe,filename) }
+      show_result_details(session,"")
       let _ = desk.set_bool(session, "gen_reuse_parameters", "sensitive", false)
       let _ = desk.set_bool(session, "gen_copy_downloads", "sensitive", false)
       let _ = desk.set_bool(session, "gen_use_image_reference", "sensitive", false)
@@ -2056,6 +2069,20 @@ pub fn main(args: view<str>) -> i32
         loop {
           if pending_parameters != "" {
             if parameters.is_retired_flux3(pending_parameters){
+              let restored_prompt=parameters.retired_flux3_prompt(str.view(pending_parameters))
+              if str.len(str.view(restored_prompt))!=0{
+                prompt=string.copy(str.view(restored_prompt))
+                let _=desk.set_text(session,"gen_prompt_buffer",prompt)
+              }
+              match parameters.retired_flux3_seed(str.view(pending_parameters)){
+                some(value)=>{
+                  seed=value
+                  seed_valid=true
+                  let _=desk.set_text(session,"gen_seed",string.from_int(seed))
+                },
+                none=>{},
+              }
+              select_mode(session,"generate")
               let _=desk.set_text(session,"status",parameters.retired_flux3_message())
               pending_parameters=string.new()
               continue
@@ -2837,6 +2864,7 @@ pub fn main(args: view<str>) -> i32
                   saved_parameters = string.copy(running_parameters)
                   selected_result = string.copy(struct.borrow(completed, field=output))
                   show_result(session,safe,str.view(struct.borrow(completed, field=output)))
+                  show_result_details(session,str.view(saved_parameters))
                   if qwen_edit_active{
                     qwen_edit_result=string.copy(struct.borrow(completed,field=output))
                     let _=desk.set_bool(session,"qwen_edit_download","sensitive",true)
@@ -4082,6 +4110,7 @@ pub fn main(args: view<str>) -> i32
                                  else { selected_path(history, key) }
                   selected_result = string.copy(filename)
                   show_result(session,safe,filename)
+                  show_result_details(session,str.view(saved_parameters))
                   if kind == "activate" { open_image_view(session,safe,filename,image_view_file) }
                   let post=if id=="gen_current"{selected_postprocess(current,key)}
                     else{selected_postprocess(history,key)}
@@ -6932,6 +6961,7 @@ pub fn main(args: view<str>) -> i32
                 let _=desk.set_text(session,"status",message)}}
               selected_result=string.new()
               saved_parameters=string.new()
+              show_result_details(session,"")
               show_gallery_items(session,safe,"gen_current",current)
               show_gallery_items(session,safe,"gen_history",history)
               let _=desk.set_bool(session,"gen_current_empty","visible",safe_mode.visible_count(safe,current)==0)
