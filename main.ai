@@ -7904,6 +7904,11 @@ pub fn main(args: view<str>) -> i32
             if id == "generate_action" or id == "queue_take" or id == "edit_run" or
                id=="edit_outpaint_preview_window" or
                id == "gen_save_parameters" {
+              // Each press starts the timer from zero, also when the run is refused, so the
+              // previous generation's time never stays on screen as if it were this one.
+              if id!="gen_save_parameters" and array.len(generations)==0 {
+                let _=desk.set_text(session,"gen_progress_elapsed","Elapsed: 0 s")
+              }
               if id!="gen_save_parameters" and not seed_locked {
                 seed=random_seed()
                 seed_valid=true
