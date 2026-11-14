@@ -654,13 +654,14 @@ fn show_edit_model(session:ref<desk.Session>,fibo:bool,is_h3i:bool,ph3:bool)->un
   ()
 }
 
-// Width and Height are greyed out while "Keep the first image's size" is ticked: the
-// first picture's own size is used and the two boxes are not read.
+// Width and Height next to "Keep the first image's size".
 fn edit_size_state(session:ref<desk.Session>,keep:bool)->unit effects{alloc,net,time}{
-  let _=desk.set_bool(session,"qwen_edit_width","sensitive",not keep)
-  let _=desk.set_bool(session,"qwen_edit_height","sensitive",not keep)
-  let _=desk.set_bool(session,"qwen_edit_width_label","sensitive",not keep)
-  let _=desk.set_bool(session,"qwen_edit_height_label","sensitive",not keep)
+  // Width and Height stay typeable: typing a size unticks "Keep the first image's size".
+  let _=keep
+  let _=desk.set_bool(session,"qwen_edit_width","sensitive",true)
+  let _=desk.set_bool(session,"qwen_edit_height","sensitive",true)
+  let _=desk.set_bool(session,"qwen_edit_width_label","sensitive",true)
+  let _=desk.set_bool(session,"qwen_edit_height_label","sensitive",true)
   ()
 }
 
@@ -4685,6 +4686,11 @@ pub fn main(args: view<str>) -> i32
             if id=="qwen_edit_width" or id=="qwen_edit_height"{
               if id=="qwen_edit_width"{qwen_edit_width=cast.sat(desk.number(event,"value"))}
               else{qwen_edit_height=cast.sat(desk.number(event,"value"))}
+              // A size typed in is the size wanted: stop keeping the first picture's size.
+              if (qwen_edit_fibo or qwen_edit_h3image) and qwen_edit_match_source{
+                qwen_edit_match_source=false
+                let _=desk.set_bool(session,"qwen_edit_match_source","active",false)
+              }
               qwen_edit_resolution_index=match qwen_image_contract.resolution_index(
                 qwen_edit_width,qwen_edit_height){some(index)=>index,none=>qwen_image_contract.resolution_custom()}
               let _=desk.set_number(session,"qwen_edit_resolution","selected",cast.float(qwen_edit_resolution_index))
