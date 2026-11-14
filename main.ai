@@ -446,6 +446,9 @@ fn remove_path_at(paths:ref<array<string>>,selected:u64)->unit effects{alloc}{
 fn lora_editor(session: ref<desk.Session>, entries: ref<array<parameters.LoraEntry>>, selected: u64)
     -> unit effects {alloc,net,time} {
   let valid = selected < array.len(entries)
+  // Enabled and Strength belong to the selected LoRA: with none selected they are not shown,
+  // so nothing reads as an enabled LoRA when there is none.
+  let _ = desk.set_bool(session,"gen_lora_editor","visible",valid)
   let _ = desk.set_bool(session,"gen_lora_editor","sensitive",valid)
   let _ = desk.set_bool(session,"gen_remove_lora","sensitive",valid)
   let _ = desk.set_bool(session,"gen_clear_loras","sensitive",array.len(entries) > 0)
@@ -668,6 +671,7 @@ fn edit_size_state(session:ref<desk.Session>,keep:bool)->unit effects{alloc,net,
 // The edit LoRA (one, like Generate): its name and strength.
 fn show_edit_lora(session:ref<desk.Session>,entries:ref<array<parameters.LoraEntry>>)->unit effects{alloc,net,time}{
   let any=array.len(entries)>0
+  let _=desk.set_bool(session,"qwen_edit_lora_strength_row","visible",any)
   let _=desk.set_bool(session,"qwen_edit_lora_strength_row","sensitive",any)
   let _=desk.set_bool(session,"qwen_edit_remove_lora","sensitive",any)
   if any{
