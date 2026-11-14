@@ -1295,6 +1295,8 @@ semantic content is correct.
 ### MiniMax H3-Image (2026-11-10)
 
 Generate lists **MiniMax H3-Image** (prompt, size, seed, one LoRA with strength, Prompt expander Off / Low / Extra high).
+Its sizes are SerenityAir's H3 Image presets: 2048×2048 (default), 2720×1536, 1536×2720, 1024×1024, 4096×4096,
+5952×3360, 3552×1184, or Custom (up to 20 MP).
 Image Edit lists it as a third model: 1 to 16 pictures in order, keep the first picture's size or set Width and Height,
 one LoRA, Prompt expander Off / Low / Extra high / Qwen3-VL 8B. It runs in this process through AIR's
 `std.inference.h3image.session` (`h3image.ai`); LoRAs stay unmerged. Folders: `MM_AIR_H3IMAGE_ROOT`,

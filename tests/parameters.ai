@@ -381,16 +381,16 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.read,io.write} {
   array.push(struct.borrow(fibo_edit,field=images),"/tmp/c.webp")
   match parameters.validate_fibo(fibo_edit){ok(_)=>{return 1},err(_)=>{},}
   // MiniMax H3-Image: one request for text to image and edit; codes 61+ name the failing check.
-  // The H3-Image size list: every entry inside the model's 4-20 MP range, sides in 32-pixel steps,
+  // The H3-Image size list (SerenityAir's presets): every entry at most 20 MP, sides in 32-pixel steps,
   // each found again by its size, and the default is 2048x2048.
   var size_index:u64=0
   loop{if size_index>=parameters.h3image_size_count(){break}
     let size=parameters.h3image_size(size_index)
     if size.width%32!=0 or size.height%32!=0 { return 1 }
-    if size.width*size.height<3900000 or size.width*size.height>parameters.h3image_max_pixels() { return 1 }
+    if size.width*size.height>parameters.h3image_max_pixels() { return 1 }
     if parameters.h3image_size_index(size.width,size.height)!=size_index { return 1 }
     size_index=size_index+1}
-  if parameters.h3image_size_index(1024,1024)!=parameters.h3image_size_count() { return 1 }
+  if parameters.h3image_size_count()!=7 or parameters.h3image_size_index(1024,768)!=parameters.h3image_size_count() { return 1 }
   let default_size=parameters.h3image_size(parameters.h3image_default_size_index())
   if default_size.width!=2048 or default_size.height!=2048 { return 1 }
   if parameters.h3image_defaults().width!=2048 or parameters.h3image_defaults().height!=2048 { return 1 }
