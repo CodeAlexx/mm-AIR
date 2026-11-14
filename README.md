@@ -925,6 +925,9 @@ full-width prompt editor share a draggable vertical split, sized for structured 
 prompts of several thousand characters. Movie Maker and ControlNet are outside this change.
 
 - Base tasks: text, first-image, and first/last-image video + audio.
+- Model and task follow each other: picking Reference to video selects the
+  Reference model, and switching the model from Reference back to Base sets the
+  task to Text to video + audio, which needs no pictures.
 - Reference task: up to nine ordered images/videos plus three explicit audio
   files. Add/remove controls display image/video thumbnails and audio waveforms.
   Selecting a source previews it; video and audio use native playback controls.

@@ -4895,7 +4895,7 @@ pub fn main(args: view<str>) -> i32
                 geometry_summary(session,width,height,seconds)
               }
               if model_index == h3.model_reference() { task_index = h3.task_ref2va() }
-              else if task_index == h3.task_ref2va() { task_index = h3.task_fl2va() }
+              else if task_index == h3.task_ref2va() { task_index = h3.task_t2va() }
               let _ = desk.set_number(session, "gen_task", "selected", cast.float(task_index))
               source_widgets(session, task_index)
             }
