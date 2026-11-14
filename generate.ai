@@ -230,6 +230,13 @@ fn run_fibo_inner(request:ref<parameters.FiboRequest>,sender:ref<option<channel.
   let preset=match configured_path("MM_AIR_FIBO_PIPELINE_PRESET",
       "Choose the Fibo 2.0 pipeline file in Settings first"){
     ok(value)=>value,err(message)=>{return outcome(false,output,message)},}
+  // GiB of the 16.25 GB BF16 transformer kept on the GPU; the rest stays in page-locked host RAM,
+  // read from disk once (AIR fibo2 Pinned placement). 0 or unset: the whole transformer resident,
+  // which needs a card with more than 16 GB (a 16 GB card: about 10).
+  let pinned_gib:u64=match runtime_config.value("MM_AIR_FIBO_PINNED_RESIDENT_GIB"){
+    ok(found)=>match found{some(value)=>match text.parse_u64(str.view(text.trim(str.view(value)))){
+      some(number)=>number,none=>0,},none=>0,},
+    err(_)=>0,}
   var loras:array<fibo_adapters.Request> = []
   let entries=struct.borrow(request,field=loras)
   var lora_index:u64=0
@@ -257,7 +264,7 @@ fn run_fibo_inner(request:ref<parameters.FiboRequest>,sender:ref<option<channel.
     prompt:string.copy(struct.borrow(request,field=prompt)),negative:negative,has_negative:has_negative,
     images:images,mask:string.new(),width:request.width,height:request.height,steps:request.steps,
     guidance:cast.float(request.guidance),seed:request.seed,output:string.copy(str.view(output)),
-    pinned_resident_gib:0,pinned_slots:3,text_images:true,fonts:[],dump_dir:string.new(),loras:loras,
+    pinned_resident_gib:pinned_gib,pinned_slots:3,text_images:true,fonts:[],dump_dir:string.new(),loras:loras,
     sampler:string.copy(struct.borrow(request,field=sampler)),
     schedule:if parameters.fibo_uses_stepper(str.view(struct.borrow(request,field=sampler))){
       string.copy(struct.borrow(request,field=schedule))}else{string.copy("default")},
