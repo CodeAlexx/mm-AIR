@@ -3318,12 +3318,12 @@ pub fn main(args: view<str>) -> i32
               none => {},
             }
           }
-          // Unmasked swap needs no model to write its prompt, so keep the
-          // direct instruction current instead of waiting for Build Prompt.
+          // Unmasked swap needs no model to write its prompt, so keep the direct instruction
+          // current instead of waiting for Build Prompt (or a source video: the instruction
+          // depends only on the swap settings and how many character pictures there are).
           if character_swap.is_swap(generation_mode) and swap_style == 0 and
              not character_swap.is_masked(generation_mode) and
-             not swap_prompt_built and str.len(str.view(swap_source_video)) != 0 and
-             array.len(swap_character_references) != 0 {
+             not swap_prompt_built and array.len(swap_character_references) != 0 {
             var auto_options = character_swap.settings(swap_target_mode,
               str.view(swap_target_notes),str.view(swap_notes),
               swap_preserve_environment,swap_preserve_camera,swap_strong_identity)
