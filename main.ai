@@ -5782,11 +5782,17 @@ pub fn main(args: view<str>) -> i32
                 err(message)=>{let _=desk.set_text(session,"qwen_edit_status",message)
                   continue},ok(_)=>{},
               }
+              // History keeps the size asked for (Width x Height), not a swap's ~1 MP working
+              // size, so Reuse gives back the same settings.
+              struct.set(request,qwen_edit_width,field=width)
+              struct.set(request,qwen_edit_height,field=height)
               running_parameters=match parameters.encode_qwen_image(request){
                 ok(value)=>value,
                 err(message)=>{let _=desk.set_text(session,"qwen_edit_status",message)
                   continue},
               }
+              struct.set(request,work_width,field=width)
+              struct.set(request,work_height,field=height)
               var receiver=match channel.open(128,1024){
                 ok(value)=>value,
                 err(problem)=>{var held=problem
