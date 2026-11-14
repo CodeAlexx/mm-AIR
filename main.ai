@@ -46,6 +46,9 @@ import "relayvsr_post.ai" as relayvsr_post
 import "parameters.ai" as parameters
 import "face_swap.ai" as face_swap
 import "library.ai" as library
+import std.desktop_icons as desktop_icons
+import std.screencast as screencast
+import std.draw as draw
 import "safe_mode.ai" as safe_mode
 import std.safe_media as safe_media
 import "prompt_lab.ai" as prompt_lab
@@ -307,6 +310,19 @@ fn is_video_name(filename: str) -> bool effects {alloc} {
   text.ends_with(str.view(lower), ".mp4") or text.ends_with(str.view(lower), ".mov") or
     text.ends_with(str.view(lower), ".mkv") or text.ends_with(str.view(lower), ".webm") or
     text.ends_with(str.view(lower), ".avi") or text.ends_with(str.view(lower), ".m4v")
+}
+
+// The History order arrow: std.desktop_icons' arrow drawn once at startup to a PNG in MM-Air's data folder
+// (down = newest first, up = oldest first). Empty when it cannot be written.
+fn history_arrow(up: bool) -> string effects {alloc,env,fs.write} {
+  let color = draw.rgba_hex(0xD8DEE9FF)
+  var surface = desktop_icons.surface(if up { desktop_icons.arrow_up() } else { desktop_icons.arrow_down() },
+    56, color, 0.0, "", color)
+  let png = match screencast.png_bytes(surface) { ok(value) => value, err(_) => { return string.new() }, }
+  let folder = match library.data_directory() { ok(value) => value, err(_) => { return string.new() }, }
+  let _ = files.mkdirs(str.view(folder))
+  let file = path.join(str.view(folder), if up { "history-oldest-first.png" } else { "history-newest-first.png" })
+  match files.write_bytes(str.view(file), bytes.view(png)) { ok(_) => file, err(_) => string.new(), }
 }
 
 // "1696×2528" for a picture or video, empty when its size cannot be read.
@@ -1948,6 +1964,8 @@ pub fn main(args: view<str>) -> i32
   var seed_valid: bool = true
   var seed_locked:bool=false
   var history_newest:bool=true
+  let history_arrow_down:string=history_arrow(false)
+  let history_arrow_up:string=history_arrow(true)
   var seedvr2_enabled:bool=false
   var seedvr2_run_after:bool=true
   var seedvr2_variant:u32=0
@@ -2080,6 +2098,7 @@ pub fn main(args: view<str>) -> i32
           lora_family_now = string.copy(lora_family(model_index))
         }
         show_gallery_items(session,safe,history_newest,"gen_history",history)
+        let _ = desk.picture(session,"gen_history_order",str.view(history_arrow_down))
         show_prompt_session(session,prompt_state)
         show_prompt_model(session,prompt_model_index)
         show_movie(session,safe,movie_state)
@@ -7099,7 +7118,8 @@ pub fn main(args: view<str>) -> i32
             // The arrow in the History header: down is newest first, up is oldest first.
             if id == "gen_history_order" {
               history_newest = not history_newest
-              let _ = desk.set_text(session,"gen_history_order",if history_newest {"↓"} else {"↑"})
+              if history_newest { let _ = desk.picture(session,"gen_history_order",str.view(history_arrow_down)) }
+              else { let _ = desk.picture(session,"gen_history_order",str.view(history_arrow_up)) }
               let _ = desk.set_string(session,"gen_history_order","tooltip-text",
                 if history_newest {"Newest first · click for oldest first"} else {"Oldest first · click for newest first"})
               show_gallery_items(session,safe,history_newest,"gen_current",current)
