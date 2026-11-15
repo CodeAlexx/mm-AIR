@@ -957,7 +957,7 @@ base-only.
 
 For H3, selecting a LoRA switches the transformer projection to the supported
 row-scaled INT8 path. The picker accepts valid canonical PEFT, flat legacy
-Musubi/Kohya, or dotted `diffusion_model.*.lora_{down,up}.weight` plus scalar
+`lora_unet_` keys, or dotted `diffusion_model.*.lora_{down,up}.weight` plus scalar
 per-projection alpha H3 `.safetensors` from any filesystem path and retains that
 exact path in saved parameters. The linked native AIR H3 sampler strictly
 validates and streams each admitted layout directly; no adjacent converted

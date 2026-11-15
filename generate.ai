@@ -683,7 +683,7 @@ pub fn guide_edit_lora(kind: u32) -> option<string> effects {alloc,env,fs.read,f
   lora_file("MM_AIR_H3_GUIDE_SHARPEN_LORA")
 }
 
-// The training adapter the motion transfer LoRA was trained on top of (ostris' V2): loaded first, strength 1.
+// The training adapter the motion transfer LoRA was trained on top of (the V2 training adapter): loaded first, strength 1.
 pub fn motion_training_adapter() -> option<string> effects {alloc,env,fs.read,fs.meta} {
   lora_file("MM_AIR_H3_TRAINING_ADAPTER_LORA")
 }
