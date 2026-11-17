@@ -785,10 +785,17 @@ fn show_lora_library_into(session: ref<desk.Session>, id: str, model: u32) -> un
     if i >= array.len(names) { break }
     let name: str = str.view(array.borrow(names,i))
     i = i + 1
-    if not text.ends_with(text.lower_ascii(name),".safetensors") or not lora_listed(model,name) { continue }
+    if not lora_listed(model,name) { continue }
+    let full: string = path.join(str.view(folder),name)
+    // a single .safetensors file, or (H3 and H3-Image, whose loader reads the folder) a PEFT folder with
+    // adapter_model.safetensors and adapter_config.json, as AIR's trainers save LoRA and LoKr
+    let file_entry: bool = text.ends_with(text.lower_ascii(name),".safetensors")
+    let folder_entry: bool = not file_entry and (model == parameters.h3image_model_index() or lora_family(model) == "h3-") and
+      (match files.exists(str.view(path.join(str.view(full),"adapter_model.safetensors"))) { ok(v) => v, err(_) => false, })
+    if not file_entry and not folder_entry { continue }
     codec.begin_object(command)
-    codec.field_text(command,"key",str.view(path.join(str.view(folder),name)))
-    codec.field_text(command,"label",str.slice(name,0,str.len(name)-12))
+    codec.field_text(command,"key",str.view(full))
+    codec.field_text(command,"label",if file_entry { str.slice(name,0,str.len(name)-12) } else { name })
     codec.end_object(command)
   }
   codec.begin_object(command)
