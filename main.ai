@@ -3444,10 +3444,16 @@ pub fn main(args: view<str>) -> i32
                 var choice: u64 = 0
                 loop {
                   if choice == array.len(chosen) { break }
-                  let filename = array.borrow(chosen,choice)
+                  // a PEFT folder's adapter_config.json picked in the file dialog means its folder
+                  let picked_name: string = string.copy(str.view(array.borrow(chosen,choice)))
+                  let filename: string = if str.view(path.basename(str.view(picked_name))) == "adapter_config.json" {
+                    string.copy(str.view(path.dirname(str.view(picked_name)))) } else { picked_name }
                   choice = choice + 1
-                  if not text.ends_with(text.lower_ascii(filename),".safetensors") {
-                    let _ = desk.set_text(session,"status","Choose a LoRA .safetensors file")
+                  // H3 / H3-Image also take an AIR-saved PEFT folder (adapter_model.safetensors inside)
+                  let peft_folder: bool = (model_index == parameters.h3image_model_index() or lora_family(model_index) == "h3-") and
+                    (match files.exists(str.view(path.join(str.view(filename),"adapter_model.safetensors"))) { ok(v) => v, err(_) => false, })
+                  if not peft_folder and not text.ends_with(text.lower_ascii(filename),".safetensors") {
+                    let _ = desk.set_text(session,"status","Choose a LoRA .safetensors file or LoRA folder")
                     continue
                   }
                   var accepted_filename: string = string.copy(str.view(filename))
