@@ -140,7 +140,9 @@
       {"name": "native-h3-generate", "entry": "tests/native_h3_generate.ai"},
       {"name": "h3image-job", "entry": "tests/h3image_generate.ai"},
       {"name": "ph3image-job", "entry": "tests/ph3image_generate.ai"},
-      {"name": "mm-air-safe-mode-check", "entry": "tests/safe_mode.ai"}
+      {"name": "mm-air-safe-mode-check", "entry": "tests/safe_mode.ai"},
+      {"name": "mm-air-movie-mcp", "entry": "mcp/movie_server.ai"},
+      {"name": "mm-air-movie-render", "entry": "mcp/movie_render.ai"}
     ],
     "check": [
       {"name": "auto-mask-native", "entry": "tests/auto_mask_native.ai"},
@@ -281,6 +283,7 @@
     "native_h3.ai",
     "native_seed.ai",
     "native_view.ai",
+    "mcp",
     "tests"
   ],
   "requires": {

@@ -1,0 +1,406 @@
+// Headless Movie Maker render worker: renders the shots named in a job's request.json one after the
+// other on one H3 process, routed exactly as the window's Queue take / Render all, and writes each
+// finished take back into the project file. Started by the movie MCP server under the GPU guard.
+//
+//   mm-air-movie-render --job DIR
+//
+// DIR/request.json says what to render and with which H3 execution policy (never chosen here);
+// DIR/status.json is rewritten after every event; DIR/stop-after-shot ends the run between shots.
+module app.mm_air.mcp.movie_render
+
+import std.channel as channel
+import std.files as files
+import std.math as math
+import std.path as path
+import std.process as proc
+import std.tasks as tasks
+import std.text as text
+import std.inference.h3.policy as h3_policy
+import std.inference.h3.request as h3
+import std.inference.h3.session as session
+import "../generate.ai" as generation
+import "../movie_project.ai" as movie
+import "../library.ai" as library
+import "../parameters.ai" as parameters
+import "../character_sheet.ai" as character_sheet
+import "movie_store.ai" as store
+
+type Policy = struct {
+  conditioner: session.Projection, transformer: session.Projection, attention: session.Attention,
+  conditioner_id: u32, transformer_id: u32, attention_id: u32,
+  schedule: session.Schedule, sampler: h3_policy.Sampler, profile_id: u32
+}
+type Finished = struct { succeeded: bool, ran: bool, output: string, message: string, seed: u64, runtime_ms: u64, peak_vram_bytes: u64 }
+
+fn say(message: str) -> unit effects {alloc, io.write} {
+  io.write(message)
+  io.write("\n")
+}
+
+fn policy_of(r: ref<store.RenderRequest>) -> result<Policy, string> effects {alloc} {
+  let c: str = struct.borrow(r, field=conditioner_projection)
+  let t: str = struct.borrow(r, field=transformer_projection)
+  let a: str = struct.borrow(r, field=attention)
+  let s: str = struct.borrow(r, field=schedule)
+  let m: str = struct.borrow(r, field=sampler)
+  let conditioner = if c == "exact_bf16" { session.Projection.ExactBF16 }
+    else if c == "convrot_i8" { session.Projection.ConvRotI8 }
+    else { return result.err("conditioner_projection must be exact_bf16 or convrot_i8") }
+  let conditioner_id = if c == "exact_bf16" { h3.projection_exact_bf16() } else { h3.projection_convrot_int8() }
+  let transformer = if t == "exact_bf16" { session.Projection.ExactBF16 }
+    else if t == "convrot_i8" { session.Projection.ConvRotI8 }
+    else if t == "row_scaled_i8" { session.Projection.RowScaledI8 }
+    else { return result.err("transformer_projection must be exact_bf16, convrot_i8 or row_scaled_i8") }
+  let transformer_id = if t == "exact_bf16" { h3.projection_exact_bf16() }
+    else if t == "convrot_i8" { h3.projection_convrot_int8() } else { h3.projection_row_scaled_int8() }
+  let attention = if a == "exact" { session.Attention.Exact }
+    else if a == "donor_hybrid" { session.Attention.HybridExact3DenseInt8 }
+    else if a == "dense_i8" { session.Attention.DenseInt8 }
+    else { return result.err("attention must be exact, donor_hybrid or dense_i8") }
+  let attention_id = if a == "exact" { h3.attention_exact() }
+    else if a == "donor_hybrid" { h3.attention_donor_hybrid() } else { h3.attention_dense_int8() }
+  let schedule = if s == "simple" { session.Schedule.Simple }
+    else if s == "exponential" { session.Schedule.Exponential }
+    else { return result.err("schedule must be simple or exponential") }
+  let sampler = if m == "euler" { h3_policy.Sampler.Euler }
+    else if m == "res_multistep" { h3_policy.Sampler.ResMultistep }
+    else { return result.err("sampler must be euler or res_multistep") }
+  if r.evaluations == 0 or r.evaluations > 200 { return result.err("evaluations must be 1..200") }
+  // The request's profile only has to be a selected one for validation; the job takes the explicit
+  // evaluations, schedule and sampler above.
+  let profile_id = if s == "exponential" { h3.profile_dc_euler_19() }
+    else if m == "res_multistep" { h3.profile_donor_7() } else { h3.profile_quality_19() }
+  result.ok(Policy {conditioner: conditioner, transformer: transformer, attention: attention,
+    conditioner_id: conditioner_id, transformer_id: transformer_id, attention_id: attention_id,
+    schedule: schedule, sampler: sampler, profile_id: profile_id})
+}
+
+fn failed(message: str, seed: u64) -> Finished effects {alloc} {
+  Finished {succeeded: false, ran: false, output: string.new(), message: text.copy(message), seed: seed, runtime_ms: 0, peak_vram_bytes: 0}
+}
+
+fn exists(file: str) -> bool effects {fs.meta} {
+  match files.is_file(file) { ok(v) => v, err(_) => false, }
+}
+
+fn job_loras(r: ref<store.RenderRequest>) -> array<parameters.LoraEntry> effects {alloc} {
+  var out: array<parameters.LoraEntry> = []
+  var i: u64 = 0
+  loop {
+    if i >= array.len(struct.borrow(r, field=loras)) { break }
+    let l = array.borrow(struct.borrow(r, field=loras), i)
+    array.push(out, parameters.LoraEntry {path: string.copy(struct.borrow(l, field=path)), strength: l.strength, enabled: true})
+    i += 1
+  }
+  out
+}
+
+fn copy_paths(source: ref<array<string>>) -> array<string> effects {alloc} {
+  var out: array<string> = []
+  var i: u64 = 0
+  loop {
+    if i >= array.len(source) { break }
+    array.push(out, string.copy(array.borrow(source, i)))
+    i += 1
+  }
+  out
+}
+
+/// Test fixture (CPU only, never through a tool argument): a short ffmpeg test clip stands in for H3.
+fn fixture_take(output: str, width: u64, height: u64, seconds: f64) -> result<unit, string>
+    effects {alloc, fs.write, process} {
+  let size: string = text.concat(str.view(string.from_int(width)), text.concat("x", str.view(string.from_int(height))))
+  let duration: string = string.from_float(seconds)
+  match proc.check(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i",
+      text.concat("testsrc2=size=", text.concat(str.view(size), text.concat(":rate=24:duration=", str.view(duration)))),
+      "-f", "lavfi", "-i", text.concat("sine=frequency=440:sample_rate=48000:duration=", str.view(duration)),
+      "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", string.copy(output)]) {
+    ok(_) => {}, err(_) => { return result.err("fixture clip could not be made with ffmpeg") },
+  }
+  match files.write_text(str.view(text.concat(output, ".airh3ctx")), "fixture\n") {
+    ok(_) => result.ok(()), err(problem) => result.err(string.copy(problem.message)),
+  }
+}
+
+/// One shot, routed like the window's Queue take: continuation -> motion context on Base T2VA;
+/// references (cast + shot) -> Reference Ref2VA; first/last frame -> I2VA / FL2VA / L2VA; else T2VA.
+fn render_shot(configuration: ref<option<generation.Configuration>>, r: ref<store.RenderRequest>, p: ref<Policy>,
+               job_dir: str, status: ref<store.RenderStatus>, takes: str, id: u64) -> Finished
+    effects {alloc, env, fs.meta, fs.read, fs.write, gpu, io.write, net, process, thread, time} {
+ task.scope {
+  var project: movie.Project = match store.read(str.view(r.project)) { ok(v) => v, err(e) => { return failed(str.view(e), 0) }, }
+  let index: u64 = match store.shot_index(project, id) { ok(v) => v, err(e) => { return failed(str.view(e), 0) }, }
+  var shot: movie.Shot = movie.snapshot_shot(project, index)
+  match movie.validate(shot) { ok(_) => {}, err(e) => { return failed(str.view(e), 0) }, }
+  if shot.locked { return failed("Unlock the approved shot before queueing another take", 0) }
+  let prompt: string = movie.compile_project_prompt(project, index)
+  let continue_from: string = string.copy(struct.borrow(shot, field=continue_from))
+  let first: string = string.copy(struct.borrow(shot, field=first_frame))
+  let last: string = string.copy(struct.borrow(shot, field=last_frame))
+  var visual: array<string> = movie.effective_references(project, index)
+  var model_id: u32 = h3.model_base()
+  var task_id: u32 = h3.task_t2va()
+  var references: array<string> = []
+  if str.len(str.view(continue_from)) != 0 {
+    if not exists(str.view(continue_from)) {
+      return failed(text.concat("The continuation context is missing (render the source shot first): ", str.view(continue_from)), 0)
+    }
+  } else if array.len(visual) != 0 {
+    model_id = h3.model_reference()
+    task_id = h3.task_ref2va()
+    references = copy_paths(visual)
+  } else if str.len(str.view(first)) != 0 and str.len(str.view(last)) != 0 {
+    task_id = h3.task_fl2va()
+    references = [string.copy(str.view(first)), string.copy(str.view(last))]
+  } else if str.len(str.view(first)) != 0 {
+    task_id = h3.task_i2va()
+    references = [string.copy(str.view(first))]
+  } else if str.len(str.view(last)) != 0 {
+    task_id = h3.task_l2va()
+    references = [string.copy(str.view(last))]
+  }
+  var ri: u64 = 0
+  loop {
+    if ri >= array.len(references) { break }
+    if not exists(str.view(array.borrow(references, ri))) {
+      return failed(text.concat("Picture file is missing: ", str.view(array.borrow(references, ri))), 0)
+    }
+    ri += 1
+  }
+  let seed: u64 = if shot.seed < 0 { time.monotonic_ns() } else { cast.sat(shot.seed) }
+  let stem: string = text.concat("take-", str.view(string.from_int(time.monotonic_ns())))
+  let output: string = match library.unused_output(takes, str.view(stem), ".mp4") {
+    ok(v) => v, err(e) => { return failed(str.view(e), seed) },
+  }
+  var request: h3.Request = h3.request(str.view(prompt), model_id, task_id, p.profile_id,
+    p.conditioner_id, p.transformer_id, p.attention_id, cast.sat(seed), h3.resolution_custom(),
+    copy_paths(references), str.view(output))
+  match h3.set_geometry(request, shot.width, shot.height, shot.duration) {
+    ok(_) => {}, err(problem) => { var held = problem
+      return failed(str.view(h3.describe(held)), seed) },
+  }
+  match h3.validate(request) {
+    ok(_) => {}, err(problem) => { var held = problem
+      return failed(str.view(h3.describe(held)), seed) },
+  }
+  var loras: array<parameters.LoraEntry> = job_loras(r)
+  let parameters_json: string = match parameters.encode_h3(request, loras) {
+    ok(v) => v, err(e) => { return failed(str.view(e), seed) },
+  }
+  say(str.view(text.concat("movie-render: shot ", text.concat(str.view(string.from_int(id)),
+    text.concat(" output=", str.view(output))))))
+  let started: u64 = time.monotonic_ns()
+  if r.fixture {
+    match fixture_take(str.view(output), shot.width, shot.height, shot.duration) {
+      ok(_) => {}, err(e) => { return failed(str.view(e), seed) },
+    }
+    let _ = files.write_text(str.view(text.concat(str.view(output), ".json")), str.view(parameters_json))
+    return Finished {succeeded: true, ran: true, output: string.copy(str.view(output)), message: text.copy("Fixture take completed"),
+      seed: seed, runtime_ms: (time.monotonic_ns() - started) / 1000000, peak_vram_bytes: 0}
+  }
+  let config: ref<generation.Configuration> = match configuration {
+    some(v) => v, none => { return failed("H3 is not configured (MM_AIR_H3_* settings)", seed) },
+  }
+  var receiver: channel.Receiver = match channel.open(128, 1024) {
+    ok(v) => v, err(problem) => { var held = problem
+      return failed(str.view(channel.message(held)), seed) },
+  }
+  let model = if model_id == h3.model_base() { session.Model.Base } else { session.Model.Reference }
+  let task_kind = if task_id == h3.task_t2va() { session.Task.T2VA } else if task_id == h3.task_i2va() { session.Task.I2VA }
+    else if task_id == h3.task_fl2va() { session.Task.FL2VA } else if task_id == h3.task_l2va() { session.Task.L2VA }
+    else { session.Task.Ref2VA }
+  var job: generation.Job = generation.job_loras(config, str.view(prompt), model, task_kind, request.geometry,
+    copy_paths(references), [], str.view(output), loras, character_sheet.off(), "", seed, r.evaluations,
+    p.conditioner, p.transformer, p.attention, channel.ticket(receiver), p.schedule, p.sampler)
+  generation.set_windows(job, 124, 22, false, false)
+  if str.len(str.view(continue_from)) != 0 {
+    match generation.enable_motion_context(job, str.view(continue_from), shot.motion_context_frames, movie.output_frames(shot)) {
+      ok(_) => {}, err(e) => { let _ = channel.close(receiver)
+        return failed(str.view(e), seed) },
+    }
+    let drift = struct.borrow(r, field=drift)
+    match generation.enable_drift_control(job, drift.enabled, drift.matched_steps, drift.taper_steps, cast.float(drift.amount)) {
+      ok(_) => {}, err(e) => { let _ = channel.close(receiver)
+        return failed(str.view(e), seed) },
+    }
+  }
+  let window_frames: u64 = cast.sat(math.round(r.window_seconds * 24.0))
+  let overlap_frames: u64 = cast.sat(math.round(r.overlap_seconds * 24.0))
+  if model == session.Model.Base and request.geometry.frames > window_frames {
+    match generation.enable_windowed(job, window_frames, overlap_frames) {
+      ok(_) => {}, err(e) => { let _ = channel.close(receiver)
+        return failed(str.view(e), seed) },
+    }
+  }
+  var running: array<task<generation.Outcome>> = []
+  array.push(running, task.spawn(job, fn=generation.run))
+  var outcome: option<generation.Outcome> = option.none()
+  loop {
+    var drained: u64 = 0
+    loop {
+      if drained >= 128 { break }
+      drained += 1
+      match channel.recv_now(receiver, time.monotonic_ns()) {
+        ok(value) => match value {
+          some(item) => { var update: channel.Message = item
+            match channel.text_of(update) {
+              some(message) => {
+                say(str.view(text.concat("movie-render: ", str.view(message))))
+                struct.set(status, string.copy(str.view(message)), field=progress)
+                let _ = store.write_status(job_dir, status)
+              },
+              none => {},
+            } },
+          none => { break },
+        },
+        err(_) => { break },
+      }
+    }
+    match tasks.join_next(running, 500) { some(found) => { outcome = option.some(found)
+      break }, none => {}, }
+  }
+  let _ = channel.close(receiver)
+  var completed: generation.Outcome = option.unwrap(outcome)
+  if completed.succeeded {
+    let sidecar: string = text.concat(struct.borrow(completed, field=output), ".json")
+    let _ = files.write_atomic(str.view(sidecar), str.view(text.concat(str.view(sidecar), ".tmp")), str.view(parameters_json))
+  }
+  Finished {succeeded: completed.succeeded, ran: true, output: string.copy(struct.borrow(completed, field=output)),
+    message: string.copy(struct.borrow(completed, field=message)), seed: seed,
+    runtime_ms: if completed.runtime_ms != 0 { completed.runtime_ms } else { (time.monotonic_ns() - started) / 1000000 },
+    peak_vram_bytes: completed.peak_vram_bytes}
+ }
+}
+
+/// The take goes into the project as the window records it: a fresh read, record_take, atomic write.
+fn record(file: str, id: u64, done: ref<Finished>) -> result<unit, string> effects {alloc, fs.meta, fs.read, fs.write, time} {
+  var project: movie.Project = try store.read(file)
+  let index: u64 = try store.shot_index(project, id)
+  let taken: string = if done.succeeded { string.copy(struct.borrow(done, field=output)) } else { string.new() }
+  movie.record_take_at(project, index, str.view(taken),
+    done.seed, done.succeeded)
+  store.write(project, file)
+}
+
+fn initial_status(job: str, r: ref<store.RenderRequest>) -> store.RenderStatus effects {alloc, fs.meta, fs.read, time} {
+  var shots: array<store.ShotStatus> = []
+  var project: movie.Project = movie.create()
+  var have: bool = false
+  match store.read(str.view(r.project)) { ok(v) => { project = v
+    have = true }, err(_) => {}, }
+  var i: u64 = 0
+  loop {
+    if i >= array.len(struct.borrow(r, field=shots)) { break }
+    let id: u64 = array.get(struct.borrow(r, field=shots), i)
+    var title: string = string.new()
+    if have {
+      match store.shot_index(project, id) {
+        ok(at) => { title = string.copy(struct.borrow(array.borrow(struct.borrow(project, field=shots), at), field=title)) },
+        err(_) => {},
+      }
+    }
+    array.push(shots, store.ShotStatus {id: id, title: title, state: "queued", output: string.new(),
+      message: string.new(), runtime_ms: 0, peak_vram_bytes: 0})
+    i += 1
+  }
+  store.RenderStatus {schema: string.copy(store.status_schema()), job: path.basename(job), project: string.copy(str.view(r.project)),
+    state: "running", current_shot: -1, progress: string.new(), message: text.copy("Starting"),
+    started_ms: time.now_ms(), updated_ms: time.now_ms(), shots: shots}
+}
+
+pub fn main(args: view<str>) -> i32
+    effects {alloc, env, fs.meta, fs.read, fs.write, gpu, io.write, net, process, thread, time} {
+  if view.len(args) != 3 or view.get(args, 1) != "--job" {
+    io.ewrite("usage: mm-air-movie-render --job DIR\n")
+    return 2
+  }
+  let job: string = path.normalize(view.get(args, 2))
+  var r: store.RenderRequest = match store.read_request(str.view(job)) {
+    ok(v) => v, err(e) => { io.ewrite(str.view(text.concat("movie-render: request.json: ", str.view(e))))
+      io.ewrite("\n")
+      return 2 },
+  }
+  var status: store.RenderStatus = initial_status(str.view(job), r)
+  if r.schema != store.request_schema() {
+    struct.set(status, "failed", field=state)
+    struct.set(status, text.copy("request.json has an unknown schema"), field=message)
+    let _ = store.write_status(str.view(job), status)
+    return 2
+  }
+  var p: Policy = match policy_of(r) {
+    ok(v) => v, err(e) => { struct.set(status, "failed", field=state)
+      struct.set(status, e, field=message)
+      let _ = store.write_status(str.view(job), status)
+      return 2 },
+  }
+  if not path.is_absolute(str.view(r.takes)) {
+    struct.set(status, "failed", field=state)
+    struct.set(status, text.copy("request.json: takes must be an absolute folder"), field=message)
+    let _ = store.write_status(str.view(job), status)
+    return 2
+  }
+  let takes: string = string.copy(str.view(r.takes))
+  var configuration: option<generation.Configuration> = option.none()
+  if not r.fixture {
+    match generation.configuration() {
+      ok(v) => { configuration = option.some(v) },
+      err(e) => { struct.set(status, "failed", field=state)
+        struct.set(status, e, field=message)
+        let _ = store.write_status(str.view(job), status)
+        return 1 },
+    }
+  }
+  let _ = store.write_status(str.view(job), status)
+  say("movie-render: started")
+  var any_failed: bool = false
+  var stopped: bool = false
+  var i: u64 = 0
+  loop {
+    if i >= array.len(struct.borrow(r, field=shots)) { break }
+    if exists(str.view(store.stop_file(str.view(job)))) { stopped = true
+      break }
+    let id: u64 = array.get(struct.borrow(r, field=shots), i)
+    struct.set(status, cast.sat(id), field=current_shot)
+    struct.set(status, text.concat("Rendering shot ", str.view(string.from_int(id))), field=message)
+    struct.set(status, string.new(), field=progress)
+    struct.set(array.borrow(struct.borrow(status, field=shots), i), "running", field=state)
+    let _ = store.write_status(str.view(job), status)
+    var done: Finished = render_shot(configuration, r, p, str.view(job), status, str.view(takes), id)
+    let entry = array.borrow(struct.borrow(status, field=shots), i)
+    struct.set(entry, string.copy(struct.borrow(done, field=output)), field=output)
+    struct.set(entry, string.copy(struct.borrow(done, field=message)), field=message)
+    struct.set(entry, done.runtime_ms, field=runtime_ms)
+    struct.set(entry, done.peak_vram_bytes, field=peak_vram_bytes)
+    // A shot that never reached H3 (bad input) is not recorded as a take; a run that did is, as the window does.
+    let reached: bool = done.ran
+    match if reached { record(str.view(r.project), id, done) } else { result.ok(()) } {
+      ok(_) => {},
+      err(e) => { struct.set(entry, text.concat(struct.borrow(entry, field=message),
+        str.view(text.concat("; the take could not be written into the project: ", str.view(e)))), field=message)
+        any_failed = true },
+    }
+    struct.set(entry, if done.succeeded { "done" } else { "failed" }, field=state)
+    say(str.view(text.concat("movie-render: shot ", text.concat(str.view(string.from_int(id)),
+      text.concat(if done.succeeded { " done: " } else { " failed: " }, struct.borrow(done, field=message))))))
+    if not done.succeeded { any_failed = true
+      // Render all stops at the first failed take, as in the window.
+      i += 1
+      loop { if i >= array.len(struct.borrow(r, field=shots)) { break }
+        struct.set(array.borrow(struct.borrow(status, field=shots), i), "skipped", field=state)
+        i += 1 }
+      break }
+    i += 1
+  }
+  if stopped {
+    loop { if i >= array.len(struct.borrow(r, field=shots)) { break }
+      struct.set(array.borrow(struct.borrow(status, field=shots), i), "skipped", field=state)
+      i += 1 }
+  }
+  struct.set(status, -1, field=current_shot)
+  struct.set(status, if stopped { "stopped" } else if any_failed { "failed" } else { "done" }, field=state)
+  struct.set(status, text.copy(if stopped { "Stopped between shots" } else if any_failed { "A shot failed; later shots were not rendered" }
+    else { "Every shot rendered" }), field=message)
+  let _ = store.write_status(str.view(job), status)
+  say(str.view(text.concat("movie-render: ", struct.borrow(status, field=message))))
+  if any_failed { 1 } else { 0 }
+}

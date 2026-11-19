@@ -1,0 +1,220 @@
+// The Movie Maker project library as the MCP server and the render worker see it: where it lives, how a
+// project file is named, read and written. The window may have the same file open, so every change is a
+// fresh read, one edit and an atomic write (unique temporary file + rename).
+module app.mm_air.mcp.movie_store
+
+import std.codec as codec
+import std.files as files
+import std.json as json
+import std.path as path
+import std.system as system
+import std.text as text
+import "../movie_project.ai" as movie
+import "../runtime_config.ai" as runtime_config
+import "../library.ai" as library
+
+pub fn suffix() -> str effects {} { ".serenitymovie.json" }
+
+/// The output folder exactly as the window resolves it at start: MM_AIR_OUTPUT_ROOT (empty means the home
+/// folder), else the data folder's Output.
+pub fn output_root() -> result<string, string> effects {alloc, env, fs.read, fs.meta} {
+  let configured = try runtime_config.value("MM_AIR_OUTPUT_ROOT")
+  match configured {
+    some(value) => {
+      if str.len(text.trim(str.view(value))) == 0 {
+        return match system.home_directory() {
+          some(home) => result.ok(home),
+          none => result.ok(path.join(str.view(try library.data_directory()), "Output")),
+        }
+      }
+      result.ok(path.normalize(str.view(value)))
+    },
+    none => result.ok(path.join(str.view(try library.data_directory()), "Output")),
+  }
+}
+
+pub fn library_root(output: str) -> string effects {alloc} { path.join(output, "movies") }
+pub fn takes_root(output: str) -> string effects {alloc} { path.join(output, "movies/takes") }
+pub fn jobs_root(output: str) -> string effects {alloc} { path.join(output, "movies/.mcp-jobs") }
+
+fn inside(root: str, value: str) -> bool effects {alloc} {
+  let clean: string = path.normalize(value)
+  str.starts_with(str.view(clean), str.view(text.concat(root, "/")))
+}
+
+fn is_link(file: str) -> bool effects {fs.meta} {
+  match files.symlink_metadata(file) { ok(info) => info.is_symlink, err(_) => false, }
+}
+
+/// A project named by the caller: a file name in the library ("x" or "x.serenitymovie.json") or an
+/// absolute path inside it. Anything else is refused.
+pub fn project_path(root: str, name: str) -> result<string, string> effects {alloc} {
+  let trimmed: string = string.copy(text.trim(name))
+  if str.len(str.view(trimmed)) == 0 { return result.err("project is required (see movie_list)") }
+  if text.contains(str.view(trimmed), "\n") or text.contains(str.view(trimmed), "\r") {
+    return result.err("project must be one line")
+  }
+  var file: string = string.new()
+  if path.is_absolute(str.view(trimmed)) {
+    file = path.normalize(str.view(trimmed))
+  } else {
+    if text.contains(str.view(trimmed), "/") or text.contains(str.view(trimmed), "\\") or
+        str.starts_with(str.view(trimmed), ".") {
+      return result.err("project must be a file name in the movie library or an absolute path inside it")
+    }
+    file = path.join(root, str.view(trimmed))
+  }
+  if not text.ends_with(str.view(file), suffix()) { string.append(file, suffix()) }
+  if not inside(root, str.view(file)) { return result.err("project must be inside the movie library") }
+  if str.view(path.dirname(str.view(file))) != root {
+    return result.err("project must be directly in the movie library folder")
+  }
+  result.ok(file)
+}
+
+/// Read a project that must exist (movie.load makes a fresh one for a missing file; that is never wanted here).
+pub fn read(file: str) -> result<movie.Project, string> effects {alloc, fs.meta, fs.read} {
+  let present: bool = match files.is_file(file) { ok(value) => value, err(_) => false, }
+  if not present { return result.err(text.concat("No movie project file: ", file)) }
+  if is_link(file) { return result.err("The movie project is a symbolic link; refused") }
+  let payload: string = match files.read_text(file) {
+    ok(value) => value, err(problem) => { return result.err(string.copy(problem.message)) },
+  }
+  match movie.decode(payload) {
+    ok(value) => result.ok(value),
+    err(message) => result.err(text.concat(file, text.concat(": ", str.view(message)))),
+  }
+}
+
+/// Atomic write with a temporary name of its own, so the window's ".tmp" and ours never collide.
+pub fn write(project: ref<movie.Project>, file: str) -> result<unit, string> effects {alloc, fs.meta, fs.write, time} {
+  if is_link(file) { return result.err("The movie project is a symbolic link; refused") }
+  let payload: string = try movie.encode(project)
+  let temporary: string = text.concat(file, text.concat(".mcp-", text.concat(
+    str.view(string.from_int(time.monotonic_ns())), ".tmp")))
+  match files.write_atomic(file, str.view(temporary), str.view(payload)) {
+    ok(_) => result.ok(()), err(problem) => result.err(string.copy(problem.message)),
+  }
+}
+
+/// The project the window opens: current-project.txt in the library (a relative entry is relative to the
+/// home folder, where the launcher starts the window).
+pub fn current(root: str) -> string effects {alloc, env, fs.meta, fs.read} {
+  let pointer: string = path.join(root, "current-project.txt")
+  let value: string = match files.read_text(str.view(pointer)) {
+    ok(found) => string.copy(text.trim(str.view(found))), err(_) => { return string.new() },
+  }
+  if str.len(str.view(value)) == 0 { return string.new() }
+  if path.is_absolute(str.view(value)) { return path.normalize(str.view(value)) }
+  match system.home_directory() {
+    some(home) => path.normalize(str.view(path.join(str.view(home), str.view(value)))),
+    none => path.join(root, str.view(path.basename(str.view(value)))),
+  }
+}
+
+pub fn make_current(root: str, file: str) -> result<unit, string> effects {alloc, fs.meta, fs.write} {
+  movie.save_library_selection(root, file)
+}
+
+/// The index of the shot with this id.
+pub fn shot_index(project: ref<movie.Project>, id: u64) -> result<u64, string> effects {alloc} {
+  var i: u64 = 0
+  loop {
+    if i >= array.len(struct.borrow(project, field=shots)) { break }
+    if array.borrow(struct.borrow(project, field=shots), i).id == id { return result.ok(i) }
+    i += 1
+  }
+  result.err(text.concat("No shot with id ", str.view(string.from_int(id))))
+}
+
+/// True when the shot's selected take is a finished one (what Render all and Assemble use).
+pub fn has_finished_take(shot: ref<movie.Shot>) -> bool effects {} {
+  let at: u64 = cast.wrap(shot.selected_take)
+  if shot.selected_take < 0 or at >= array.len(struct.borrow(shot, field=takes)) { return false }
+  let take = array.borrow(struct.borrow(shot, field=takes), at)
+  struct.borrow(take, field=state) == "done" and str.len(struct.borrow(take, field=output)) != 0
+}
+
+pub fn finish(w: codec.Writer own) -> string effects {alloc} {
+  match codec.finish(w) { ok(v) => v, err(_) => text.copy("{}"), }
+}
+
+/// Is `value` a JSON object document?
+pub fn is_object(raw: str) -> bool effects {alloc} {
+  var d: json.Document = match json.parse(raw) { ok(v) => v, err(_) => { return false }, }
+  match json.kind(d, 0) { some(k) => k == json.Kind.Object, none => false, }
+}
+
+// ------------------------------------------------------------------ render job files
+// A render job is one folder under movies/.mcp-jobs: request.json (what to render, written by the server),
+// status.json (written by the worker as it goes), log (the worker's output), pid files and an optional stop file.
+
+pub type Lora = struct {path: string, strength: f64} derive codec(strict)
+pub type Drift = struct {enabled: bool, matched_steps: u64, taper_steps: u64, amount: f64} derive codec(strict)
+pub type RenderRequest = struct {
+  schema: string, project: string, takes: string, shots: array<u64>,
+  conditioner_projection: string, transformer_projection: string, attention: string,
+  evaluations: u64, schedule: string, sampler: string,
+  window_seconds: f64, overlap_seconds: f64, drift: Drift, loras: array<Lora>, fixture: bool
+} derive codec(strict)
+pub type ShotStatus = struct {
+  id: u64, title: string, state: string, output: string, message: string, runtime_ms: u64, peak_vram_bytes: u64
+} derive codec(strict)
+pub type RenderStatus = struct {
+  schema: string, job: string, project: string, state: string, current_shot: i64, progress: string,
+  message: string, started_ms: u64, updated_ms: u64, shots: array<ShotStatus>
+} derive codec(strict)
+
+pub fn request_schema() -> str effects {} { "mm-air.movie-render.request.v1" }
+pub fn status_schema() -> str effects {} { "mm-air.movie-render.status.v1" }
+pub fn request_file(job: str) -> string effects {alloc} { path.join(job, "request.json") }
+pub fn status_file(job: str) -> string effects {alloc} { path.join(job, "status.json") }
+pub fn log_file(job: str) -> string effects {alloc} { path.join(job, "log") }
+pub fn stop_file(job: str) -> string effects {alloc} { path.join(job, "stop-after-shot") }
+/// The worker's own process-group record (std.process target format), written just before it starts.
+pub fn worker_root(job: str) -> string effects {alloc} { path.join(job, "worker") }
+
+pub fn read_request(job: str) -> result<RenderRequest, string> effects {alloc, fs.read} {
+  let body: string = match files.read_text(str.view(request_file(job))) {
+    ok(v) => v, err(problem) => { return result.err(string.copy(problem.message)) },
+  }
+  match RenderRequest_decode(str.view(body)) {
+    ok(v) => result.ok(v), err(problem) => result.err(codec.describe(problem)),
+  }
+}
+
+pub fn read_status(job: str) -> result<RenderStatus, string> effects {alloc, fs.read} {
+  let body: string = match files.read_text(str.view(status_file(job))) {
+    ok(v) => v, err(problem) => { return result.err(string.copy(problem.message)) },
+  }
+  match RenderStatus_decode(str.view(body)) {
+    ok(v) => result.ok(v), err(problem) => result.err(codec.describe(problem)),
+  }
+}
+
+pub fn encode_status(value: ref<RenderStatus>) -> string effects {alloc} {
+  match RenderStatus_encode(value) { ok(v) => v, err(_) => text.copy("{}"), }
+}
+
+pub fn write_status(job: str, value: ref<RenderStatus>) -> result<unit, string> effects {alloc, fs.write, time} {
+  struct.set(value, time.now_ms(), field=updated_ms)
+  let body: string = match RenderStatus_encode(value) {
+    ok(v) => v, err(problem) => { return result.err(codec.describe(problem)) },
+  }
+  let file: string = status_file(job)
+  let temporary: string = text.concat(str.view(file), text.concat(".", text.concat(
+    str.view(string.from_int(time.monotonic_ns())), ".tmp")))
+  match files.write_atomic(str.view(file), str.view(temporary), str.view(body)) {
+    ok(_) => result.ok(()), err(problem) => result.err(string.copy(problem.message)),
+  }
+}
+
+pub fn write_request(job: str, value: ref<RenderRequest>) -> result<unit, string> effects {alloc, fs.write, time} {
+  let body: string = match RenderRequest_encode(value) {
+    ok(v) => v, err(problem) => { return result.err(codec.describe(problem)) },
+  }
+  let file: string = request_file(job)
+  match files.write_atomic(str.view(file), str.view(text.concat(str.view(file), ".tmp")), str.view(body)) {
+    ok(_) => result.ok(()), err(problem) => result.err(string.copy(problem.message)),
+  }
+}

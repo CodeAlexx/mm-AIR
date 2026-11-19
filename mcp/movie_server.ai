@@ -1,0 +1,1199 @@
+// Native stdio MCP server for MM-Air's Movie Maker. Movie semantics stay in movie_project.ai (the same
+// file format, prompt compiler, take records and stitch the window uses); rendering runs in the separate
+// mm-air-movie-render worker under the GPU guard. This file is the thin protocol layer over both.
+//
+//   mm-air-movie-mcp [--allow-render] [--output-root DIR] [--gpu-run FILE] [--render-bin FILE] [--cuda-lib DIRS]
+module app.mm_air.mcp.movie_server
+
+import std.codec as codec
+import std.files as files
+import std.json as json
+import std.lines as lines
+import std.math as math
+import std.path as path
+import std.process as proc
+import std.system as system
+import std.text as text
+import std.inference.h3.request as h3
+import "../movie_project.ai" as movie
+import "../library.ai" as library
+import "movie_store.ai" as store
+
+type State = struct {
+  output_root: string, library: string, jobs: string, takes: string,
+  gpu_run: string, render_bin: string, cuda_lib: string, scratch: string,
+  allow_render: bool, fixture: bool, initialized: bool, startup: array<string>
+}
+
+fn finish(w: codec.Writer own) -> string effects {alloc} { store.finish(w) }
+
+fn problem(code: str, message: str) -> string effects {alloc} {
+  var w: codec.Writer = codec.writer()
+  codec.begin_object(w)
+  codec.field_text(w, "code", code)
+  codec.field_text(w, "message", message)
+  codec.end_object(w)
+  finish(w)
+}
+
+fn compact(raw: str) -> string effects {alloc} {
+  var d: json.Document = match json.parse(raw) { ok(v) => v, err(_) => { return text.copy("null") }, }
+  json.stringify(d)
+}
+
+fn is_kind(d: ref<json.Document>, node: u64, expected: json.Kind) -> bool effects {} {
+  match json.kind(d, node) { some(v) => v == expected, none => false, }
+}
+
+// ------------------------------------------------------------------ arguments
+
+fn member(d: ref<json.Document>, object: u64, key: str) -> option<u64> effects {alloc} { json.get(d, object, key) }
+
+fn only_keys(d: ref<json.Document>, object: u64, allowed: ref<array<string>>, where: str) -> result<unit, string> effects {alloc} {
+  var keys: array<string> = match json.keys(d, object) { some(v) => v, none => { return result.err(text.concat(where, " must be an object")) }, }
+  var i: u64 = 0
+  loop {
+    if i >= array.len(keys) { break }
+    var known: bool = false
+    var j: u64 = 0
+    loop { if j >= array.len(allowed) { break }
+      if array.borrow(keys, i) == array.borrow(allowed, j) { known = true }
+      j += 1 }
+    if not known {
+      return result.err(text.concat("Unknown field in ", text.concat(where, text.concat(": ", str.view(array.borrow(keys, i))))))
+    }
+    i += 1
+  }
+  result.ok(())
+}
+
+fn text_arg(d: ref<json.Document>, object: u64, key: str) -> result<option<string>, string> effects {alloc} {
+  match member(d, object, key) {
+    none => result.ok(option.none()),
+    some(n) => match json.as_string(d, n) {
+      some(v) => { if not is_kind(d, n, json.Kind.String) { return result.err(text.concat(key, " must be text")) }
+        result.ok(option.some(v)) },
+      none => result.err(text.concat(key, " must be text")),
+    },
+  }
+}
+
+fn text_or(d: ref<json.Document>, object: u64, key: str, fallback: str) -> result<string, string> effects {alloc} {
+  match try text_arg(d, object, key) { some(v) => result.ok(v), none => result.ok(text.copy(fallback)), }
+}
+
+fn u64_arg(d: ref<json.Document>, object: u64, key: str) -> result<option<u64>, string> effects {alloc} {
+  match member(d, object, key) {
+    none => result.ok(option.none()),
+    some(n) => { if not is_kind(d, n, json.Kind.Number) { return result.err(text.concat(key, " must be a whole number")) }
+      match json.as_u64(d, n) { some(v) => result.ok(option.some(v)),
+        none => result.err(text.concat(key, " must be a whole number of zero or more")), } },
+  }
+}
+
+fn i64_arg(d: ref<json.Document>, object: u64, key: str) -> result<option<i64>, string> effects {alloc} {
+  match member(d, object, key) {
+    none => result.ok(option.none()),
+    some(n) => { if not is_kind(d, n, json.Kind.Number) { return result.err(text.concat(key, " must be a whole number")) }
+      match json.as_i64(d, n) { some(v) => result.ok(option.some(v)), none => result.err(text.concat(key, " must be a whole number")), } },
+  }
+}
+
+fn f64_arg(d: ref<json.Document>, object: u64, key: str) -> result<option<f64>, string> effects {alloc} {
+  match member(d, object, key) {
+    none => result.ok(option.none()),
+    some(n) => { if not is_kind(d, n, json.Kind.Number) { return result.err(text.concat(key, " must be a number")) }
+      match json.as_f64(d, n) { some(v) => { if not math.is_finite(v) { return result.err(text.concat(key, " must be finite")) }
+          result.ok(option.some(v)) },
+        none => result.err(text.concat(key, " must be a number")), } },
+  }
+}
+
+fn bool_arg(d: ref<json.Document>, object: u64, key: str) -> result<option<bool>, string> effects {alloc} {
+  match member(d, object, key) {
+    none => result.ok(option.none()),
+    some(n) => match json.as_bool(d, n) { some(v) => result.ok(option.some(v)), none => result.err(text.concat(key, " must be true or false")), },
+  }
+}
+
+fn text_list(d: ref<json.Document>, n: u64, key: str) -> result<array<string>, string> effects {alloc} {
+  if not is_kind(d, n, json.Kind.Array) { return result.err(text.concat(key, " must be a list of text")) }
+  var out: array<string> = []
+  var item: option<u64> = json.first_item(d, n)
+  loop {
+    match item {
+      none => { break },
+      some(at) => {
+        if not is_kind(d, at, json.Kind.String) { return result.err(text.concat(key, " must be a list of text")) }
+        array.push(out, option.unwrap(json.as_string(d, at)))
+        item = json.next_item(d, n, at)
+      },
+    }
+  }
+  result.ok(out)
+}
+
+fn id_list(d: ref<json.Document>, n: u64, key: str) -> result<array<u64>, string> effects {alloc} {
+  if not is_kind(d, n, json.Kind.Array) { return result.err(text.concat(key, " must be a list of shot ids")) }
+  var out: array<u64> = []
+  var item: option<u64> = json.first_item(d, n)
+  loop {
+    match item {
+      none => { break },
+      some(at) => {
+        let value: u64 = match json.as_u64(d, at) { some(v) => v, none => { return result.err(text.concat(key, " must be a list of shot ids")) }, }
+        array.push(out, value)
+        item = json.next_item(d, n, at)
+      },
+    }
+  }
+  result.ok(out)
+}
+
+fn existing_file(value: str, what: str) -> result<unit, string> effects {alloc, fs.meta} {
+  if not path.is_absolute(value) { return result.err(text.concat(what, text.concat(" must be an absolute path: ", value))) }
+  let found: bool = match files.is_file(value) { ok(v) => v, err(_) => false, }
+  if not found { return result.err(text.concat(what, text.concat(" does not exist: ", value))) }
+  result.ok(())
+}
+
+// ------------------------------------------------------------------ project access
+
+fn project_file(s: ref<State>, d: ref<json.Document>) -> result<string, string> effects {alloc} {
+  let name: string = match try text_arg(d, 0, "project") { some(v) => v, none => { return result.err("project is required (see movie_list)") }, }
+  store.project_path(str.view(s.library), str.view(name))
+}
+
+fn shot_id(d: ref<json.Document>) -> result<u64, string> effects {alloc} {
+  match try u64_arg(d, 0, "shot") { some(v) => result.ok(v), none => result.err("shot is required: a shot id (see movie_inspect)"), }
+}
+
+// ------------------------------------------------------------------ jobs
+
+fn job_number(name: str) -> u64 effects {alloc} {
+  match text.parse_u64(str.slice(name, 4, str.len(name))) { some(v) => v, none => 0, }
+}
+
+fn job_names(s: ref<State>) -> array<string> effects {alloc, fs.meta} {
+  var names: array<string> = match files.list_dir(str.view(s.jobs)) { ok(v) => v, err(_) => { return [] }, }
+  var out: array<string> = []
+  var i: u64 = 0
+  loop { if i >= array.len(names) { break }
+    if str.starts_with(str.view(array.borrow(names, i)), "job-") { array.push(out, string.copy(array.borrow(names, i))) }
+    i += 1 }
+  // newest last (job-<ms>, same width for centuries)
+  var a: u64 = 0
+  loop { if a >= array.len(out) { break }
+    var b: u64 = a + 1
+    loop { if b >= array.len(out) { break }
+      if job_number(str.view(array.borrow(out, b))) < job_number(str.view(array.borrow(out, a))) { array.swap(out, a, b) }
+      b += 1 }
+    a += 1 }
+  out
+}
+
+fn job_alive(dir: str) -> bool effects {alloc, fs.read, process} {
+  proc.alive(dir) or proc.alive(str.view(store.worker_root(dir)))
+}
+
+fn unfinished(state: str) -> bool effects {} { state == "waiting" or state == "running" }
+
+/// The job's status with liveness folded in: a job whose processes are gone while it still says
+/// waiting/running ended without finishing (killed, stopped, or the machine restarted).
+fn job_status(dir: str) -> result<store.RenderStatus, string> effects {alloc, fs.read, process} {
+  var status: store.RenderStatus = try store.read_status(dir)
+  if unfinished(str.view(status.state)) and not job_alive(dir) {
+    struct.set(status, "ended", field=state)
+    struct.set(status, text.copy("The render process ended without finishing (stopped, killed or restarted)"), field=message)
+    var i: u64 = 0
+    loop { if i >= array.len(struct.borrow(status, field=shots)) { break }
+      let e = array.borrow(struct.borrow(status, field=shots), i)
+      if struct.borrow(e, field=state) == "running" or struct.borrow(e, field=state) == "queued" {
+        struct.set(e, "not rendered", field=state) }
+      i += 1 }
+  }
+  result.ok(status)
+}
+
+/// The active job, if any (the newest one still waiting or running with a live process).
+fn active_job(s: ref<State>) -> option<string> effects {alloc, fs.meta, fs.read, process} {
+  var names: array<string> = job_names(s)
+  var i: u64 = array.len(names)
+  loop { if i == 0 { break }
+    i -= 1
+    let dir: string = path.join(str.view(s.jobs), str.view(array.borrow(names, i)))
+    match job_status(str.view(dir)) {
+      ok(st) => { if unfinished(str.view(st.state)) { return option.some(dir) } },
+      err(_) => { if proc.alive(str.view(dir)) { return option.some(dir) } },
+    }
+  }
+  option.none()
+}
+
+/// Shots of `file` still queued or rendering in the active job (they may not be deleted or changed).
+fn busy_shots(s: ref<State>, file: str) -> array<u64> effects {alloc, fs.meta, fs.read, process} {
+  var out: array<u64> = []
+  match active_job(s) {
+    none => {},
+    some(dir) => match job_status(str.view(dir)) {
+      ok(st) => { if str.view(st.project) == file {
+        var i: u64 = 0
+        loop { if i >= array.len(struct.borrow(st, field=shots)) { break }
+          let e = array.borrow(struct.borrow(st, field=shots), i)
+          if struct.borrow(e, field=state) == "queued" or struct.borrow(e, field=state) == "running" { array.push(out, e.id) }
+          i += 1 } } },
+      err(_) => {},
+    },
+  }
+  out
+}
+
+fn contains_id(values: ref<array<u64>>, id: u64) -> bool effects {} {
+  var i: u64 = 0
+  loop { if i >= array.len(values) { break }
+    if array.get(values, i) == id { return true }
+    i += 1 }
+  false
+}
+
+fn job_dir(s: ref<State>, d: ref<json.Document>) -> result<string, string> effects {alloc, fs.meta} {
+  match try text_arg(d, 0, "job") {
+    some(name) => {
+      if not str.starts_with(str.view(name), "job-") or text.contains(str.view(name), "/") {
+        return result.err("job must be a job name from movie_render or movie_status") }
+      let dir: string = path.join(str.view(s.jobs), str.view(name))
+      let found: bool = match files.is_dir(str.view(dir)) { ok(v) => v, err(_) => false, }
+      if not found { return result.err(text.concat("No render job named ", str.view(name))) }
+      result.ok(dir)
+    },
+    none => {
+      var names: array<string> = job_names(s)
+      if array.len(names) == 0 { return result.err("No render job yet") }
+      result.ok(path.join(str.view(s.jobs), str.view(array.borrow(names, array.len(names) - 1))))
+    },
+  }
+}
+
+// ------------------------------------------------------------------ JSON views
+
+fn shot_state(shot: ref<movie.Shot>) -> str effects {} {
+  if store.has_finished_take(shot) { return "rendered" }
+  if shot.selected_take >= 0 { return "failed" }
+  "unrendered"
+}
+
+fn write_shot(w: ref<codec.Writer>, project: ref<movie.Project>, index: u64, full: bool) -> unit effects {alloc} {
+  var shot: movie.Shot = movie.snapshot_shot(project, index)
+  codec.begin_object(w)
+  codec.field_u64(w, "id", shot.id)
+  codec.field_u64(w, "position", index + 1)
+  codec.field_text(w, "title", struct.borrow(shot, field=title))
+  codec.field_text(w, "state", shot_state(shot))
+  codec.field_text(w, "mode", str.view(movie.mode_label(shot)))
+  codec.field_f64(w, "duration_seconds", shot.duration)
+  codec.field_u64(w, "frames", movie.output_frames(shot))
+  codec.field_u64(w, "width", shot.width)
+  codec.field_u64(w, "height", shot.height)
+  codec.field_i64(w, "seed", shot.seed)
+  codec.field_bool(w, "locked", shot.locked)
+  if full {
+    codec.field_u64(w, "steps", shot.steps)
+    codec.field_text(w, "brief", struct.borrow(shot, field=brief))
+    codec.field_text(w, "shot_description", struct.borrow(shot, field=plan))
+    codec.field_text(w, "soundscape", struct.borrow(shot, field=soundscape))
+    codec.field_text(w, "music", struct.borrow(shot, field=music))
+    codec.field_text(w, "prompt_override", struct.borrow(shot, field=prompt_override))
+    codec.field_text(w, "first_frame", struct.borrow(shot, field=first_frame))
+    codec.field_text(w, "last_frame", struct.borrow(shot, field=last_frame))
+    codec.field_text(w, "continue_from", struct.borrow(shot, field=continue_from))
+    codec.field_u64(w, "motion_context_frames", shot.motion_context_frames)
+    codec.field_text_array(w, "references", struct.borrow(shot, field=references))
+    codec.key(w, "takes")
+    codec.begin_array(w)
+    var i: u64 = 0
+    loop { if i >= array.len(struct.borrow(shot, field=takes)) { break }
+      let t = array.borrow(struct.borrow(shot, field=takes), i)
+      codec.begin_object(w)
+      codec.field_u64(w, "take", i)
+      codec.field_text(w, "state", struct.borrow(t, field=state))
+      codec.field_text(w, "output", struct.borrow(t, field=output))
+      codec.field_u64(w, "seed", t.seed)
+      codec.end_object(w)
+      i += 1 }
+    codec.end_array(w)
+    codec.field_i64(w, "selected_take", shot.selected_take)
+    codec.field_text(w, "prompt", str.view(movie.compile_project_prompt(project, index)))
+    match movie.validate(shot) {
+      ok(_) => { codec.field_text(w, "problem", "") },
+      err(e) => { codec.field_text(w, "problem", str.view(e)) },
+    }
+  }
+  codec.end_object(w)
+}
+
+fn project_summary(w: ref<codec.Writer>, project: ref<movie.Project>) -> unit effects {alloc} {
+  codec.field_text(w, "title", struct.borrow(project, field=title))
+  codec.field_u64(w, "shots", array.len(struct.borrow(project, field=shots)))
+  codec.field_f64(w, "total_seconds", movie.total_seconds(project))
+  codec.field_f64(w, "rendered_seconds", movie.completed_seconds(project))
+}
+
+// ------------------------------------------------------------------ editing
+
+fn set_text_field(shot: ref<movie.Shot>, key: str, value: string own) -> unit effects {alloc} {
+  var v: string = value
+  if key == "title" { let _ = ref.swap(struct.borrow(shot, field=title), v) }
+  else if key == "brief" { let _ = ref.swap(struct.borrow(shot, field=brief), v) }
+  else if key == "shot_description" { let _ = ref.swap(struct.borrow(shot, field=plan), v) }
+  else if key == "soundscape" { let _ = ref.swap(struct.borrow(shot, field=soundscape), v) }
+  else if key == "music" { let _ = ref.swap(struct.borrow(shot, field=music), v) }
+  else if key == "prompt_override" { let _ = ref.swap(struct.borrow(shot, field=prompt_override), v) }
+  else if key == "first_frame" { let _ = ref.swap(struct.borrow(shot, field=first_frame), v) }
+  else if key == "last_frame" { let _ = ref.swap(struct.borrow(shot, field=last_frame), v) }
+  else if key == "continue_from" { let _ = ref.swap(struct.borrow(shot, field=continue_from), v) }
+  ()
+}
+
+fn shot_keys() -> array<string> effects {alloc} {
+  ["title", "brief", "shot_description", "soundscape", "music", "prompt_override", "first_frame", "last_frame",
+   "continue_from", "duration_seconds", "width", "height", "steps", "seed", "motion_context_frames", "references",
+   "locked", "selected_take"]
+}
+
+/// Apply a `fields` object to one shot; everything is checked before the caller writes the file.
+fn apply_fields(d: ref<json.Document>, fields: u64, shot: ref<movie.Shot>) -> result<unit, string> effects {alloc, fs.meta} {
+  var allowed: array<string> = shot_keys()
+  try only_keys(d, fields, allowed, "fields")
+  var texts: array<string> = ["title", "brief", "shot_description", "soundscape", "music", "prompt_override",
+    "first_frame", "last_frame", "continue_from"]
+  var i: u64 = 0
+  loop { if i >= array.len(texts) { break }
+    let key: str = str.view(array.borrow(texts, i))
+    match try text_arg(d, fields, key) {
+      some(v) => {
+        if (key == "first_frame" or key == "last_frame") and str.len(str.view(v)) != 0 { let _ = try existing_file(str.view(v), key) }
+        if key == "continue_from" and str.len(str.view(v)) != 0 {
+          if not text.ends_with(str.view(v), ".airh3ctx") { return result.err("continue_from must be a take's .airh3ctx file (or use movie_add_shot with continue_from_shot)") }
+          let _ = try existing_file(str.view(v), key)
+        }
+        set_text_field(shot, key, v)
+      },
+      none => {},
+    }
+    i += 1 }
+  match try f64_arg(d, fields, "duration_seconds") { some(v) => {
+    if v <= 0.0 { return result.err("duration_seconds must be more than zero") }
+    struct.set(shot, v, field=duration) }, none => {}, }
+  match try u64_arg(d, fields, "width") { some(v) => { struct.set(shot, v, field=width) }, none => {}, }
+  match try u64_arg(d, fields, "height") { some(v) => { struct.set(shot, v, field=height) }, none => {}, }
+  match try u64_arg(d, fields, "steps") { some(v) => { struct.set(shot, v, field=steps) }, none => {}, }
+  match try i64_arg(d, fields, "seed") { some(v) => {
+    if v < -1 { return result.err("seed must be -1 (random) or zero or more") }
+    struct.set(shot, v, field=seed) }, none => {}, }
+  match try u64_arg(d, fields, "motion_context_frames") { some(v) => { struct.set(shot, v, field=motion_context_frames) }, none => {}, }
+  match try bool_arg(d, fields, "locked") { some(v) => { struct.set(shot, v, field=locked) }, none => {}, }
+  match member(d, fields, "references") {
+    some(n) => {
+      var refs: array<string> = try text_list(d, n, "references")
+      if array.len(refs) > 12 { return result.err("A shot takes at most 12 references") }
+      var r: u64 = 0
+      loop { if r >= array.len(refs) { break }
+        try existing_file(str.view(array.borrow(refs, r)), "reference")
+        r += 1 }
+      let _ = ref.swap(struct.borrow(shot, field=references), refs)
+    },
+    none => {},
+  }
+  match try i64_arg(d, fields, "selected_take") { some(v) => {
+    let at: u64 = cast.wrap(v)
+    if v < -1 or (v >= 0 and at >= array.len(struct.borrow(shot, field=takes))) {
+      return result.err("selected_take must be -1 or the number of one of the shot's takes") }
+    struct.set(shot, v, field=selected_take) }, none => {}, }
+  match h3.geometry_for(shot.width, shot.height, shot.duration) {
+    ok(_) => {}, err(p) => { var held = p
+      return result.err(text.concat("This size and duration cannot be rendered: ", str.view(h3.describe(held)))) },
+  }
+  result.ok(())
+}
+
+fn shot_keys_known() -> array<string> effects {alloc} {
+  ["id", "title", "duration_seconds", "width", "height", "steps", "seed", "brief", "shot_description", "soundscape",
+   "music", "prompt_override", "first_frame", "last_frame", "continue_from", "motion_context_frames", "references",
+   "takes", "take_job_ids", "take_states", "take_output_paths", "selected_take", "status", "output_path", "locked"]
+}
+
+fn project_keys_known() -> array<string> effects {alloc} {
+  ["schema", "title", "project_kind", "delivery_fps", "adult_mode", "caption_tier", "target_duration_seconds",
+   "takes_per_shot", "director_brief", "continuity_bible", "brand_bible", "assets", "characters",
+   "cast_replaces_identities", "next_character_id", "endless_target_seconds", "endless_segment_seconds",
+   "endless_active", "shots", "next_shot_id"]
+}
+
+/// The window's reader needs a references list on every shot; a body that leaves it out means none.
+fn with_references(d: ref<json.Document>, node: u64) -> result<string, string> effects {alloc} {
+  var keys: array<string> = match json.keys(d, node) { some(v) => v, none => { return result.err("project_json must be an object") }, }
+  var values: array<string> = []
+  var k: u64 = 0
+  loop { if k >= array.len(keys) { break }
+    let key: str = str.view(array.borrow(keys, k))
+    let at: u64 = option.unwrap(member(d, node, key))
+    if key == "shots" {
+      var shots: string = text.copy("[")
+      var item: option<u64> = json.first_item(d, at)
+      var first: bool = true
+      loop { match item { none => { break }, some(one) => {
+        if not first { string.append(shots, ",") }
+        first = false
+        var raw: string = option.unwrap(json.raw(d, one))
+        if not option.is_some(member(d, one, "references")) {
+          let body: string = text.copy(str.slice(str.view(raw), 0, str.len(str.view(raw)) - 1))
+          let empty: bool = str.len(text.trim(str.slice(str.view(body), 1, str.len(str.view(body))))) == 0
+          raw = text.concat(str.view(body), if empty { "\"references\":[]}" } else { ",\"references\":[]}" })
+        }
+        string.append(shots, str.view(raw))
+        item = json.next_item(d, at, one) }, } }
+      string.append(shots, "]")
+      array.push(values, shots)
+    } else {
+      array.push(values, option.unwrap(json.raw(d, at)))
+    }
+    k += 1 }
+  match json.encode_object(keys, values) { ok(v) => result.ok(v), err(e) => result.err(json.error_message(e)), }
+}
+
+/// A project body the caller wrote: no unknown fields (a typo would be silently dropped otherwise),
+/// the movie schema, shots with distinct ids and renderable sizes.
+fn checked_body(d: ref<json.Document>, node: u64) -> result<movie.Project, string> effects {alloc} {
+  if not is_kind(d, node, json.Kind.Object) { return result.err("project_json must be an object") }
+  var known: array<string> = project_keys_known()
+  try only_keys(d, node, known, "the project")
+  match member(d, node, "schema") { none => { return result.err("The project needs \"schema\": \"serenity.h3.movie.v1\"") }, some(_) => {}, }
+  match member(d, node, "shots") {
+    none => { return result.err("The project needs a shots list") },
+    some(list) => {
+      if not is_kind(d, list, json.Kind.Array) { return result.err("shots must be a list") }
+      var shot_known: array<string> = shot_keys_known()
+      var item: option<u64> = json.first_item(d, list)
+      var position: u64 = 1
+      loop { match item { none => { break }, some(at) => {
+        try only_keys(d, at, shot_known, str.view(text.concat("shot ", str.view(string.from_int(position)))))
+        item = json.next_item(d, list, at)
+        position += 1 }, } }
+    },
+  }
+  let raw: string = try with_references(d, node)
+  var project: movie.Project = try movie.decode(raw)
+  var i: u64 = 0
+  loop { if i >= array.len(struct.borrow(project, field=shots)) { break }
+    let current_id: u64 = array.borrow(struct.borrow(project, field=shots), i).id
+    let width: u64 = array.borrow(struct.borrow(project, field=shots), i).width
+    let height: u64 = array.borrow(struct.borrow(project, field=shots), i).height
+    let seconds: f64 = array.borrow(struct.borrow(project, field=shots), i).duration
+    let title: string = string.copy(struct.borrow(array.borrow(struct.borrow(project, field=shots), i), field=title))
+    var j: u64 = i + 1
+    loop { if j >= array.len(struct.borrow(project, field=shots)) { break }
+      if array.borrow(struct.borrow(project, field=shots), j).id == current_id {
+        return result.err(text.concat("Two shots have id ", str.view(string.from_int(current_id)))) }
+      j += 1 }
+    if current_id >= project.next_shot_id { struct.set(project, current_id + 1, field=next_shot_id) }
+    match h3.geometry_for(width, height, seconds) {
+      ok(_) => {}, err(p) => { var held = p
+        return result.err(text.concat(str.view(title), text.concat(": ", str.view(h3.describe(held))))) },
+    }
+    i += 1 }
+  result.ok(project)
+}
+
+fn name_of(file: str) -> string effects {alloc} {
+  let base: string = path.basename(file)
+  if text.ends_with(str.view(base), store.suffix()) {
+    return text.copy(str.slice(str.view(base), 0, str.len(str.view(base)) - str.len(store.suffix())))
+  }
+  base
+}
+
+// ------------------------------------------------------------------ rendering
+
+fn policy_text(d: ref<json.Document>, key: str, allowed: ref<array<string>>) -> result<string, string> effects {alloc} {
+  let value: string = match try text_arg(d, 0, key) {
+    some(v) => v, none => { return result.err(text.concat(key, " is required (MM-Air never picks it for you)")) },
+  }
+  var i: u64 = 0
+  loop { if i >= array.len(allowed) { break }
+    if str.view(value) == str.view(array.borrow(allowed, i)) { return result.ok(string.copy(str.view(value))) }
+    i += 1 }
+  result.err(text.concat(key, text.concat(" must be one of: ", str.view(text.join(allowed, ", ")))))
+}
+
+fn launch(s: ref<State>, dir: str) -> result<unit, string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  // The launcher records its process group so movie_stop can reach every process of the job. Under the GPU
+  // guard the worker gets a session of its own, so it records its group too (dir/worker/pid).
+  // spawn_detached's process is not a group leader, so the launcher starts its own session first.
+  let launcher: str = "exec setsid /bin/sh -c 'd=$1; shift; echo \"-$$\" > \"$d/pid\"; exec \"$@\" > \"$d/launcher.log\" 2>&1' mm-air-movie-session \"$@\""
+  var argv: array<string> = [text.copy("/bin/sh"), text.copy("-c"), text.copy(launcher), text.copy("mm-air-movie"), text.copy(dir)]
+  let log: string = store.log_file(dir)
+  let worker: string = store.worker_root(dir)
+  match files.mkdirs(str.view(worker)) { ok(_) => {}, err(problem) => { return result.err(string.copy(problem.message)) }, }
+  match files.mkdirs(str.view(s.scratch)) { ok(_) => {}, err(_) => {}, }
+  if s.fixture {
+    array.push(argv, text.copy("/bin/sh"))
+    array.push(argv, text.copy("-c"))
+    array.push(argv, text.copy("w=$1; l=$2; shift 2; echo \"-$$\" > \"$w/pid\"; exec \"$@\" >> \"$l\" 2>&1"))
+    array.push(argv, text.copy("mm-air-movie-worker"))
+    array.push(argv, string.copy(str.view(worker)))
+    array.push(argv, string.copy(str.view(log)))
+  } else {
+    array.push(argv, string.copy(str.view(s.gpu_run)))
+    array.push(argv, string.copy(str.view(log)))
+    array.push(argv, text.copy("--"))
+    array.push(argv, text.copy("/bin/sh"))
+    array.push(argv, text.copy("-c"))
+    array.push(argv, text.copy("w=$1; shift; echo \"-$$\" > \"$w/pid\"; exec \"$@\""))
+    array.push(argv, text.copy("mm-air-movie-worker"))
+    array.push(argv, string.copy(str.view(worker)))
+  }
+  array.push(argv, text.copy("/usr/bin/env"))
+  array.push(argv, text.concat("LD_LIBRARY_PATH=", str.view(s.cuda_lib)))
+  array.push(argv, text.concat("TMPDIR=", str.view(s.scratch)))
+  array.push(argv, string.copy(str.view(s.render_bin)))
+  array.push(argv, text.copy("--job"))
+  array.push(argv, text.copy(dir))
+  match proc.spawn_detached(argv) {
+    ok(_) => {}, err(problem) => { return result.err(text.concat("The render could not be started: ", fs.error.message(problem))) },
+  }
+  match proc.await_start(dir, 5000) {
+    some(_) => result.ok(()),
+    none => result.err("The render launcher did not start; see movie_logs"),
+  }
+}
+
+fn render(s: ref<State>, d: ref<json.Document>) -> result<string, string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  var allowed: array<string> = ["project", "shots", "conditioner_projection", "transformer_projection", "attention",
+    "profile", "evaluations", "schedule", "sampler", "loras", "window_seconds", "overlap_seconds", "drift"]
+  try only_keys(d, 0, allowed, "the arguments")
+  if not s.allow_render { return result.err("Rendering is turned off for this server; its owner must start it with --allow-render") }
+  match active_job(s) {
+    some(dir) => { return result.err(text.concat("A render is already running: ", str.view(path.basename(str.view(dir))))) },
+    none => {},
+  }
+  let file: string = try project_file(s, d)
+  var project: movie.Project = try store.read(str.view(file))
+  var conditioners: array<string> = ["exact_bf16", "convrot_i8"]
+  var transformers: array<string> = ["exact_bf16", "convrot_i8", "row_scaled_i8"]
+  var attentions: array<string> = ["exact", "donor_hybrid", "dense_i8"]
+  let conditioner: string = try policy_text(d, "conditioner_projection", conditioners)
+  let transformer: string = try policy_text(d, "transformer_projection", transformers)
+  let attention: string = try policy_text(d, "attention", attentions)
+  var evaluations: u64 = 0
+  var schedule: string = string.new()
+  var sampler: string = string.new()
+  match try text_arg(d, 0, "profile") {
+    some(profile) => {
+      if option.is_some(member(d, 0, "evaluations")) or option.is_some(member(d, 0, "schedule")) or option.is_some(member(d, 0, "sampler")) {
+        return result.err("Give either profile or evaluations + schedule + sampler, not both") }
+      // The named schedules of the H3 presets (models/h3/presets/h3_app.json).
+      if str.view(profile) == "donor_7" { evaluations = 7
+        schedule = text.copy("simple")
+        sampler = text.copy("res_multistep") }
+      else if str.view(profile) == "quality_19" { evaluations = 19
+        schedule = text.copy("simple")
+        sampler = text.copy("euler") }
+      else if str.view(profile) == "dc_euler_19" { evaluations = 19
+        schedule = text.copy("exponential")
+        sampler = text.copy("euler") }
+      else { return result.err("profile must be donor_7, quality_19 or dc_euler_19 (the 4-step turbo needs Character Swap)") }
+    },
+    none => {
+      evaluations = match try u64_arg(d, 0, "evaluations") { some(v) => v,
+        none => { return result.err("Give profile, or evaluations + schedule + sampler (MM-Air never picks them for you)") }, }
+      if evaluations == 0 or evaluations > 200 { return result.err("evaluations must be 1..200") }
+      var schedules: array<string> = ["simple", "exponential"]
+      var samplers: array<string> = ["euler", "res_multistep"]
+      schedule = try policy_text(d, "schedule", schedules)
+      sampler = try policy_text(d, "sampler", samplers)
+    },
+  }
+  // Which shots: the ones named, in project order as given; else every shot without a finished take.
+  var ids: array<u64> = []
+  match member(d, 0, "shots") {
+    some(n) => { ids = try id_list(d, n, "shots")
+      if array.len(ids) == 0 { return result.err("shots is empty") } },
+    none => {
+      var i: u64 = 0
+      loop { if i >= array.len(struct.borrow(project, field=shots)) { break }
+        let shot = array.borrow(struct.borrow(project, field=shots), i)
+        if not store.has_finished_take(shot) { array.push(ids, shot.id) }
+        i += 1 }
+      if array.len(ids) == 0 { return result.err("Every shot already has a selected finished take") }
+    },
+  }
+  // Fail closed before the GPU is touched: every named shot exists, is unlocked, has a prompt, a
+  // renderable size and its pictures; a continuation's context exists or comes from an earlier shot here.
+  var i: u64 = 0
+  loop { if i >= array.len(ids) { break }
+    let id: u64 = array.get(ids, i)
+    var j: u64 = i + 1
+    loop { if j >= array.len(ids) { break }
+      if array.get(ids, j) == id { return result.err(text.concat("Shot listed twice: ", str.view(string.from_int(id)))) }
+      j += 1 }
+    let index: u64 = try store.shot_index(project, id)
+    var shot: movie.Shot = movie.snapshot_shot(project, index)
+    let label: string = text.concat("Shot ", text.concat(str.view(string.from_int(id)), text.concat(" (",
+      text.concat(struct.borrow(shot, field=title), ")"))))
+    match movie.validate(shot) { ok(_) => {}, err(e) => { return result.err(text.concat(str.view(label), text.concat(": ", str.view(e)))) }, }
+    if shot.locked { return result.err(text.concat(str.view(label), ": unlock the approved shot before rendering another take")) }
+    if str.len(struct.borrow(shot, field=continue_from)) != 0 {
+      let found: bool = match files.is_file(struct.borrow(shot, field=continue_from)) { ok(v) => v, err(_) => false, }
+      if not found { return result.err(text.concat(str.view(label), ": its continuation context is missing; render the shot it continues first")) }
+    } else {
+      var refs: array<string> = movie.effective_references(project, index)
+      if array.len(refs) > 9 { return result.err(text.concat(str.view(label), ": H3 accepts at most nine pictures (cast + references)")) }
+      if array.len(refs) == 0 {
+        if str.len(struct.borrow(shot, field=first_frame)) != 0 { array.push(refs, string.copy(struct.borrow(shot, field=first_frame))) }
+        if str.len(struct.borrow(shot, field=last_frame)) != 0 { array.push(refs, string.copy(struct.borrow(shot, field=last_frame))) }
+      }
+      var r: u64 = 0
+      loop { if r >= array.len(refs) { break }
+        match existing_file(str.view(array.borrow(refs, r)), "picture") {
+          ok(_) => {}, err(e) => { return result.err(text.concat(str.view(label), text.concat(": ", str.view(e)))) }, }
+        r += 1 }
+    }
+    i += 1 }
+  var loras: array<store.Lora> = []
+  match member(d, 0, "loras") {
+    some(n) => {
+      if not is_kind(d, n, json.Kind.Array) { return result.err("loras must be a list of {path, strength}") }
+      var item: option<u64> = json.first_item(d, n)
+      loop { match item { none => { break }, some(at) => {
+        var lora_keys: array<string> = ["path", "strength"]
+        try only_keys(d, at, lora_keys, "a lora")
+        let file_value: string = match try text_arg(d, at, "path") { some(v) => v, none => { return result.err("a lora needs path") }, }
+        try existing_file(str.view(file_value), "lora")
+        let strength: f64 = match try f64_arg(d, at, "strength") { some(v) => v, none => 1.0, }
+        array.push(loras, store.Lora {path: file_value, strength: strength})
+        item = json.next_item(d, n, at) }, } }
+    },
+    none => {},
+  }
+  var drift: store.Drift = store.Drift {enabled: false, matched_steps: 5, taper_steps: 2, amount: 0.35}
+  match member(d, 0, "drift") {
+    some(n) => {
+      var drift_keys: array<string> = ["enabled", "matched_steps", "taper_steps", "amount"]
+      try only_keys(d, n, drift_keys, "drift")
+      match try bool_arg(d, n, "enabled") { some(v) => { struct.set(drift, v, field=enabled) }, none => {}, }
+      match try u64_arg(d, n, "matched_steps") { some(v) => { struct.set(drift, v, field=matched_steps) }, none => {}, }
+      match try u64_arg(d, n, "taper_steps") { some(v) => { struct.set(drift, v, field=taper_steps) }, none => {}, }
+      match try f64_arg(d, n, "amount") { some(v) => { struct.set(drift, v, field=amount) }, none => {}, }
+    },
+    none => {},
+  }
+  let window: f64 = match try f64_arg(d, 0, "window_seconds") { some(v) => v, none => 20.0, }
+  let overlap: f64 = match try f64_arg(d, 0, "overlap_seconds") { some(v) => v, none => 3.0, }
+  if window <= 0.0 or overlap < 0.0 or overlap >= window { return result.err("window_seconds must be positive and overlap_seconds smaller than it") }
+  let name: string = text.concat("job-", str.view(string.from_int(time.now_ms())))
+  let dir: string = path.join(str.view(s.jobs), str.view(name))
+  match files.mkdirs(str.view(dir)) { ok(_) => {}, err(problem) => { return result.err(string.copy(problem.message)) }, }
+  var request: store.RenderRequest = store.RenderRequest {schema: string.copy(store.request_schema()), project: string.copy(str.view(file)),
+    takes: string.copy(str.view(s.takes)), shots: ids, conditioner_projection: conditioner, transformer_projection: transformer, attention: attention,
+    evaluations: evaluations, schedule: schedule, sampler: sampler, window_seconds: window, overlap_seconds: overlap,
+    drift: drift, loras: loras, fixture: s.fixture}
+  try store.write_request(str.view(dir), request)
+  var shots: array<store.ShotStatus> = []
+  i = 0
+  loop { if i >= array.len(struct.borrow(request, field=shots)) { break }
+    let id: u64 = array.get(struct.borrow(request, field=shots), i)
+    let index: u64 = try store.shot_index(project, id)
+    array.push(shots, store.ShotStatus {id: id, title: string.copy(struct.borrow(array.borrow(struct.borrow(project, field=shots), index), field=title)),
+      state: "queued", output: string.new(), message: string.new(), runtime_ms: 0, peak_vram_bytes: 0})
+    i += 1 }
+  var status: store.RenderStatus = store.RenderStatus {schema: string.copy(store.status_schema()), job: string.copy(str.view(name)),
+    project: string.copy(str.view(file)), state: "waiting", current_shot: -1, progress: string.new(),
+    message: text.copy("Waiting for the GPU (one GPU job at a time)"), started_ms: time.now_ms(), updated_ms: time.now_ms(), shots: shots}
+  try store.write_status(str.view(dir), status)
+  try launch(s, str.view(dir))
+  var w: codec.Writer = codec.writer()
+  codec.begin_object(w)
+  codec.field_text(w, "job", str.view(name))
+  codec.field_text(w, "project", str.view(file))
+  codec.field_u64_array(w, "shots", struct.borrow(request, field=shots))
+  codec.field_text(w, "message", "Render started in the background; follow it with movie_status")
+  codec.end_object(w)
+  result.ok(finish(w))
+}
+
+fn stop(s: ref<State>, d: ref<json.Document>) -> result<string, string> effects {alloc, fs.meta, fs.read, fs.write, process, time} {
+  var allowed: array<string> = ["job", "mode"]
+  try only_keys(d, 0, allowed, "the arguments")
+  let dir: string = try job_dir(s, d)
+  let mode: string = try text_or(d, 0, "mode", "now")
+  if str.view(mode) != "now" and str.view(mode) != "after_shot" { return result.err("mode must be now or after_shot") }
+  var status: store.RenderStatus = try job_status(str.view(dir))
+  if not unfinished(str.view(status.state)) { return result.err(text.concat("This job is not running (", text.concat(str.view(status.state), ")"))) }
+  if str.view(mode) == "after_shot" {
+    match files.write_text(str.view(store.stop_file(str.view(dir))), "stop\n") {
+      ok(_) => {}, err(problem) => { return result.err(string.copy(problem.message)) }, }
+    return result.ok(problem("stopping", "The render stops after the current shot is finished and saved"))
+  }
+  // Now: end the worker's process group, then the launcher's (the GPU lock waiter, the guard).
+  let _ = proc.stop(str.view(store.worker_root(str.view(dir))), 10000)
+  let _ = proc.stop(str.view(dir), 5000)
+  var fresh: store.RenderStatus = match store.read_status(str.view(dir)) { ok(v) => v, err(_) => status, }
+  struct.set(fresh, "stopped", field=state)
+  struct.set(fresh, -1, field=current_shot)
+  struct.set(fresh, text.copy("Stopped; the shot that was rendering was not saved"), field=message)
+  var i: u64 = 0
+  loop { if i >= array.len(struct.borrow(fresh, field=shots)) { break }
+    let e = array.borrow(struct.borrow(fresh, field=shots), i)
+    if struct.borrow(e, field=state) == "running" or struct.borrow(e, field=state) == "queued" { struct.set(e, "not rendered", field=state) }
+    i += 1 }
+  try store.write_status(str.view(dir), fresh)
+  result.ok(store.encode_status(fresh))
+}
+
+fn assemble(s: ref<State>, d: ref<json.Document>) -> result<string, string> effects {alloc, env, fs.meta, fs.read, fs.write, process, time} {
+  var allowed: array<string> = ["project", "output"]
+  try only_keys(d, 0, allowed, "the arguments")
+  let file: string = try project_file(s, d)
+  var project: movie.Project = try store.read(str.view(file))
+  var outputs: array<string> = movie.selected_outputs(project)
+  if array.len(outputs) == 0 { return result.err("No shot has a selected finished take yet") }
+  var r: u64 = 0
+  loop { if r >= array.len(outputs) { break }
+    try existing_file(str.view(array.borrow(outputs, r)), "take")
+    r += 1 }
+  let target: string = match try text_arg(d, 0, "output") {
+    some(v) => {
+      if not path.is_absolute(str.view(v)) or not text.ends_with(str.view(v), ".mp4") { return result.err("output must be an absolute .mp4 path") }
+      let present: bool = match files.exists(str.view(v)) { ok(x) => x, err(_) => false, }
+      if present { return result.err("output already exists; choose a new name") }
+      v
+    },
+    none => try library.unused_output(str.view(s.library), str.view(name_of(str.view(file))), ".mp4"),
+  }
+  try movie.stitch(project, str.view(target), str.view(s.scratch))
+  var w: codec.Writer = codec.writer()
+  codec.begin_object(w)
+  codec.field_text(w, "output", str.view(target))
+  codec.field_u64(w, "shots", array.len(outputs))
+  codec.field_text_array(w, "takes", outputs)
+  codec.end_object(w)
+  result.ok(finish(w))
+}
+
+// ------------------------------------------------------------------ tools
+
+fn tool(s: ref<State>, name: str, args: str) -> result<string, string>
+    effects {alloc, env, fs.meta, fs.read, fs.write, process, time} {
+  var d: json.Document = match json.parse(args) { ok(v) => v, err(_) => { return result.err("arguments must be a JSON object") }, }
+  if not is_kind(d, 0, json.Kind.Object) { return result.err("arguments must be a JSON object") }
+  if name == "movie_list" {
+    var none_allowed: array<string> = []
+    try only_keys(d, 0, none_allowed, "the arguments")
+    var files_found: array<string> = try movie.library_paths(str.view(s.library))
+    let current: string = store.current(str.view(s.library))
+    var w: codec.Writer = codec.writer()
+    codec.begin_object(w)
+    codec.field_text(w, "library", str.view(s.library))
+    codec.field_text(w, "current", str.view(current))
+    codec.key(w, "projects")
+    codec.begin_array(w)
+    var i: u64 = 0
+    loop { if i >= array.len(files_found) { break }
+      let f: str = str.view(array.borrow(files_found, i))
+      codec.begin_object(w)
+      codec.field_text(w, "name", str.view(name_of(f)))
+      codec.field_text(w, "path", f)
+      codec.field_bool(w, "current", str.view(path.normalize(f)) == str.view(current))
+      match store.read(f) {
+        ok(p) => { var held: movie.Project = p
+          project_summary(w, held) },
+        err(e) => { codec.field_text(w, "error", str.view(e)) },
+      }
+      codec.end_object(w)
+      i += 1 }
+    codec.end_array(w)
+    match active_job(s) { some(dir) => { codec.field_text(w, "active_job", str.view(path.basename(str.view(dir)))) }, none => {}, }
+    codec.end_object(w)
+    return result.ok(finish(w))
+  }
+  if name == "movie_inspect" {
+    var allowed: array<string> = ["project"]
+    try only_keys(d, 0, allowed, "the arguments")
+    let file: string = try project_file(s, d)
+    var project: movie.Project = try store.read(str.view(file))
+    var w: codec.Writer = codec.writer()
+    codec.begin_object(w)
+    codec.field_text(w, "path", str.view(file))
+    codec.field_bool(w, "current", str.view(file) == str.view(store.current(str.view(s.library))))
+    project_summary(w, project)
+    codec.field_text(w, "director_brief", struct.borrow(project, field=director_bible))
+    codec.field_text(w, "continuity_bible", struct.borrow(project, field=continuity_bible))
+    codec.field_text(w, "brand_bible", struct.borrow(project, field=brand_bible))
+    codec.field_u64(w, "takes_per_shot", project.takes_per_shot)
+    codec.field_f64(w, "target_duration_seconds", project.target_duration)
+    codec.key(w, "characters")
+    codec.begin_array(w)
+    var c: u64 = 0
+    loop { if c >= array.len(struct.borrow(project, field=characters)) { break }
+      let ch = array.borrow(struct.borrow(project, field=characters), c)
+      codec.begin_object(w)
+      codec.field_text(w, "name", struct.borrow(ch, field=name))
+      codec.field_text(w, "role", struct.borrow(ch, field=role))
+      codec.field_text(w, "image", struct.borrow(ch, field=image))
+      codec.end_object(w)
+      c += 1 }
+    codec.end_array(w)
+    codec.key(w, "shots")
+    codec.begin_array(w)
+    var i: u64 = 0
+    loop { if i >= array.len(struct.borrow(project, field=shots)) { break }
+      write_shot(w, project, i, true)
+      i += 1 }
+    codec.end_array(w)
+    codec.end_object(w)
+    return result.ok(finish(w))
+  }
+  if name == "movie_create" {
+    var allowed: array<string> = ["name", "title", "project_json", "make_current"]
+    try only_keys(d, 0, allowed, "the arguments")
+    let requested: string = match try text_arg(d, 0, "name") { some(v) => v, none => { return result.err("name is required: the new project's file name") }, }
+    if str.len(text.trim(str.view(requested))) == 0 or text.contains(str.view(requested), "/") or str.starts_with(str.view(requested), ".") {
+      return result.err("name must be a plain file name") }
+    let file: string = try store.project_path(str.view(s.library), str.view(requested))
+    let present: bool = match files.exists(str.view(file)) { ok(v) => v, err(_) => true, }
+    if present { return result.err(text.concat("A project with this name already exists: ", str.view(file))) }
+    var project: movie.Project = match member(d, 0, "project_json") {
+      some(n) => try checked_body(d, n),
+      none => movie.create(),
+    }
+    match try text_arg(d, 0, "title") { some(t) => { let _ = ref.swap(struct.borrow(project, field=title), t) }, none => {}, }
+    match files.mkdirs(str.view(s.library)) { ok(_) => {}, err(problem) => { return result.err(string.copy(problem.message)) }, }
+    try store.write(project, str.view(file))
+    let make: bool = match try bool_arg(d, 0, "make_current") { some(v) => v, none => false, }
+    if make { let _ = try store.make_current(str.view(s.library), str.view(file)) }
+    var w: codec.Writer = codec.writer()
+    codec.begin_object(w)
+    codec.field_text(w, "path", str.view(file))
+    codec.field_text(w, "name", str.view(name_of(str.view(file))))
+    codec.field_bool(w, "current", make)
+    project_summary(w, project)
+    codec.end_object(w)
+    return result.ok(finish(w))
+  }
+  if name == "movie_update_project" {
+    var allowed: array<string> = ["project", "title", "director_brief", "continuity_bible", "brand_bible",
+      "takes_per_shot", "target_duration_seconds", "make_current"]
+    try only_keys(d, 0, allowed, "the arguments")
+    let file: string = try project_file(s, d)
+    var project: movie.Project = try store.read(str.view(file))
+    match try text_arg(d, 0, "title") { some(v) => { let _ = ref.swap(struct.borrow(project, field=title), v) }, none => {}, }
+    match try text_arg(d, 0, "director_brief") { some(v) => { let _ = ref.swap(struct.borrow(project, field=director_bible), v) }, none => {}, }
+    match try text_arg(d, 0, "continuity_bible") { some(v) => { let _ = ref.swap(struct.borrow(project, field=continuity_bible), v) }, none => {}, }
+    match try text_arg(d, 0, "brand_bible") { some(v) => { let _ = ref.swap(struct.borrow(project, field=brand_bible), v) }, none => {}, }
+    match try u64_arg(d, 0, "takes_per_shot") { some(v) => { if v == 0 { return result.err("takes_per_shot must be 1 or more") }
+      struct.set(project, v, field=takes_per_shot) }, none => {}, }
+    match try f64_arg(d, 0, "target_duration_seconds") { some(v) => { if v <= 0.0 { return result.err("target_duration_seconds must be more than zero") }
+      struct.set(project, v, field=target_duration) }, none => {}, }
+    try store.write(project, str.view(file))
+    match try bool_arg(d, 0, "make_current") { some(v) => { if v { let _ = try store.make_current(str.view(s.library), str.view(file)) } }, none => {}, }
+    var w: codec.Writer = codec.writer()
+    codec.begin_object(w)
+    codec.field_text(w, "path", str.view(file))
+    project_summary(w, project)
+    codec.end_object(w)
+    return result.ok(finish(w))
+  }
+  if name == "movie_update_shot" or name == "movie_add_shot" or name == "movie_delete_shot" {
+    var allowed: array<string> = if name == "movie_update_shot" { ["project", "shot", "fields"] }
+      else if name == "movie_add_shot" { ["project", "fields", "continue_from_shot"] } else { ["project", "shot"] }
+    try only_keys(d, 0, allowed, "the arguments")
+    let file: string = try project_file(s, d)
+    // A fresh read right before the one write: the window or a render may have changed the file.
+    var project: movie.Project = try store.read(str.view(file))
+    var busy: array<u64> = busy_shots(s, str.view(file))
+    var index: u64 = 0
+    if name == "movie_add_shot" {
+      match try u64_arg(d, 0, "continue_from_shot") {
+        some(source) => { let from: u64 = try store.shot_index(project, source)
+          let _ = try movie.create_continuation(project, from) },
+        none => { movie.add_shot(project) },
+      }
+      index = array.len(struct.borrow(project, field=shots)) - 1
+    } else {
+      let id: u64 = try shot_id(d)
+      index = try store.shot_index(project, id)
+      if contains_id(busy, id) { return result.err("This shot is waiting for or in a render; stop the render first (movie_stop)") }
+    }
+    let id: u64 = array.borrow(struct.borrow(project, field=shots), index).id
+    if name == "movie_delete_shot" {
+      struct.set(project, index, field=selected_shot)
+      if not movie.delete_shot(project) { return result.err("A project keeps at least one shot") }
+    } else {
+      match member(d, 0, "fields") {
+        some(n) => { let _ = try apply_fields(d, n, array.borrow(struct.borrow(project, field=shots), index)) },
+        none => { if name == "movie_update_shot" { return result.err("fields is required: the shot fields to change") } },
+      }
+    }
+    try store.write(project, str.view(file))
+    var w: codec.Writer = codec.writer()
+    codec.begin_object(w)
+    codec.field_text(w, "path", str.view(file))
+    if name == "movie_delete_shot" { codec.field_u64(w, "deleted_shot", id) }
+    else { codec.key(w, "shot")
+      write_shot(w, project, index, true) }
+    codec.end_object(w)
+    return result.ok(finish(w))
+  }
+  if name == "movie_render" { return render(s, d) }
+  if name == "movie_status" {
+    var allowed: array<string> = ["job"]
+    try only_keys(d, 0, allowed, "the arguments")
+    let dir: string = try job_dir(s, d)
+    var status: store.RenderStatus = try job_status(str.view(dir))
+    return result.ok(store.encode_status(status))
+  }
+  if name == "movie_logs" {
+    var allowed: array<string> = ["job", "limit"]
+    try only_keys(d, 0, allowed, "the arguments")
+    let dir: string = try job_dir(s, d)
+    let limit: u64 = match try u64_arg(d, 0, "limit") { some(v) => if v < 256 { 256 } else if v > 65536 { 65536 } else { v }, none => 8192, }
+    var w: codec.Writer = codec.writer()
+    codec.begin_object(w)
+    codec.field_text(w, "job", str.view(path.basename(str.view(dir))))
+    codec.field_text(w, "log", str.view(proc.tail(str.view(store.log_file(str.view(dir))), limit)))
+    codec.field_text(w, "launcher", str.view(proc.tail(str.view(path.join(str.view(dir), "launcher.log")), 4096)))
+    codec.end_object(w)
+    return result.ok(finish(w))
+  }
+  if name == "movie_stop" { return stop(s, d) }
+  if name == "movie_assemble" { return assemble(s, d) }
+  result.err(text.concat("Unknown tool: ", name))
+}
+
+fn describe(w: ref<codec.Writer>, name: str, description: str, readonly: bool, destructive: bool, schema: str) -> unit effects {alloc} {
+  codec.begin_object(w)
+  codec.field_text(w, "name", name)
+  codec.field_text(w, "description", description)
+  codec.field_json(w, "inputSchema", schema)
+  codec.key(w, "annotations")
+  codec.begin_object(w)
+  codec.field_bool(w, "readOnlyHint", readonly)
+  codec.field_bool(w, "destructiveHint", destructive)
+  codec.field_bool(w, "openWorldHint", false)
+  codec.end_object(w)
+  codec.end_object(w)
+}
+
+fn shot_fields_schema() -> str effects {} {
+  "{\"type\":\"object\",\"description\":\"Shot fields to set\",\"properties\":{\"title\":{\"type\":\"string\"},\"brief\":{\"type\":\"string\"},\"shot_description\":{\"type\":\"string\",\"description\":\"What is seen and heard\"},\"soundscape\":{\"type\":\"string\"},\"music\":{\"type\":\"string\"},\"prompt_override\":{\"type\":\"string\",\"description\":\"Full H3 prompt; empty = built from the fields\"},\"first_frame\":{\"type\":\"string\",\"description\":\"Absolute picture path or empty\"},\"last_frame\":{\"type\":\"string\"},\"continue_from\":{\"type\":\"string\",\"description\":\"A take's .airh3ctx file or empty\"},\"duration_seconds\":{\"type\":\"number\"},\"width\":{\"type\":\"integer\"},\"height\":{\"type\":\"integer\"},\"steps\":{\"type\":\"integer\"},\"seed\":{\"type\":\"integer\",\"description\":\"-1 = random\"},\"motion_context_frames\":{\"type\":\"integer\"},\"references\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Absolute picture paths, at most 12\"},\"locked\":{\"type\":\"boolean\"},\"selected_take\":{\"type\":\"integer\",\"description\":\"Take number to use, -1 = none\"}},\"additionalProperties\":false}"
+}
+
+fn tool_list() -> string effects {alloc} {
+  var w: codec.Writer = codec.writer()
+  codec.begin_object(w)
+  codec.key(w, "tools")
+  codec.begin_array(w)
+  let project: str = "\"project\":{\"type\":\"string\",\"description\":\"Project name from movie_list\"}"
+  let job: str = "\"job\":{\"type\":\"string\",\"description\":\"Job name; empty = newest\"}"
+  describe(w, "movie_list", "List the movie projects: title, shots, seconds, which one the window opens.", true, false,
+    "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}")
+  describe(w, "movie_inspect", "Show one project: every shot with its settings, pictures, prompt, takes and state.", true, false,
+    str.view(text.concat("{\"type\":\"object\",\"properties\":{", text.concat(project, "},\"required\":[\"project\"],\"additionalProperties\":false}"))))
+  describe(w, "movie_create", "Create a new project, empty or from a full project JSON (the window's file format).", false, false,
+    "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"File name of the new project\"},\"title\":{\"type\":\"string\"},\"project_json\":{\"type\":\"object\",\"description\":\"Whole project, schema serenity.h3.movie.v1\"},\"make_current\":{\"type\":\"boolean\",\"description\":\"Open it in the window next time\"}},\"required\":[\"name\"],\"additionalProperties\":false}")
+  describe(w, "movie_update_project", "Change a project's title, bibles, takes per shot or target length.", false, false,
+    str.view(text.concat("{\"type\":\"object\",\"properties\":{", text.concat(project, ",\"title\":{\"type\":\"string\"},\"director_brief\":{\"type\":\"string\"},\"continuity_bible\":{\"type\":\"string\"},\"brand_bible\":{\"type\":\"string\"},\"takes_per_shot\":{\"type\":\"integer\"},\"target_duration_seconds\":{\"type\":\"number\"},\"make_current\":{\"type\":\"boolean\"}},\"required\":[\"project\"],\"additionalProperties\":false}"))))
+  describe(w, "movie_update_shot", "Change fields of one shot.", false, false,
+    str.view(text.concat("{\"type\":\"object\",\"properties\":{", text.concat(project, text.concat(",\"shot\":{\"type\":\"integer\",\"description\":\"Shot id\"},\"fields\":",
+      text.concat(shot_fields_schema(), "},\"required\":[\"project\",\"shot\",\"fields\"],\"additionalProperties\":false}"))))))
+  describe(w, "movie_add_shot", "Add a shot at the end, or a continuation of a rendered shot.", false, false,
+    str.view(text.concat("{\"type\":\"object\",\"properties\":{", text.concat(project, text.concat(",\"continue_from_shot\":{\"type\":\"integer\",\"description\":\"Shot id to continue from (needs a finished take)\"},\"fields\":",
+      text.concat(shot_fields_schema(), "},\"required\":[\"project\"],\"additionalProperties\":false}"))))))
+  describe(w, "movie_delete_shot", "Delete one shot.", false, true,
+    str.view(text.concat("{\"type\":\"object\",\"properties\":{", text.concat(project, ",\"shot\":{\"type\":\"integer\"}},\"required\":[\"project\",\"shot\"],\"additionalProperties\":false}"))))
+  describe(w, "movie_render", "Render shots one after another in the background and save each take into the project. Without shots: every shot that has no finished take. The H3 settings must be given.", false, false,
+    str.view(text.concat("{\"type\":\"object\",\"properties\":{", text.concat(project, ",\"shots\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"},\"description\":\"Shot ids in render order\"},\"conditioner_projection\":{\"type\":\"string\",\"enum\":[\"exact_bf16\",\"convrot_i8\"]},\"transformer_projection\":{\"type\":\"string\",\"enum\":[\"exact_bf16\",\"convrot_i8\",\"row_scaled_i8\"]},\"attention\":{\"type\":\"string\",\"enum\":[\"exact\",\"donor_hybrid\",\"dense_i8\"]},\"profile\":{\"type\":\"string\",\"enum\":[\"donor_7\",\"quality_19\",\"dc_euler_19\"],\"description\":\"Or give evaluations + schedule + sampler\"},\"evaluations\":{\"type\":\"integer\"},\"schedule\":{\"type\":\"string\",\"enum\":[\"simple\",\"exponential\"]},\"sampler\":{\"type\":\"string\",\"enum\":[\"euler\",\"res_multistep\"]},\"loras\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"strength\":{\"type\":\"number\"}},\"required\":[\"path\"],\"additionalProperties\":false}},\"window_seconds\":{\"type\":\"number\",\"description\":\"Long shots split into windows of this length (default 20)\"},\"overlap_seconds\":{\"type\":\"number\",\"description\":\"Default 3\"},\"drift\":{\"type\":\"object\",\"properties\":{\"enabled\":{\"type\":\"boolean\"},\"matched_steps\":{\"type\":\"integer\"},\"taper_steps\":{\"type\":\"integer\"},\"amount\":{\"type\":\"number\"}},\"additionalProperties\":false}},\"required\":[\"project\",\"conditioner_projection\",\"transformer_projection\",\"attention\"],\"additionalProperties\":false}"))))
+  describe(w, "movie_status", "Progress of a render: each shot's state, the current step, errors.", true, false,
+    str.view(text.concat("{\"type\":\"object\",\"properties\":{", text.concat(job, "},\"additionalProperties\":false}"))))
+  describe(w, "movie_logs", "The end of a render's log.", true, false,
+    str.view(text.concat("{\"type\":\"object\",\"properties\":{", text.concat(job, ",\"limit\":{\"type\":\"integer\",\"minimum\":256,\"maximum\":65536}},\"additionalProperties\":false}"))))
+  describe(w, "movie_stop", "Stop a render: now (the shot being rendered is lost) or after the current shot.", false, true,
+    str.view(text.concat("{\"type\":\"object\",\"properties\":{", text.concat(job, ",\"mode\":{\"type\":\"string\",\"enum\":[\"now\",\"after_shot\"]}},\"additionalProperties\":false}"))))
+  describe(w, "movie_assemble", "Join the selected take of every shot into one MP4 and return its path.", false, false,
+    str.view(text.concat("{\"type\":\"object\",\"properties\":{", text.concat(project, ",\"output\":{\"type\":\"string\",\"description\":\"Absolute .mp4 path; default: next to the project\"}},\"required\":[\"project\"],\"additionalProperties\":false}"))))
+  codec.end_array(w)
+  codec.end_object(w)
+  finish(w)
+}
+
+// ------------------------------------------------------------------ protocol
+
+fn reply(id: str, result: str) -> unit effects {alloc, io.write} {
+  var w: codec.Writer = codec.writer()
+  codec.begin_object(w)
+  codec.field_text(w, "jsonrpc", "2.0")
+  codec.field_json(w, "id", id)
+  codec.field_json(w, "result", result)
+  codec.end_object(w)
+  io.write(str.view(finish(w)))
+  io.write("\n")
+}
+
+fn rpc_error(id: str, code: i64, message: str) -> unit effects {alloc, io.write} {
+  var w: codec.Writer = codec.writer()
+  codec.begin_object(w)
+  codec.field_text(w, "jsonrpc", "2.0")
+  codec.field_json(w, "id", id)
+  codec.key(w, "error")
+  codec.begin_object(w)
+  codec.field_i64(w, "code", code)
+  codec.field_text(w, "message", message)
+  codec.end_object(w)
+  codec.end_object(w)
+  io.write(str.view(finish(w)))
+  io.write("\n")
+}
+
+fn guide(s: ref<State>) -> string effects {alloc} {
+  var out: string = text.copy("MM-Air Movie Maker: projects live in the window's movie library. movie_list, then movie_inspect a project. Edit with movie_create, movie_update_project, movie_add_shot, movie_update_shot, movie_delete_shot (each is a fresh read and one atomic write; reopen the project in the window to see the changes). movie_render runs shots one after another in a background worker under the GPU guard and needs the H3 settings stated: conditioner_projection, transformer_projection, attention and profile (or evaluations + schedule + sampler). Follow it with movie_status / movie_logs, stop it with movie_stop. movie_assemble joins the selected takes into one MP4. A render keeps running if this session ends.")
+  if not s.allow_render { string.append(out, " Rendering is off for this server (no --allow-render).") }
+  if array.len(struct.borrow(s, field=startup)) != 0 {
+    string.append(out, " Server problems: ")
+    string.append(out, str.view(text.join(struct.borrow(s, field=startup), " | ")))
+  }
+  out
+}
+
+fn handle(s: ref<State>, body: str) -> unit effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, time} {
+  var d: json.Document = match json.parse(body) { ok(v) => v, err(_) => { rpc_error("null", -32700, "Parse error")
+    return }, }
+  if not is_kind(d, 0, json.Kind.Object) { rpc_error("null", -32600, "Invalid Request")
+    return }
+  let version: string = match json.get(d, 0, "jsonrpc") { some(n) => match json.as_string(d, n) { some(v) => v, none => string.new(), }, none => string.new(), }
+  if str.view(version) != "2.0" { rpc_error("null", -32600, "Invalid Request")
+    return }
+  // A notification (no id) gets no answer.
+  let id_node: u64 = match json.get(d, 0, "id") { some(n) => n, none => { return }, }
+  if not is_kind(d, id_node, json.Kind.String) and not is_kind(d, id_node, json.Kind.Number) {
+    rpc_error("null", -32600, "Request id must be a string or number")
+    return }
+  let id: string = option.unwrap(json.raw(d, id_node))
+  let method: string = match json.get(d, 0, "method") { some(n) => match json.as_string(d, n) { some(v) => v, none => string.new(), }, none => string.new(), }
+  let params: option<u64> = json.get(d, 0, "params")
+  if str.view(method) == "initialize" {
+    var requested: string = string.new()
+    match params { some(p) => { match json.get(d, p, "protocolVersion") { some(n) => { match json.as_string(d, n) { some(v) => { requested = v }, none => {}, } }, none => {}, } }, none => {}, }
+    let chosen: string = if str.view(requested) == "2024-11-05" or str.view(requested) == "2025-03-26" or str.view(requested) == "2025-06-18" {
+      text.copy(str.view(requested)) } else { text.copy("2025-06-18") }
+    var w: codec.Writer = codec.writer()
+    codec.begin_object(w)
+    codec.field_text(w, "protocolVersion", str.view(chosen))
+    codec.field_json(w, "capabilities", "{\"tools\":{\"listChanged\":false}}")
+    codec.field_json(w, "serverInfo", "{\"name\":\"mm-air-movie\",\"version\":\"0.1.0\"}")
+    codec.field_text(w, "instructions", str.view(guide(s)))
+    codec.end_object(w)
+    struct.set(s, true, field=initialized)
+    reply(str.view(id), str.view(finish(w)))
+    return
+  }
+  if str.view(method) == "ping" { reply(str.view(id), "{}")
+    return }
+  if not s.initialized { rpc_error(str.view(id), -32002, "Initialize first")
+    return }
+  if str.view(method) == "tools/list" { reply(str.view(id), str.view(tool_list()))
+    return }
+  if str.view(method) != "tools/call" { rpc_error(str.view(id), -32601, "Method not found")
+    return }
+  var name: string = string.new()
+  var args: string = text.copy("{}")
+  match params {
+    some(p) => {
+      match json.get(d, p, "name") { some(n) => { match json.as_string(d, n) { some(v) => { name = v }, none => {}, } }, none => {}, }
+      match json.get(d, p, "arguments") { some(n) => { args = option.unwrap(json.raw(d, n)) }, none => {}, }
+    },
+    none => {},
+  }
+  var failed: bool = false
+  let produced: string = match tool(s, str.view(name), str.view(args)) {
+    ok(v) => v, err(e) => { failed = true
+      problem("movie_error", str.view(e)) },
+  }
+  let result: string = compact(str.view(produced))
+  var w: codec.Writer = codec.writer()
+  codec.begin_object(w)
+  codec.field_bool(w, "isError", failed)
+  codec.field_json(w, "structuredContent", str.view(result))
+  codec.key(w, "content")
+  codec.begin_array(w)
+  codec.begin_object(w)
+  codec.field_text(w, "type", "text")
+  codec.field_text(w, "text", str.view(result))
+  codec.end_object(w)
+  codec.end_array(w)
+  codec.end_object(w)
+  reply(str.view(id), str.view(finish(w)))
+}
+
+pub fn main(args: view<str>) -> i32 effects {alloc, env, fs.meta, fs.read, fs.write, io.write, process, time} {
+  if system.platform() != "linux" { io.ewrite("This server currently supports Linux\n")
+    return 2 }
+  let home: string = match system.home_directory() { some(v) => v, none => string.new(), }
+  let program: string = match system.executable_path() { ok(v) => v, err(_) => string.new(), }
+  var s: State = State {output_root: string.new(), library: string.new(), jobs: string.new(), takes: string.new(),
+    gpu_run: path.join(str.view(home), "h3-air/bin/gpu-run.sh"),
+    render_bin: path.join(str.view(path.dirname(str.view(program))), "mm-air-movie-render"),
+    cuda_lib: text.concat(str.view(path.join(str.view(home), "cuda/13.2/lib")), text.concat(":", str.view(path.join(str.view(home), "cuda/cudnn-9.27/lib")))),
+    scratch: path.join(str.view(home), "mm-air-scratch"),
+    allow_render: false, fixture: false, initialized: false, startup: []}
+  var requested_root: string = string.new()
+  var i: u64 = 1
+  loop { if i >= view.len(args) { break }
+    let flag: str = view.get(args, i)
+    if flag == "--allow-render" { struct.set(s, true, field=allow_render)
+      i += 1
+      continue }
+    if flag == "--test-fixture" { struct.set(s, true, field=fixture)
+      i += 1
+      continue }
+    if flag == "--help" { io.ewrite("mm-air-movie-mcp [--allow-render] [--output-root DIR] [--gpu-run FILE] [--render-bin FILE] [--cuda-lib DIRS] [--scratch DIR]\n")
+      return 0 }
+    if i + 1 >= view.len(args) { io.ewrite("Missing server option value\n")
+      return 2 }
+    let value: str = view.get(args, i + 1)
+    if flag == "--output-root" { requested_root = path.normalize(value) }
+    else if flag == "--gpu-run" { struct.set(s, text.copy(value), field=gpu_run) }
+    else if flag == "--render-bin" { struct.set(s, text.copy(value), field=render_bin) }
+    else if flag == "--cuda-lib" { struct.set(s, text.copy(value), field=cuda_lib) }
+    else if flag == "--scratch" { struct.set(s, text.copy(value), field=scratch) }
+    else { io.ewrite("Unknown server option\n")
+      return 2 }
+    i += 2
+  }
+  let root: string = if str.len(str.view(requested_root)) != 0 { requested_root } else {
+    match store.output_root() { ok(v) => v, err(e) => { array.push(struct.borrow(s, field=startup), e)
+      path.join(str.view(home), "movies-unknown") }, } }
+  if not path.is_absolute(str.view(root)) { io.ewrite("The output folder must be an absolute path\n")
+    return 2 }
+  struct.set(s, string.copy(str.view(root)), field=output_root)
+  struct.set(s, store.library_root(str.view(root)), field=library)
+  struct.set(s, store.jobs_root(str.view(root)), field=jobs)
+  struct.set(s, store.takes_root(str.view(root)), field=takes)
+  if s.allow_render {
+    let worker_found: bool = match files.is_file(str.view(s.render_bin)) { ok(v) => v, err(_) => false, }
+    if not worker_found { array.push(struct.borrow(s, field=startup), text.concat("render worker not found: ", str.view(s.render_bin))) }
+    let guard_found: bool = match files.is_file(str.view(s.gpu_run)) { ok(v) => v, err(_) => false, }
+    if not guard_found and not s.fixture { array.push(struct.borrow(s, field=startup), text.concat("GPU guard not found: ", str.view(s.gpu_run))) }
+  }
+  var reader: lines.Reader = match lines.open("/dev/stdin", 4194304) { ok(v) => v, err(_) => { io.ewrite("Cannot read stdin\n")
+    return 2 }, }
+  loop {
+    let record: bytes = match lines.next(reader) { ok(v) => match v { some(b) => b, none => { break }, },
+      err(e) => { io.ewrite(str.view(lines.message(e)))
+        io.ewrite("\n")
+        break }, }
+    let body: str = match str.from_bytes(bytes.view(record)) { some(v) => v, none => { rpc_error("null", -32700, "Invalid UTF-8")
+      continue }, }
+    if str.len(body) != 0 { handle(s, body) }
+  }
+  0
+}

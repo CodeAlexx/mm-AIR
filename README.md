@@ -378,6 +378,10 @@ paths autosave and restore across application launches. The Projects picker can
 open any saved project; New and Import add projects, while Delete moves the
 selected project to Trash and never removes the final project.
 
+The same projects can be created, edited, rendered and assembled without the window through
+the Movie Maker MCP server (`mm-air-movie-mcp` with its render worker `mm-air-movie-render`);
+see [mcp/README.md](mcp/README.md).
+
 The shot deck supports New, Add, Duplicate, Delete, shot selection, 5–15 second
 duration, the six admitted H3 resolutions, opening/final frames, ordered visual
 references, last-frame-only L2VA, soundscape, music, and an editable compiled H3 prompt. Prompt
