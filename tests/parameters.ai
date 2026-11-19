@@ -134,8 +134,31 @@ fn geometry_round_trip(width: u64, height: u64, seconds: f64,
     decoded.geometry.frames == frames and decoded.seconds == seconds
 }
 
+// The line under the Generate preview names the model, settings and prompt for every
+// saved schema, nested "request" ones and the retired FLUX 3 Klein included.
+fn summary_is(source:str,line:str,prompt:str)->bool effects {alloc,io.write} {
+  var got=parameters.result_summary(source)
+  if array.len(got)!=2 or str.view(array.borrow(got,0))!=line or str.view(array.borrow(got,1))!=prompt {
+    if array.len(got)==2 { io.write(text.concat(str.view(array.borrow(got,0)),"\n")) }
+    return false
+  }
+  true
+}
+fn result_summaries()->bool effects {alloc,io.write} {
+  if not summary_is("{\"schema\":\"mm-air.generate.parameters\",\"prompt\":\"a car\\nat night\",\"model\":0,\"task\":0,\"seed\":46133419962073117,\"width\":832,\"height\":480,\"seconds\":10}",
+    "MiniMax H3 Base · Text to video + audio · 832×480 · 10 s · seed 46133419962073117","a car at night") { return false }
+  if not summary_is("{\"schema\":\"mm-air.flux3-klein.parameters\",\"prompt\":\"a fox\",\"references\":[],\"width\":1024,\"height\":1024,\"steps\":16,\"seed\":5}",
+    "FLUX 3 Image Klein (no longer in MM-Air) · 1024×1024 · 16 steps · seed 5","a fox") { return false }
+  if not summary_is("{\"schema\":\"mm-air.h3image.parameters.v1\",\"request\":{\"prompt\":\"a mech\",\"width\":5024,\"height\":3360,\"seed\":7}}",
+    "MiniMax H3-Image · 5024×3360 · seed 7","a mech") { return false }
+  if array.len(parameters.result_summary("not json"))!=0 { return false }
+  if parameters.retired_flux3_prompt("{\"schema\":\"mm-air.flux3-klein.parameters\",\"prompt\":\"a fox\",\"seed\":5}")!="a fox" { return false }
+  match parameters.retired_flux3_seed("{\"schema\":\"mm-air.flux3-klein.parameters\",\"prompt\":\"a fox\",\"seed\":5}") { some(value)=>value==5, none=>false, }
+}
+
 pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.read,io.write} {
   if not lora_round_trip() { return 1 }
+  if not result_summaries() { return 1 }
   if not h3_lora_round_trip() { return 1 }
   var krea = parameters.KreaRequest {prompt:"mechanical robot reference",seed:9007199254740993,
     width:1024,height:1024,output:"/tmp/mm-air-krea.png",loras:[]}
@@ -358,16 +381,16 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.read,io.write} {
   array.push(struct.borrow(fibo_edit,field=images),"/tmp/c.webp")
   match parameters.validate_fibo(fibo_edit){ok(_)=>{return 1},err(_)=>{},}
   // MiniMax H3-Image: one request for text to image and edit; codes 61+ name the failing check.
-  // The H3-Image size list: every entry inside the model's 4-20 MP range, sides in 32-pixel steps,
+  // The H3-Image size list (SerenityAir's presets): every entry at most 20 MP, sides in 32-pixel steps,
   // each found again by its size, and the default is 2048x2048.
   var size_index:u64=0
   loop{if size_index>=parameters.h3image_size_count(){break}
     let size=parameters.h3image_size(size_index)
     if size.width%32!=0 or size.height%32!=0 { return 1 }
-    if size.width*size.height<3900000 or size.width*size.height>parameters.h3image_max_pixels() { return 1 }
+    if size.width*size.height>parameters.h3image_max_pixels() { return 1 }
     if parameters.h3image_size_index(size.width,size.height)!=size_index { return 1 }
     size_index=size_index+1}
-  if parameters.h3image_size_index(1024,1024)!=parameters.h3image_size_count() { return 1 }
+  if parameters.h3image_size_count()!=7 or parameters.h3image_size_index(1024,768)!=parameters.h3image_size_count() { return 1 }
   let default_size=parameters.h3image_size(parameters.h3image_default_size_index())
   if default_size.width!=2048 or default_size.height!=2048 { return 1 }
   if parameters.h3image_defaults().width!=2048 or parameters.h3image_defaults().height!=2048 { return 1 }

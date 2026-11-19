@@ -204,8 +204,8 @@ the direct runtime and edit route, not the visual quality of the required
 
 FLUX 3 Image Klein is no longer on Generate's model list or in Image Edit's
 **EDIT MODEL** dropdown (owner request). Its saved parameter files and history
-entries (schema `mm-air.flux3-klein.parameters`) are refused by name on Load or
-Reuse; they never restore as another model. Existing FLUX 3 PNGs stay in the
+entries (schema `mm-air.flux3-klein.parameters`) never restore as another model:
+Reuse puts only their prompt and seed on Generate and keeps the selected model. Existing FLUX 3 PNGs stay in the
 gallery and output folders.
 
 ### MOSS-Image Base and SFT (2026-11-05)
@@ -377,6 +377,10 @@ references, shared cast, endless-chain state, locks, selected takes, and output
 paths autosave and restore across application launches. The Projects picker can
 open any saved project; New and Import add projects, while Delete moves the
 selected project to Trash and never removes the final project.
+
+The same projects can be created, edited, rendered and assembled without the window through
+the Movie Maker MCP server (`mm-air-movie-mcp` with its render worker `mm-air-movie-render`);
+see [mcp/README.md](mcp/README.md).
 
 The shot deck supports New, Add, Duplicate, Delete, shot selection, 5–15 second
 duration, the six admitted H3 resolutions, opening/final frames, ordered visual
@@ -925,6 +929,9 @@ full-width prompt editor share a draggable vertical split, sized for structured 
 prompts of several thousand characters. Movie Maker and ControlNet are outside this change.
 
 - Base tasks: text, first-image, and first/last-image video + audio.
+- Model and task follow each other: picking Reference to video selects the
+  Reference model, and switching the model from Reference back to Base sets the
+  task to Text to video + audio, which needs no pictures.
 - Reference task: up to nine ordered images/videos plus three explicit audio
   files. Add/remove controls display image/video thumbnails and audio waveforms.
   Selecting a source previews it; video and audio use native playback controls.
@@ -1050,6 +1057,11 @@ a 4,296,010,552-byte peak. Both returned `fully_unloaded=true`; no compute proce
   **Reference** and **Trash**. Select a result and use **Reuse** to restore its
   request: H3, Krea and Qwen-Image entries each restore through their own parameter
   schema. Clearing history removes only the catalog, not media.
+- Selecting a result shows what made it under the preview: the model, task, size,
+  length, steps and seed on one line and the prompt on the next (both selectable).
+- Videos in the preview have play/pause, back to start, a seek bar and the time
+  (GTK's own controls on Linux, the AIR Windows host's bar on Windows); a click on the
+  video also plays or pauses.
 - Selecting an image result enables **Reference**. This explicit
   action appends the original image to the existing visual-reference list and
   selects H3 Ref2VA. It preserves the prompt, seed, geometry, audio references,
@@ -1287,6 +1299,8 @@ semantic content is correct.
 ### MiniMax H3-Image (2026-11-10)
 
 Generate lists **MiniMax H3-Image** (prompt, size, seed, one LoRA with strength, Prompt expander Off / Low / Extra high).
+Its sizes are SerenityAir's H3 Image presets: 2048×2048 (default), 2720×1536, 1536×2720, 1024×1024, 4096×4096,
+5952×3360, 3552×1184, or Custom (up to 20 MP).
 Image Edit lists it as a third model: 1 to 16 pictures in order, keep the first picture's size or set Width and Height,
 one LoRA, Prompt expander Off / Low / Extra high / Qwen3-VL 8B. It runs in this process through AIR's
 `std.inference.h3image.session` (`h3image.ai`); LoRAs stay unmerged. Folders: `MM_AIR_H3IMAGE_ROOT`,
