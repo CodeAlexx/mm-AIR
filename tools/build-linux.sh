@@ -9,6 +9,14 @@ air=$(cd -- "${AIR_ROOT:-$app/../AIR}" && pwd)
 tools=${AIR_TOOLCHAIN:-$air/build-release}
 [[ -x $tools/bin/airproj ]] || { echo "no airproj in $tools/bin (set AIR_TOOLCHAIN)" >&2; exit 2; }
 
+# GPU programs need the CUDA and cuDNN libraries at build time; without them every GPU
+# target fails with AIR-E1201 (provider requires gpu.nvidia.nvrtc, gpu.nvidia.cublaslt).
+export AIR_STDLIB=${AIR_STDLIB:-$air/stdlib}
+export CUDA_HOME=${CUDA_HOME:-$HOME/cuda/13.2}
+cudnn=${CUDNN_HOME:-$HOME/cuda/cudnn-9.27}
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib:$cudnn/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+
 "$tools/bin/airproj" --project "$app" --toolchain "$tools" build --mode release
 
 # The app reads its screens from <bin>/share/mm-air. Links, so an edited desktop.ui or
