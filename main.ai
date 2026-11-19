@@ -3715,7 +3715,7 @@ pub fn main(args: view<str>) -> i32
                   let peft_folder: bool = (model_index == parameters.h3image_model_index() or lora_family(model_index) == "h3-") and
                     (match files.exists(str.view(path.join(str.view(filename),"adapter_model.safetensors"))) { ok(v) => v, err(_) => false, })
                   if not peft_folder and not text.ends_with(text.lower_ascii(filename),".safetensors") {
-                    let _ = desk.set_text(session,"status","Choose a LoRA .safetensors file or LoRA folder")
+                    let _ = desk.set_text(session,"status","Choose a LoRA file or folder")
                     continue
                   }
                   var accepted_filename: string = string.copy(str.view(filename))
