@@ -318,6 +318,11 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.read,io.write} {
     some(value)=>{if value!=parameters.moss_sft_model_index(){return 1}},none=>{return 1},}
   struct.set(moss,1000,field=width)
   match parameters.validate_moss(moss){ok(_)=>{return 1},err(_)=>{},}
+  // no app-made size limit: above the old 2048 cap and below the old 256 floor
+  struct.set(moss,4096,field=width)
+  match parameters.validate_moss(moss){ok(_)=>{},err(_)=>{return 1},}
+  struct.set(moss,128,field=width)
+  match parameters.validate_moss(moss){ok(_)=>{},err(_)=>{return 1},}
   struct.set(moss,1344,field=width)
   let _=ref.swap(struct.borrow(moss,field=model),string.copy("moss-image-edit"))
   match parameters.validate_moss(moss){ok(_)=>{return 1},err(_)=>{},}
@@ -381,13 +386,12 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.read,io.write} {
   array.push(struct.borrow(fibo_edit,field=images),"/tmp/c.webp")
   match parameters.validate_fibo(fibo_edit){ok(_)=>{return 1},err(_)=>{},}
   // MiniMax H3-Image: one request for text to image and edit; codes 61+ name the failing check.
-  // The H3-Image size list (SerenityAir's presets): every entry at most 20 MP, sides in 32-pixel steps,
+  // The H3-Image size list (SerenityAir's presets): sides in 32-pixel steps,
   // each found again by its size, and the default is 2048x2048.
   var size_index:u64=0
   loop{if size_index>=parameters.h3image_size_count(){break}
     let size=parameters.h3image_size(size_index)
     if size.width%32!=0 or size.height%32!=0 { return 1 }
-    if size.width*size.height>parameters.h3image_max_pixels() { return 1 }
     if parameters.h3image_size_index(size.width,size.height)!=size_index { return 1 }
     size_index=size_index+1}
   if parameters.h3image_size_count()!=7 or parameters.h3image_size_index(1024,768)!=parameters.h3image_size_count() { return 1 }
@@ -427,9 +431,16 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.read,io.write} {
      wide_edit_back.width!=0 or wide_edit_back.expander!="qwen" { return 70 }
   array.push(struct.borrow(wide_edit,field=images),"/tmp/p16.png")
   match parameters.validate_h3image(wide_edit){ok(_)=>{return 71},err(_)=>{},}
-  // size limits: 20 megapixels at most
+  // no app-made size limit: above 20 megapixels, above 8192 on a side, off the 32-pixel grid and small sizes are accepted
   struct.set(wide,5000,field=width)
   struct.set(wide,5000,field=height)
+  match parameters.validate_h3image(wide){ok(_)=>{},err(_)=>{return 72},}
+  struct.set(wide,12000,field=width)
+  struct.set(wide,3001,field=height)
+  match parameters.validate_h3image(wide){ok(_)=>{},err(_)=>{return 72},}
+  struct.set(wide,48,field=width)
+  match parameters.validate_h3image(wide){ok(_)=>{},err(_)=>{return 72},}
+  struct.set(wide,0,field=width)
   match parameters.validate_h3image(wide){ok(_)=>{return 72},err(_)=>{},}
   struct.set(wide,4096,field=width)
   struct.set(wide,4096,field=height)
@@ -442,7 +453,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.read,io.write} {
   var tall_index:u64=0
   loop{if tall_index>=parameters.ph3image_size_count(){break}
     let size=parameters.ph3image_size(tall_index)
-    if size.width%32!=0 or size.height%32!=0 or size.width*size.height>parameters.ph3image_max_pixels() { return 83 }
+    if size.width%32!=0 or size.height%32!=0 { return 83 }
     if parameters.ph3image_size_index(size.width,size.height)!=tall_index { return 83 }
     let edit_size=parameters.ph3image_edit_size(tall_index)
     if edit_size.width%32!=0 or edit_size.height%32!=0 { return 84 }
@@ -465,7 +476,7 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.read,io.write} {
   let tall_off=match parameters.encode_ph3image(tall){ok(value)=>value,err(_)=>{return 91},}
   var tall_off_back=match parameters.decode_ph3image(tall_off){ok(value)=>value,err(_)=>{return 91},}
   if tall_off_back.upsample { return 91 }
-  // Custom: multiples of 32, up to the largest listed area
+  // Custom: any multiple of 32 (the app adds no smallest or largest size)
   struct.set(tall,1024,field=width)
   struct.set(tall,1024,field=height)
   match parameters.validate_ph3image(tall){ok(_)=>{},err(_)=>{return 92},}
@@ -473,8 +484,10 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.read,io.write} {
   match parameters.validate_ph3image(tall){ok(_)=>{return 93},err(_)=>{},}
   struct.set(tall,4096,field=width)
   struct.set(tall,4096,field=height)
-  match parameters.validate_ph3image(tall){ok(_)=>{return 94},err(_)=>{},}
-  // an edit takes 1 to 8 pictures; width and height 0 keep Picture 1's size, else a listed edit size
+  match parameters.validate_ph3image(tall){ok(_)=>{},err(_)=>{return 94},}
+  struct.set(tall,128,field=width)
+  match parameters.validate_ph3image(tall){ok(_)=>{},err(_)=>{return 94},}
+  // an edit takes 1 to 8 pictures; width and height 0 keep Picture 1's size, else a listed size or Custom
   var tall_edit=parameters.ph3image_defaults()
   let _=ref.swap(struct.borrow(tall_edit,field=prompt),string.copy("Make it rain in Picture 1"))
   let _=ref.swap(struct.borrow(tall_edit,field=output),string.copy("/out/ph3image-edit.png"))
@@ -494,8 +507,14 @@ pub fn main(args: view<str>) -> i32 effects {alloc,env,fs.read,io.write} {
   struct.set(tall_edit,2048,field=width)
   struct.set(tall_edit,2048,field=height)
   match parameters.validate_ph3image(tall_edit){ok(_)=>{},err(_)=>{return 99},}
+  // an edit size off the list is Custom: any multiple of 32
   struct.set(tall_edit,2912,field=width)
   struct.set(tall_edit,2912,field=height)
+  match parameters.validate_ph3image(tall_edit){ok(_)=>{},err(_)=>{return 100},}
+  struct.set(tall_edit,4480,field=width)
+  struct.set(tall_edit,4480,field=height)
+  match parameters.validate_ph3image(tall_edit){ok(_)=>{},err(_)=>{return 100},}
+  struct.set(tall_edit,2900,field=width)
   match parameters.validate_ph3image(tall_edit){ok(_)=>{return 100},err(_)=>{},}
   struct.set(tall_edit,0,field=width)
   struct.set(tall_edit,0,field=height)

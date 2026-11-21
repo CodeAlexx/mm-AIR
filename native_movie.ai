@@ -169,8 +169,9 @@ pub fn commit(ui:ref<w.Ui>,project:ref<movie.Project>)->result<unit,string> effe
   if not math.is_finite(duration) or duration<=0.0{return result.err("Shot duration must be positive and finite")}
   let width=match text.parse_u64(w.text_of(ui,w.find(ui,9046))){some(v)=>v,none=>{return result.err("Width must be a positive integer")},}
   let height=match text.parse_u64(w.text_of(ui,w.find(ui,9048))){some(v)=>v,none=>{return result.err("Height must be a positive integer")},}
-  if width==0 or height==0 or width>1032192 or height>1032192 or width%32!=0 or height%32!=0 or width*height>1032192{
-    return result.err("Shot resolution must use multiples of 32 within 1,032,192 pixels")}
+  // The model code's own rule: positive multiples of 32. The app adds no largest size.
+  if width==0 or height==0 or width%32!=0 or height%32!=0{
+    return result.err("Shot width and height must be multiples of 32")}
   let seed=match text.parse_i64(w.text_of(ui,w.find(ui,9050))){some(v)=>v,none=>{return result.err("Seed must be an integer")},}
   if seed < -1{return result.err("Seed must be -1 or nonnegative")}
   let index=project.selected_shot

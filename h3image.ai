@@ -233,10 +233,6 @@ fn run_inner(request:ref<parameters.H3ImageRequest>,sender:ref<option<channel.Se
     height=cast.wrap(first.height)
   }
 
-  if width*height>parameters.h3image_max_pixels(){
-    return failure(str.view(output),"MiniMax H3-Image makes pictures up to 20 megapixels")
-  }
-
   // Prompt expander: runs first and frees everything before the image model loads.
   var prompt=string.copy(struct.borrow(request,field=prompt))
   var note=string.new()

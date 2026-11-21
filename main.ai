@@ -633,7 +633,7 @@ fn show_edit_model(session:ref<desk.Session>,fibo:bool,is_h3i:bool,ph3:bool)->un
     let _=desk.set_bool(session,array.borrow(qwen_only,index),"visible",not (fibo or is_h3i or ph3))
     index=index+1}
   let _=desk.set_bool(session,"qwen_edit_match_source","visible",fibo or is_h3i)
-  // P-H3-Image: a size list and the prompt upsampler; no Width and Height of its own.
+  // P-H3-Image: a size list and the prompt upsampler; Width and Height are the size of its "Custom" entry.
   var ph3_only:array<string> = ["qwen_edit_ph3image_size_label","qwen_edit_ph3image_size","qwen_edit_ph3image_upsample"]
   index=0
   loop{if index>=array.len(ph3_only){break}
@@ -642,7 +642,7 @@ fn show_edit_model(session:ref<desk.Session>,fibo:bool,is_h3i:bool,ph3:bool)->un
   var free_size:array<string> = ["qwen_edit_width_label","qwen_edit_width","qwen_edit_height_label","qwen_edit_height"]
   index=0
   loop{if index>=array.len(free_size){break}
-    let _=desk.set_bool(session,array.borrow(free_size,index),"visible",not ph3)
+    let _=desk.set_bool(session,array.borrow(free_size,index),"visible",true)
     index=index+1}
   var h3image_only:array<string> = ["qwen_edit_expander_label","qwen_edit_expander","qwen_edit_lora_label",
     "qwen_edit_lora_row","qwen_edit_lora_strength_row"]
@@ -1943,7 +1943,8 @@ pub fn main(args: view<str>) -> i32
   var qwen_edit_h3image:bool=false
   // true: Image Edit runs P-H3-Image (model list entry 4); never true together with the two above.
   var qwen_edit_ph3image:bool=false
-  // P-H3-Image edit size: 0 keeps Picture 1's size, 1.. are parameters.ph3image_edit_size(n-1).
+  // P-H3-Image edit size: 0 keeps Picture 1's size, 1.. are parameters.ph3image_edit_size(n-1), the entry after the
+  // last one is Custom (Width and Height).
   var qwen_edit_ph3_size:u64=0
   var qwen_edit_ph3_upsample:bool=true
   var generate_ph3_upsample:bool=true
@@ -2401,6 +2402,12 @@ pub fn main(args: view<str>) -> i32
                     qwen_edit_ph3_size=if request.width==0{0}
                       else{parameters.ph3image_edit_size_index(request.width,request.height)+1}
                     let _=desk.set_number(session,"qwen_edit_ph3image_size","selected",cast.float(qwen_edit_ph3_size))
+                    if request.width!=0{
+                      qwen_edit_width=request.width
+                      qwen_edit_height=request.height
+                      let _=desk.set_number(session,"qwen_edit_width","value",cast.float(qwen_edit_width))
+                      let _=desk.set_number(session,"qwen_edit_height","value",cast.float(qwen_edit_height))
+                    }
                     qwen_edit_ph3_upsample=request.upsample
                     let _=desk.set_bool(session,"qwen_edit_ph3image_upsample","active",qwen_edit_ph3_upsample)
                     qwen_edit_seed=request.seed
@@ -5389,7 +5396,7 @@ pub fn main(args: view<str>) -> i32
             }
             if id=="qwen_edit_ph3image_size"{
               let choice:u64=cast.sat(desk.number(event,"value"))
-              if choice<=parameters.ph3image_edit_size_count(){qwen_edit_ph3_size=choice}
+              if choice<=parameters.ph3image_edit_size_count()+1{qwen_edit_ph3_size=choice}
               continue
             }
             if id=="qwen_edit_ph3image_upsample"{
@@ -5711,6 +5718,9 @@ pub fn main(args: view<str>) -> i32
                 if qwen_edit_ph3_size==0{
                   struct.set(ph3_request,0,field=width)
                   struct.set(ph3_request,0,field=height)
+                }else if qwen_edit_ph3_size>parameters.ph3image_edit_size_count(){
+                  struct.set(ph3_request,qwen_edit_width,field=width)
+                  struct.set(ph3_request,qwen_edit_height,field=height)
                 }else{
                   let ph3_size=parameters.ph3image_edit_size(qwen_edit_ph3_size-1)
                   struct.set(ph3_request,ph3_size.width,field=width)

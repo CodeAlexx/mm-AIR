@@ -235,9 +235,10 @@ pub fn validate_fibo(request:ref<FiboRequest>) -> result<unit,string> effects {a
     index=index+1
   }
   let keep_size:bool=request.width==0 and request.height==0
-  if not (edit and keep_size) and (request.width<256 or request.height<256 or request.width>2048 or
-      request.height>2048 or request.width%fibo_defaults.side_step()!=0 or request.height%fibo_defaults.side_step()!=0) {
-    return result.err("Fibo 2.0 size must be 256 to 2048 px, both sides multiples of 16")
+  // The model code's own rule is the multiple; a size beyond the transformer's position table is refused by the session.
+  if not (edit and keep_size) and (request.width==0 or request.height==0 or
+      request.width%fibo_defaults.side_step()!=0 or request.height%fibo_defaults.side_step()!=0) {
+    return result.err("Fibo 2.0 width and height must be multiples of 16")
   }
   if request.steps<1 or request.steps>200 {return result.err("Fibo 2.0 steps must be 1 to 200")}
   if not math.is_finite(request.guidance) or request.guidance<1.0 or request.guidance>20.0 {
@@ -296,8 +297,6 @@ pub type H3ImageRequest = struct {
 type H3ImageFile=struct {schema:string,request:H3ImageRequest} derive codec(strict)
 pub fn h3image_schema() -> str effects {} { "mm-air.h3image.parameters.v1" }
 pub fn h3image_max_images() -> u64 effects {} { 16 }
-// Largest picture: the model works 4 to 20 megapixels (agent assumption: 20 MP as the app limit; 4096x4096 was measured).
-pub fn h3image_max_pixels() -> u64 effects {} { 20000000 }
 // The sizes the H3-Image size list offers, in list order: the same presets as SerenityAir's
 // H3 Image (2048x2048 first and default). A size under about 4 MP is made by AIR's session on a
 // larger canvas of the same shape and resized back. The entry after the last one is "Custom".
@@ -350,11 +349,9 @@ pub fn validate_h3image(request:ref<H3ImageRequest>) -> result<unit,string> effe
     index=index+1
   }
   let keep_size:bool=request.width==0 and request.height==0
-  if not (edit and keep_size) and (request.width<64 or request.height<64 or request.width>8192 or request.height>8192) {
-    return result.err("MiniMax H3-Image size must be 64 to 8192 px on each side")
-  }
-  if not (edit and keep_size) and request.width*request.height>h3image_max_pixels() {
-    return result.err("MiniMax H3-Image makes pictures up to 20 megapixels")
+  // The open model takes any positive width and height (no multiple, no area limit); the app adds none.
+  if not (edit and keep_size) and (request.width==0 or request.height==0) {
+    return result.err("MiniMax H3-Image needs a width and a height")
   }
   if not h3image_expander_valid(struct.borrow(request,field=expander),edit) {
     return result.err("Choose a prompt expander from the list")
@@ -405,8 +402,6 @@ pub type PH3ImageRequest = struct {
 type PH3ImageFile=struct {schema:string,request:PH3ImageRequest} derive codec(strict)
 pub fn ph3image_schema() -> str effects {} { "mm-air.ph3image.parameters.v1" }
 pub fn ph3image_max_images() -> u64 effects {} { 8 }
-// Largest picture: the area of the largest listed size, 2912x2912 (agent assumption: nothing larger was run).
-pub fn ph3image_max_pixels() -> u64 effects {} { 8479744 }
 // The sizes the creator's pipeline lists, in list order; the entry after the last one is "Custom"
 // (text to image). desktop.ui's ph3image_size_list has the same order.
 pub fn ph3image_size_count() -> u64 effects {} { 7 }
@@ -428,7 +423,8 @@ pub fn ph3image_size_index(width:u64,height:u64) -> u64 effects {} {
     index=index+1}
   ph3image_size_count()
 }
-// Edit output sizes. desktop.ui's ph3image_edit_size_list lists "Picture 1 size" first, then these.
+// Edit output sizes. desktop.ui's ph3image_edit_size_list lists "Picture 1 size" first, then these, then "Custom"
+// (Width and Height).
 pub fn ph3image_edit_size_count() -> u64 effects {} { 7 }
 pub fn ph3image_edit_size(index:u64) -> H3ImageSize effects {} {
   if index==0 {return H3ImageSize {width:2048,height:2048}}
@@ -472,16 +468,14 @@ pub fn validate_ph3image(request:ref<PH3ImageRequest>) -> result<unit,string> ef
   }
   if edit {
     let keep_size:bool=request.width==0 and request.height==0
-    if not keep_size and ph3image_edit_size_index(request.width,request.height)==ph3image_edit_size_count() {
-      return result.err("Choose an edit size from the list")
+    // The listed edit sizes are presets; Custom takes any multiple of 32 (the model's rule).
+    if not keep_size and (request.width==0 or request.height==0 or request.width%32!=0 or request.height%32!=0) {
+      return result.err("P-H3-Image width and height must be multiples of 32")
     }
   } else {
-    // Sides: 256 px as the smallest is an agent assumption; 32-pixel steps are the model's rule.
-    if request.width<256 or request.height<256 or request.width%32!=0 or request.height%32!=0 {
-      return result.err("P-H3-Image width and height must be multiples of 32, 256 px or more")
-    }
-    if request.width*request.height>ph3image_max_pixels() {
-      return result.err("P-H3-Image makes pictures up to 8 megapixels")
+    // 32-pixel steps are the model's rule; the app adds no smallest or largest size.
+    if request.width==0 or request.height==0 or request.width%32!=0 or request.height%32!=0 {
+      return result.err("P-H3-Image width and height must be multiples of 32")
     }
   }
   if not path.is_absolute(struct.borrow(request,field=output)) or
@@ -571,9 +565,9 @@ pub fn validate_moss(request:ref<MossRequest>) -> result<unit,string> effects {a
   match moss_model_index_of(str.view(struct.borrow(request,field=model))) {
     some(_)=>{},none=>{return result.err("Unknown MOSS-Image model")},}
   if text.trim(struct.borrow(request,field=prompt))=="" {return result.err("Write a prompt first")}
-  if request.width<256 or request.height<256 or request.width>2048 or request.height>2048 or
-      request.width%16!=0 or request.height%16!=0 {
-    return result.err("MOSS-Image size must be 256 to 2048 px, both sides multiples of 16")
+  // The model code's own rule: positive multiples of 16. The app adds no smallest or largest size.
+  if request.width==0 or request.height==0 or request.width%16!=0 or request.height%16!=0 {
+    return result.err("MOSS-Image width and height must be multiples of 16")
   }
   if request.steps<1 or request.steps>200 {return result.err("MOSS-Image steps must be 1 to 200")}
   if not math.is_finite(request.cfg) or request.cfg<1.0 or request.cfg>20.0 {
