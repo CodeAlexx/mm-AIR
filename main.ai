@@ -1771,11 +1771,11 @@ pub fn main(args: view<str>) -> i32
   var model_index: u32 = 0
   var task_index: u32 = h3.task_t2va()
   // A new request starts on the creator recipe: the app preset's default_profile (20 Euler evaluations on the
-  // exponential grid), 1344x768, ConvRot INT8, exact attention.
+  // exponential grid), 1344x768, ConvRot INT8, dense INT8 attention.
   var profile_index: u32 = default_h3_profile(h3_presets)
   var conditioner_projection_index: u32 = h3.projection_convrot_int8()
   var transformer_projection_index: u32 = h3.projection_convrot_int8()
-  var attention_index: u32 = h3.attention_exact()
+  var attention_index: u32 = h3.attention_dense_int8()
   var generation_mode: u32 = character_swap.standard()
   var character_sheet_mode: u32 = character_sheet.off()
   var character_sheet_style: u32 = character_sheet.keep_picture_style()
@@ -7182,7 +7182,7 @@ pub fn main(args: view<str>) -> i32
               var defaults=h3.request("A cinematic wide shot with natural motion, detailed atmosphere, and synchronized environmental audio.",
                 h3.model_base(),h3.task_t2va(),default_h3_profile(h3_presets),
                 h3.projection_convrot_int8(),h3.projection_convrot_int8(),
-                h3.attention_exact(),seed,0,[],"")
+                h3.attention_dense_int8(),seed,0,[],"")
               match h3.use_preset_geometry(h3_presets, defaults) {
                 ok(_) => {},
                 err(problem) => { var held: h3.Problem = problem
