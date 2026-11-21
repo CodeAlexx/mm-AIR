@@ -27,8 +27,8 @@ pub fn request(project:ref<movie.Project>,index:u64,output:str)->result<h3.Reque
     task=if first and last{h3.task_fl2va()}else{if first{h3.task_i2va()}else{if last{h3.task_l2va()}else{h3.task_t2va()}}}
   }}
   var value=h3.request(movie.compile_project_prompt(project,index),model,task,
-    h3.profile_dc_euler_19(),h3.projection_convrot_int8(),h3.projection_convrot_int8(),
-    h3.attention_dense_int8(),shot.seed,h3.resolution_custom(),references,output)
+    h3.profile_creator_20(),h3.projection_convrot_int8(),h3.projection_convrot_int8(),
+    h3.attention_exact(),shot.seed,h3.resolution_custom(),references,output)
   match h3.set_geometry(value,shot.width,shot.height,shot.duration){ok(_)=>{},err(problem)=>{var held=problem
     return result.err(h3.describe(held))},}
   match h3.validate(value){ok(_)=>result.ok(value),err(problem)=>{var held=problem

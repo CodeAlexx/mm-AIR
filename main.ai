@@ -1367,6 +1367,12 @@ fn save_movie_selection(root:str,filename:str)->unit
 
 // Movie and Generate share the selected H3 runtime policy. Shot geometry and
 // sources remain project-owned; queueing a take must not silently change precision.
+// The profile a new H3 request starts with: the app preset's default_profile; a preset without one keeps
+// the 19-evaluation Euler profile.
+fn default_h3_profile(presets:ref<h3.Presets>)->u32 effects{}{
+  let chosen:u32=h3.default_profile(presets)
+  if chosen==h3.profile_unselected(){h3.profile_quality_19()}else{chosen}
+}
 fn movie_projection_label(value:u32)->str effects{}{
   if value==h3.projection_exact_bf16(){"Exact BF16"}
   else if value==h3.projection_convrot_int8(){"ConvRot INT8"}
@@ -1379,6 +1385,11 @@ fn show_movie_runtime_policy(session:ref<desk.Session>,profile:u32,
   let _=desk.set_text(session,"movie_transformer_precision",movie_projection_label(transformer))
   let _=desk.set_text(session,"movie_profile_policy",if profile==h3.profile_dc_euler_19(){"DC Euler · 19"}
     else if profile==h3.profile_quality_19(){"Euler · 19"}
+    else if profile==h3.profile_creator_20(){"Exponential Euler · 20"}
+    else if profile==h3.profile_creator_50(){"Exponential Euler · 50"}
+    else if profile==h3.profile_res_20(){"RES · 20"}
+    else if profile==h3.profile_turbo_8(){"Turbo · 8"}
+    else if profile==h3.profile_turbo_4(){"Turbo · 4"}
     else if profile==h3.profile_donor_7(){"Donor · 7"}else{"Select in Generate"})
   let _=desk.set_text(session,"movie_attention_policy",if attention==h3.attention_dense_int8(){"Dense INT8"}
     else if attention==h3.attention_exact(){"Exact"}
@@ -1759,14 +1770,16 @@ pub fn main(args: view<str>) -> i32
   var prompt: string = text.copy("A cinematic wide shot with natural motion, detailed atmosphere, and synchronized environmental audio.")
   var model_index: u32 = 0
   var task_index: u32 = h3.task_t2va()
-  var profile_index: u32 = h3.profile_quality_19()
+  // A new request starts on the creator recipe: the app preset's default_profile (20 Euler evaluations on the
+  // exponential grid), 1344x768, ConvRot INT8, exact attention.
+  var profile_index: u32 = default_h3_profile(h3_presets)
   var conditioner_projection_index: u32 = h3.projection_convrot_int8()
   var transformer_projection_index: u32 = h3.projection_convrot_int8()
-  var attention_index: u32 = h3.attention_dense_int8()
+  var attention_index: u32 = h3.attention_exact()
   var generation_mode: u32 = character_swap.standard()
   var character_sheet_mode: u32 = character_sheet.off()
   var character_sheet_style: u32 = character_sheet.keep_picture_style()
-  var resolution_index: u32 = 6
+  var resolution_index: u32 = 0
   var qwen_image_resolution_index:u32=0
   var qwen_turbo:bool=layout_memory.turbo()
   var qwen_image_steps:u64=if qwen_turbo{qwen_image_contract.turbo_steps()}
@@ -1776,8 +1789,8 @@ pub fn main(args: view<str>) -> i32
   var qwen_image_schedule:u32=qwen_image_contract.schedule_default()
   var qwen_image_eta:f64=0.5
   var qwen_image_bongmath:bool=true
-  var width: u64 = 832
-  var height: u64 = 480
+  var width: u64 = 1344
+  var height: u64 = 768
   var seconds: f64 = 5.0
   var saved_h3_width: u64 = width
   var saved_h3_height: u64 = height
@@ -5028,7 +5041,7 @@ pub fn main(args: view<str>) -> i32
                 if fast {
                   profile_index = h3.profile_turbo_4()
                 } else if profile_index == h3.profile_turbo_4() {
-                  profile_index = h3.profile_quality_19()
+                  profile_index = default_h3_profile(h3_presets)
                 }
                 let _ = desk.set_number(session,"gen_profile","selected",cast.float(profile_index))
                 generation_status(session,if character_swap.is_masked(generation_mode) {
@@ -5036,7 +5049,7 @@ pub fn main(args: view<str>) -> i32
                 } else if fast {"Character Swap ready · Turbo 4-step root selected; pick a 19-evaluation schedule for the full sampler"
                 } else {"Character Swap ready · Build Prompt does not start H3"})
               } else if profile_index == h3.profile_turbo_4() {
-                profile_index = h3.profile_quality_19()
+                profile_index = default_h3_profile(h3_presets)
                 let _ = desk.set_number(session,"gen_profile","selected",cast.float(profile_index))
               }
               source_widgets(session,task_index)
@@ -7167,9 +7180,9 @@ pub fn main(args: view<str>) -> i32
                 let _=desk.set_text(session,"gen_seed",str.view(string.from_int(seed)))
               }
               var defaults=h3.request("A cinematic wide shot with natural motion, detailed atmosphere, and synchronized environmental audio.",
-                h3.model_base(),h3.task_t2va(),h3.profile_quality_19(),
+                h3.model_base(),h3.task_t2va(),default_h3_profile(h3_presets),
                 h3.projection_convrot_int8(),h3.projection_convrot_int8(),
-                h3.attention_dense_int8(),seed,6,[],"")
+                h3.attention_exact(),seed,0,[],"")
               match h3.use_preset_geometry(h3_presets, defaults) {
                 ok(_) => {},
                 err(problem) => { var held: h3.Problem = problem
@@ -8604,8 +8617,8 @@ pub fn main(args: view<str>) -> i32
                         cast.wrap(prompt_model_index),job.evaluations,
                         cast.wrap(request.conditioner_projection),
                         cast.wrap(request.transformer_projection),
-                        cast.wrap(request.attention),if request.profile==
-                          h3.profile_dc_euler_19(){1}else{0}) {
+                        cast.wrap(request.attention),if h3.exponential(h3_presets,
+                          request.profile){1}else{0}) {
                       ok(value)=>value,
                       err(message)=>{generation_status(session,str.view(message))
                         continue},

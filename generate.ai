@@ -2047,10 +2047,11 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
     return outcome(false, str.view(output_path),
       "MiniMax-H3 Ref2VA needs at least one image or video reference; audio references cannot stand alone")
   }
-  if job.evaluations != 7 and job.evaluations != 19 and
+  if job.evaluations != 7 and job.evaluations != 8 and job.evaluations != 19 and job.evaluations != 20 and
+     job.evaluations != 50 and
      not (job.evaluations == 4 and job.model == session.Model.Reference) {
     return outcome(false, str.view(output_path),
-      "MiniMax-H3 needs the seven- or nineteen-evaluation schedule, or four for Ref2VA turbo")
+      "MiniMax-H3 runs 7, 8, 19, 20 or 50 evaluations, or four for Ref2VA turbo")
   }
   match parameters.validate_loras(struct.borrow(job,field=loras)) {
     ok(_) => {},
