@@ -251,9 +251,23 @@ fn run_inner(request:ref<parameters.H3ImageRequest>,sender:ref<option<channel.Se
     note=text.concat(" · prompt rewritten in ",text.concat(str.view(number((time.monotonic_ns()-expand_started)/1000000000))," s"))
   }
 
-  // The model's own request: steps 6, no guidance, no negative prompt.
+  // The model's own request: no guidance, no negative prompt; 6 Euler steps unless a sampling recipe says otherwise.
   var form:hrequest.Request=hrequest.request(str.view(prompt),width,height,images,str.view(output))
   form.seed=cast.sat(request.seed)
+  // Sampling: a preset, or the request's own fields with "custom".
+  if str.view(struct.borrow(request,field=recipe))!="custom"{
+    if not hrequest.apply_preset(form,str.view(struct.borrow(request,field=recipe))){return failure(str.view(output),"Unknown preset")}
+  }else{
+    match hrequest.parse_sampler(str.view(struct.borrow(request,field=sampler))){
+      some(found)=>{form.sampler=found},none=>{return failure(str.view(output),"Unknown sampler")},}
+    match hrequest.parse_schedule(str.view(struct.borrow(request,field=schedule))){
+      some(found)=>{form.schedule=found},none=>{return failure(str.view(output),"Unknown schedule")},}
+    form.steps=request.steps
+    form.shift=request.shift
+    form.lcm_noise_start=request.lcm_noise_start
+    form.lcm_noise_end=request.lcm_noise_end
+    form.lcm_noise_clip=request.lcm_noise_clip
+  }
   match hrequest.validate(form){
     ok(_)=>{},
     err(problem)=>{return failure(str.view(output),str.view(problem.message))},
@@ -305,7 +319,7 @@ fn run_inner(request:ref<parameters.H3ImageRequest>,sender:ref<option<channel.Se
     err(message)=>{return failure(str.view(output),message)},
   }
   // Best case (nothing else on the card): the blocks must at least fit as streamed from host memory.
-  match dit.plan_residency(made.sequence_rows,hrequest.fixed_steps(),made.timestep_tables,0,
+  match dit.plan_residency(made.sequence_rows,form.steps,made.timestep_tables,0,
       device-budget.device_reserve_bytes,host,2,opened.dims){
     ok(_)=>{},
     err(_)=>{return failure(str.view(output),"This computer's graphics card or memory is too small for MiniMax H3-Image")},

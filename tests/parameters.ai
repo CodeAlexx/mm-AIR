@@ -151,6 +151,29 @@ fn result_summaries()->bool effects {alloc,io.write} {
     "FLUX 3 Image Klein (no longer in MM-Air) · 1024×1024 · 16 steps · seed 5","a fox") { return false }
   if not summary_is("{\"schema\":\"mm-air.h3image.parameters.v1\",\"request\":{\"prompt\":\"a mech\",\"width\":5024,\"height\":3360,\"seed\":7}}",
     "MiniMax H3-Image · 5024×3360 · seed 7","a mech") { return false }
+  // H3-Image sampling fields: a file saved before they existed reads as the stock preset; a preset fills the fields;
+  // the fields survive a save and load.
+  match parameters.decode_h3image("{\"schema\":\"mm-air.h3image.parameters.v1\",\"request\":{\"prompt\":\"a mech\",\"output\":\"/tmp/a.png\",\"images\":[],\"width\":2048,\"height\":2048,\"seed\":7,\"loras\":[],\"expander\":\"off\"}}") {
+    ok(old)=>{ var held=old
+      if str.view(struct.borrow(held,field=recipe))!="stock" or held.steps!=6 or str.view(struct.borrow(held,field=sampler))!="euler" { return false } },
+    err(_)=>{ return false },
+  }
+  var recipe=parameters.h3image_defaults()
+  let _=ref.swap(struct.borrow(recipe,field=output),string.copy("/tmp/a.png"))
+  let _=ref.swap(struct.borrow(recipe,field=prompt),string.copy("a mech"))
+  if not parameters.h3image_apply_recipe(recipe,"lcm_10_lq") { return false }
+  if str.view(struct.borrow(recipe,field=sampler))!="lcm" or str.view(struct.borrow(recipe,field=schedule))!="linear_quadratic" or recipe.steps!=10
+      or recipe.shift!=5.0 or recipe.lcm_noise_start!=0.9 or recipe.lcm_noise_end!=0.95 { return false }
+  if parameters.h3image_apply_recipe(recipe,"custom") { return false }
+  match parameters.encode_h3image(recipe) {
+    ok(saved)=>{ match parameters.decode_h3image(str.view(saved)) {
+      ok(back)=>{ var kept=back
+        if str.view(struct.borrow(kept,field=recipe))!="lcm_10_lq" or kept.steps!=10 or kept.lcm_noise_end!=0.95 { return false } },
+      err(_)=>{ return false }, } },
+    err(_)=>{ return false },
+  }
+  struct.set(recipe,0,field=steps)
+  if result.is_ok(parameters.validate_h3image(recipe)) { return false }
   if array.len(parameters.result_summary("not json"))!=0 { return false }
   if parameters.retired_flux3_prompt("{\"schema\":\"mm-air.flux3-klein.parameters\",\"prompt\":\"a fox\",\"seed\":5}")!="a fox" { return false }
   match parameters.retired_flux3_seed("{\"schema\":\"mm-air.flux3-klein.parameters\",\"prompt\":\"a fox\",\"seed\":5}") { some(value)=>value==5, none=>false, }

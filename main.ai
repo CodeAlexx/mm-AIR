@@ -378,6 +378,85 @@ fn edit_limit(fibo:bool,wide:bool,ph3:bool)->u64 effects{}{if ph3{8}else if wide
 fn expander_name(index:u64)->string effects{alloc}{
   string.copy(if index==1{"low"}else if index==2{"xhigh"}else if index==3{"qwen"}else{"off"})
 }
+// MiniMax H3-Image sampling fields (preset, sampler, schedule, steps, shift, LCM noise) of Generate ("gen_h3image")
+// and Image Edit ("qwen_edit_h3image"). The values live in a request; `recipe_show` puts them in the fields.
+fn recipe_id(prefix:str,name:str)->string effects{alloc}{text.concat(prefix,name)}
+fn recipe_show(session:ref<desk.Session>,prefix:str,r:ref<parameters.H3ImageRequest>)->unit effects{alloc,net,time}{
+  let preset:f64=cast.float(parameters.h3image_recipe_index(str.view(struct.borrow(r,field=recipe))))
+  let sampler:f64=cast.float(parameters.h3image_sampler_index(str.view(struct.borrow(r,field=sampler))))
+  let schedule:f64=cast.float(parameters.h3image_schedule_index(str.view(struct.borrow(r,field=schedule))))
+  let _=desk.set_number(session,str.view(recipe_id(prefix,"_recipe")),"selected",preset)
+  let _=desk.set_number(session,str.view(recipe_id(prefix,"_sampler")),"selected",sampler)
+  let _=desk.set_number(session,str.view(recipe_id(prefix,"_schedule")),"selected",schedule)
+  let _=desk.set_text(session,str.view(recipe_id(prefix,"_steps")),str.view(string.from_int(cast.sat(r.steps))))
+  let _=desk.set_text(session,str.view(recipe_id(prefix,"_shift")),str.view(string.from_float(r.shift)))
+  let _=desk.set_text(session,str.view(recipe_id(prefix,"_noise_start")),str.view(string.from_float(r.lcm_noise_start)))
+  let _=desk.set_text(session,str.view(recipe_id(prefix,"_noise_end")),str.view(string.from_float(r.lcm_noise_end)))
+  let _=desk.set_text(session,str.view(recipe_id(prefix,"_noise_clip")),str.view(string.from_float(r.lcm_noise_clip)))
+  ()
+}
+// A changed sampling field switches the preset to Custom.
+fn recipe_custom(session:ref<desk.Session>,prefix:str,r:ref<parameters.H3ImageRequest>)->unit effects{alloc,net,time}{
+  if str.view(struct.borrow(r,field=recipe))!="custom"{
+    let _=ref.swap(struct.borrow(r,field=recipe),string.copy("custom"))
+    let _=desk.set_number(session,str.view(recipe_id(prefix,"_recipe")),"selected",5.0)
+  }
+  ()
+}
+// True when `id` is one of the sampling fields of `prefix` (the event is then handled here).
+fn recipe_event(session:ref<desk.Session>,prefix:str,id:str,event:ref<json.Document>,r:ref<parameters.H3ImageRequest>)->bool
+    effects{alloc,net,time}{
+  if id==str.view(recipe_id(prefix,"_recipe")){
+    let name:str=parameters.h3image_recipe_name(cast.sat(desk.number(event,"value")))
+    if name!=str.view(struct.borrow(r,field=recipe)){
+      if name=="custom"{let _=ref.swap(struct.borrow(r,field=recipe),string.copy("custom"))}
+      else{
+        let _=parameters.h3image_apply_recipe(r,name)
+        recipe_show(session,prefix,r)
+      }
+    }
+    return true
+  }
+  if id==str.view(recipe_id(prefix,"_sampler")){
+    let name:str=parameters.h3image_sampler_name(cast.sat(desk.number(event,"value")))
+    if name!=str.view(struct.borrow(r,field=sampler)){
+      let _=ref.swap(struct.borrow(r,field=sampler),string.copy(name))
+      recipe_custom(session,prefix,r)
+    }
+    return true
+  }
+  if id==str.view(recipe_id(prefix,"_schedule")){
+    let name:str=parameters.h3image_schedule_name(cast.sat(desk.number(event,"value")))
+    if name!=str.view(struct.borrow(r,field=schedule)){
+      let _=ref.swap(struct.borrow(r,field=schedule),string.copy(name))
+      recipe_custom(session,prefix,r)
+    }
+    return true
+  }
+  if id==str.view(recipe_id(prefix,"_steps")){
+    match text.parse_u64(str.view(text.trim(desk.field(event,"value")))){
+      some(value)=>{if value!=r.steps and value>=1{struct.set(r,value,field=steps)
+        recipe_custom(session,prefix,r)}},
+      none=>{},
+    }
+    return true
+  }
+  let which:u64=if id==str.view(recipe_id(prefix,"_shift")){1}else if id==str.view(recipe_id(prefix,"_noise_start")){2}
+    else if id==str.view(recipe_id(prefix,"_noise_end")){3}else if id==str.view(recipe_id(prefix,"_noise_clip")){4}else{0}
+  if which==0{return false}
+  match text.parse_f64(str.view(text.trim(desk.field(event,"value")))){
+    some(value)=>{
+      let current:f64=if which==1{r.shift}else if which==2{r.lcm_noise_start}else if which==3{r.lcm_noise_end}else{r.lcm_noise_clip}
+      if value>=0.0 and value!=current{
+        if which==1{struct.set(r,value,field=shift)}else if which==2{struct.set(r,value,field=lcm_noise_start)}
+        else if which==3{struct.set(r,value,field=lcm_noise_end)}else{struct.set(r,value,field=lcm_noise_clip)}
+        recipe_custom(session,prefix,r)
+      }
+    },
+    none=>{},
+  }
+  true
+}
 fn expander_index(name:str)->u64 effects{}{
   if name=="low"{1}else if name=="xhigh"{2}else if name=="qwen"{3}else{0}
 }
@@ -645,7 +724,11 @@ fn show_edit_model(session:ref<desk.Session>,fibo:bool,is_h3i:bool,ph3:bool)->un
     let _=desk.set_bool(session,array.borrow(free_size,index),"visible",true)
     index=index+1}
   var h3image_only:array<string> = ["qwen_edit_expander_label","qwen_edit_expander","qwen_edit_lora_label",
-    "qwen_edit_lora_row","qwen_edit_lora_strength_row"]
+    "qwen_edit_lora_row","qwen_edit_lora_strength_row",
+    "qwen_edit_h3image_recipe_label","qwen_edit_h3image_recipe","qwen_edit_h3image_sampler_label","qwen_edit_h3image_sampler",
+    "qwen_edit_h3image_schedule_label","qwen_edit_h3image_schedule","qwen_edit_h3image_steps_label","qwen_edit_h3image_steps",
+    "qwen_edit_h3image_shift_label","qwen_edit_h3image_shift","qwen_edit_h3image_noise_start_label","qwen_edit_h3image_noise_start",
+    "qwen_edit_h3image_noise_end_label","qwen_edit_h3image_noise_end","qwen_edit_h3image_noise_clip_label","qwen_edit_h3image_noise_clip"]
   index=0
   loop{if index>=array.len(h3image_only){break}
     let _=desk.set_bool(session,array.borrow(h3image_only,index),"visible",is_h3i)
@@ -893,6 +976,8 @@ fn filter_parameters(session:ref<desk.Session>,query:str,model:u32,swap_mode:u32
     (wanted == "" or text.contains("krea h3 moss fibo qwen lora overlay strength",wanted)))
   let _=desk.set_bool(session,"gen_h3image_group","visible",wide and
     (wanted=="" or text.contains("prompt expand expander rewrite low extra high",wanted)))
+  let _=desk.set_bool(session,"gen_h3image_sampling_group","visible",wide and
+    (wanted=="" or text.contains("sampling preset sampler schedule steps shift lcm noise euler res er-sde stock",wanted)))
   let _=desk.set_bool(session,"gen_ph3image_group","visible",ph3 and
     (wanted=="" or text.contains("prompt upsampler upsample rewrite",wanted)))
   let _=desk.set_bool(session,"gen_image_sampling","visible",(moss or fibo) and
@@ -1951,6 +2036,8 @@ pub fn main(args: view<str>) -> i32
   var qwen_edit_expander:string=string.copy("off")
   var qwen_edit_lora:array<parameters.LoraEntry>=[]
   var generate_expander:string=string.copy("off")
+  var generate_recipe:parameters.H3ImageRequest=parameters.h3image_defaults()
+  var qwen_edit_recipe:parameters.H3ImageRequest=parameters.h3image_defaults()
   var qwen_edit_match_source:bool=true
   var qwen_edit_enhance:bool=true
   // Face / head / body swap preset for Image Edit: 0 is off, n is face_swap.preset(n-1).
@@ -2498,6 +2585,8 @@ pub fn main(args: view<str>) -> i32
                     qwen_edit_h3image=true
                     qwen_edit_ph3image=false
                     qwen_edit_expander=string.copy(struct.borrow(request,field=expander))
+                    parameters.h3image_copy_recipe(request,qwen_edit_recipe)
+                    recipe_show(session,"qwen_edit_h3image",qwen_edit_recipe)
                     let _=desk.set_number(session,"qwen_edit_expander","selected",cast.float(expander_index(str.view(qwen_edit_expander))))
                     qwen_edit_lora=parameters.clone_loras(struct.borrow(request,field=loras))
                     let _=desk.set_number(session,"qwen_edit_model","selected",2.0)
@@ -2534,6 +2623,8 @@ pub fn main(args: view<str>) -> i32
                     output_media=string.copy(struct.borrow(request,field=output))
                     saved_image_output=string.copy(output_media)
                     generate_expander=string.copy(struct.borrow(request,field=expander))
+                    parameters.h3image_copy_recipe(request,generate_recipe)
+                    recipe_show(session,"gen_h3image",generate_recipe)
                     resolution_index=h3.resolution_custom()
                     character_sheet_mode=character_sheet.off()
                     let _=desk.set_number(session,"gen_character_sheet_mode","selected",0.0)
@@ -5404,6 +5495,8 @@ pub fn main(args: view<str>) -> i32
               edit_model_status(session,qwen_edit_fibo,qwen_edit_h3image,str.view(qwen_edit_expander),qwen_edit_ph3image,qwen_edit_ph3_upsample)
               continue
             }
+            if recipe_event(session,"gen_h3image",str.view(id),event,generate_recipe){continue}
+            if recipe_event(session,"qwen_edit_h3image",str.view(id),event,qwen_edit_recipe){continue}
             if id=="gen_h3image_expander"{
               generate_expander=expander_name(cast.sat(desk.number(event,"value")))
               continue
@@ -5771,6 +5864,7 @@ pub fn main(args: view<str>) -> i32
                 let _=ref.swap(struct.borrow(h3image_request,field=images),copy_paths(qwen_edit_references))
                 let _=ref.swap(struct.borrow(h3image_request,field=loras),parameters.clone_loras(qwen_edit_lora))
                 let _=ref.swap(struct.borrow(h3image_request,field=expander),string.copy(str.view(qwen_edit_expander)))
+                parameters.h3image_copy_recipe(qwen_edit_recipe,h3image_request)
                 if qwen_edit_match_source{
                   struct.set(h3image_request,0,field=width)
                   struct.set(h3image_request,0,field=height)
@@ -8138,6 +8232,7 @@ pub fn main(args: view<str>) -> i32
                 let _=ref.swap(struct.borrow(request,field=output),string.copy(output_media))
                 let _=ref.swap(struct.borrow(request,field=loras),parameters.clone_loras(generate_loras))
                 let _=ref.swap(struct.borrow(request,field=expander),string.copy(str.view(generate_expander)))
+                parameters.h3image_copy_recipe(generate_recipe,request)
                 struct.set(request,width,field=width)
                 struct.set(request,height,field=height)
                 struct.set(request,if seed<0{time.monotonic_ns()}else{cast.wrap(seed)},field=seed)
