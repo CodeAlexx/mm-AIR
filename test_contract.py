@@ -168,7 +168,7 @@ assert float(duration_props["lower"]) <= 4/24+1e-12
 assert float(duration_props["upper"]) >= 4294967295/24
 assert float(duration_props["step-increment"]) <= 1/24+1e-12
 expected_h3_defaults = {
-    "gen_task": "0", "gen_profile": "2",
+    "gen_task": "0", "gen_profile": "7",
     "gen_conditioner_projection": "2",
     "gen_transformer_projection": "2", "gen_attention": "3",
 }
