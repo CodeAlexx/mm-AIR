@@ -190,7 +190,7 @@
   <object class="GtkStringList" id="image_sampler_list"><items><item>Default</item><item>RES 2M</item><item>RES 3M</item><item>RES 2S</item><item>RES 3S</item><item>RES 5S</item><item>DEIS 2M</item><item>DEIS 3M</item><item>DPM++ 2M</item><item>DPM++ 2S</item><item>DDIM</item><item>Euler</item></items></object>
   <object class="GtkStringList" id="sampler_schedule_list"><items><item>Default</item><item>Beta 57</item><item>Bong tangent</item></items></object>
   <object class="GtkStringList" id="h3_profile_list">
-    <items><item>Select schedule…</item><item>Donor RES · 7 evaluations</item><item>Euler simple · 19 evaluations</item><item>DC exponential Euler · 19 evaluations</item><item>Turbo Euler · 4 evaluations (swap turbo root)</item><item>RES simple · 20 evaluations</item><item>Turbo Euler · 8 evaluations</item><item>Exponential Euler · 20 evaluations</item><item>Exponential Euler · 50 evaluations</item></items>
+    <items><item>Select schedule…</item><item>Donor RES · 7 evaluations</item><item>Euler simple · 19 evaluations</item><item>DC exponential Euler · 19 evaluations</item><item>Turbo Euler · 4 evaluations (swap turbo root)</item><item>RES simple · 20 evaluations</item><item>Turbo Euler · 8 evaluations</item><item>Exponential Euler · 20 evaluations</item><item>Exponential Euler · 50 evaluations</item><item>pi-H3 · 4 steps</item><item>pi-H3 · 2 steps</item></items>
   </object>
   <object class="GtkStringList" id="h3_projection_list">
     <items><item>Select projection…</item><item>Exact BF16</item><item>ConvRot INT8</item></items>
@@ -391,6 +391,8 @@
                     <child><object class="GtkBox"><property name="spacing">8</property><child><object class="GtkEntry" id="settings_path_40"><property name="hexpand">true</property></object></child><child><object class="GtkButton" id="settings_browse_40"><property name="label">Browse…</property></object></child></object></child>
                     <child><object class="GtkLabel"><property name="label">RelayVSR 4x folder</property><property name="xalign">0</property></object></child>
                     <child><object class="GtkBox"><property name="spacing">8</property><child><object class="GtkEntry" id="settings_path_41"><property name="hexpand">true</property></object></child><child><object class="GtkButton" id="settings_browse_41"><property name="label">Browse…</property></object></child></object></child>
+                    <child><object class="GtkLabel"><property name="label">pi-H3 folder</property><property name="xalign">0</property></object></child>
+                    <child><object class="GtkBox"><property name="spacing">8</property><child><object class="GtkEntry" id="settings_path_42"><property name="hexpand">true</property></object></child><child><object class="GtkButton" id="settings_browse_42"><property name="label">Browse…</property></object></child></object></child>
                     <child><object class="GtkLabel"><property name="visible">false</property><property name="label">Saved paths apply to the next generation. Running jobs keep their current settings.</property><property name="wrap">true</property><property name="xalign">0</property><style><class name="capability-note"/></style></object></child>
                   </object></child>
                   <child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">12</property><property name="width-request">260</property>

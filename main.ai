@@ -1475,6 +1475,8 @@ fn show_movie_runtime_policy(session:ref<desk.Session>,profile:u32,
     else if profile==h3.profile_res_20(){"RES · 20"}
     else if profile==h3.profile_turbo_8(){"Turbo · 8"}
     else if profile==h3.profile_turbo_4(){"Turbo · 4"}
+    else if profile==h3.profile_pi_4(){"pi-H3 · 4"}
+    else if profile==h3.profile_pi_2(){"pi-H3 · 2"}
     else if profile==h3.profile_donor_7(){"Donor · 7"}else{"Select in Generate"})
   let _=desk.set_text(session,"movie_attention_policy",if attention==h3.attention_dense_int8(){"Dense INT8"}
     else if attention==h3.attention_exact(){"Exact"}
@@ -8619,7 +8621,7 @@ pub fn main(args: view<str>) -> i32
                     str.view(sheet_output), actual_seed,
                     h3.evaluations(h3_presets, request.profile), conditioner_projection,
                     transformer_projection, attention, channel.ticket(receiver),
-                    if h3.exponential(h3_presets, request.profile) {h3_session.Schedule.Exponential} else {h3_session.Schedule.Simple},
+                    generation.schedule_of(h3_presets, request.profile),
                     h3.sampler(h3_presets, request.profile))
                   // A swap source clip only supplies motion and scene, so encode
                   // it at the output resolution rather than the 768p canvas.

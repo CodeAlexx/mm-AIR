@@ -35,6 +35,7 @@ import std.inference.h3.pieces as h3_pieces
 import std.inference.h3.v2v as v2v
 import std.inference.h3.session as session
 import std.inference.h3.request as h3_request
+import std.inference.h3.pi_app as h3_pi
 import std.inference.h3.policy as h3_policy
 import std.inference.h3.audio_vae as h3_audio_vae
 import std.inference.h3.model_config as h3_model_config
@@ -539,6 +540,9 @@ fn run_krea_inner(owned: ref<KreaJob>,sender:ref<option<channel.Sender>>,policy:
 }
 
 pub type Job = struct {
+  // A pi-H3 profile (schedule raw_linear): its sample preset file and the adapter folder; empty otherwise.
+  pi_preset: string,
+  pi_adapters: string,
   checkpoint_root: string,
   reference_checkpoint_root: string,
   donor_root: string,
@@ -625,6 +629,9 @@ pub type Configuration = struct {
   // The H3 application presets (MM_AIR_H3_APP_PRESET, schema
   // air.inference.h3.app_preset, models/h3/presets/h3_app.json).
   presets: h3_request.Presets,
+  // The folder with the pi-H3 adapters (MM_AIR_PI_H3_DIRECTORY: pi_h3_2step_adapter, pi_h3_4step_adapter); empty
+  // when not set.
+  pi_h3_directory: string,
   scratch_root: string
 }
 
@@ -654,8 +661,16 @@ pub fn configuration() -> result<Configuration,string> effects {alloc,env,fs.rea
   let manifest_root: string = try required_environment("MM_AIR_H3_MANIFEST_ROOT")
   let deployment_file: string = try required_environment("MM_AIR_H3_DEPLOYMENT")
   let presets: h3_request.Presets = try app_presets()
+  // The pi-H3 adapter folder: Settings MM_AIR_PI_H3_DIRECTORY, else ~/models/pi-h3 (the Settings default).
+  var pi_h3_directory: string = match try runtime_config.value("MM_AIR_PI_H3_DIRECTORY") {
+    some(value) => value,
+    none => string.new(),
+  }
+  if str.len(str.view(pi_h3_directory)) == 0 {
+    match env.get("HOME") { some(home) => { pi_h3_directory = path.join(str.view(home), "models/pi-h3") }, none => {}, }
+  }
   let scratch_root: string = system.temp_directory()
-  result.ok(Configuration {checkpoint_root: checkpoint_root,
+  result.ok(Configuration {pi_h3_directory: pi_h3_directory, checkpoint_root: checkpoint_root,
     reference_checkpoint_root: reference_checkpoint_root,
     donor_root: donor_root, manifest_root: manifest_root,
     deployment_file: deployment_file, presets: presets, scratch_root: scratch_root})
@@ -767,6 +782,12 @@ fn request_projection(value:u32)->session.Projection effects {} {
 
 // Shared request-to-worker boundary. Callers resolve -1 seeds before serializing
 // the request, so history and the actual worker always record the same seed.
+/// The sigma schedule of an H3 profile: raw_linear for the pi-H3 profiles, else exponential or simple.
+pub fn schedule_of(presets: ref<h3_request.Presets>, profile: u32) -> session.Schedule effects {} {
+  if h3_request.raw_linear(presets, profile) { return session.Schedule.RawLinear }
+  if h3_request.exponential(presets, profile) { session.Schedule.Exponential } else { session.Schedule.Simple }
+}
+
 pub fn h3_job(configuration:ref<Configuration>,request:ref<h3_request.Request>,
     loras:ref<array<parameters.LoraEntry>>,progress:channel.Ticket own)
     ->result<Job,string> effects {alloc} {
@@ -793,7 +814,7 @@ pub fn h3_job(configuration:ref<Configuration>,request:ref<h3_request.Request>,
     parameters.clone_loras(loras),character_sheet.off(),"",cast.sat(request.seed),
     h3_request.evaluations(presets,request.profile),session.Projection.ConvRotI8,
     request_projection(request.transformer_projection),attention,progress,
-    if h3_request.exponential(presets,request.profile){session.Schedule.Exponential}else{session.Schedule.Simple},
+    schedule_of(presets,request.profile),
     h3_request.sampler(presets,request.profile)))
 }
 
@@ -809,9 +830,16 @@ pub fn job_loras(configuration: ref<Configuration>, prompt: str,
            attention: session.Attention, progress: channel.Ticket own,
            schedule_kind: session.Schedule, sampler: h3_policy.Sampler) -> Job
     effects {alloc} {
-  var run_policy: h3_policy.Policy = h3_policy.copy(struct.borrow(
+  var plain_policy: h3_policy.Policy = h3_policy.copy(struct.borrow(
     struct.borrow(configuration, field=presets), field=policy))
-  struct.set(run_policy, sampler, field=sampler)
+  struct.set(plain_policy, sampler, field=sampler)
+  // The app preset says which token positions picture rows take for keyframe and for Reference requests.
+  var run_policy: h3_policy.Policy = h3_request.with_positions(struct.borrow(configuration, field=presets),
+    plain_policy, model == session.Model.Reference, task != session.Task.T2VA)
+  let pi_preset: string = if schedule_kind == session.Schedule.RawLinear {
+    match h3_request.pi_preset(struct.borrow(configuration, field=presets), evaluations) {
+      some(found) => found, none => string.new(), }
+  } else { string.new() }
   var owned_references: array<string> = references
   var owned_audio_references: array<string> = audio_references
   var owned_loras: array<parameters.LoraEntry> = loras
@@ -821,6 +849,8 @@ pub fn job_loras(configuration: ref<Configuration>, prompt: str,
   let bounded_transformer_projection=if transformer_projection==session.Projection.ConvRotI8{
       session.Projection.ConvRotI8Streaming}else{transformer_projection}
   Job {
+    pi_preset: pi_preset,
+    pi_adapters: text.copy(str.view(struct.borrow(configuration, field=pi_h3_directory))),
     checkpoint_root: text.copy(str.view(struct.borrow(configuration,
       field=checkpoint_root))),
     reference_checkpoint_root: text.copy(str.view(struct.borrow(configuration,
@@ -2047,7 +2077,16 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
     return outcome(false, str.view(output_path),
       "MiniMax-H3 Ref2VA needs at least one image or video reference; audio references cannot stand alone")
   }
-  if job.evaluations != 7 and job.evaluations != 8 and job.evaluations != 19 and job.evaluations != 20 and
+  let with_pi: bool = job.schedule_kind == session.Schedule.RawLinear
+  if with_pi {
+    if job.model != session.Model.Base {
+      return outcome(false, str.view(output_path), "pi-H3 runs with MiniMax-H3 Base (text, first frame, last frame, first and last frame)")
+    }
+    if job.transformer_projection != session.Projection.ConvRotI8 and
+       job.transformer_projection != session.Projection.ConvRotI8Streaming {
+      return outcome(false, str.view(output_path), "pi-H3 runs with the ConvRot INT8 transformer projection")
+    }
+  } else if job.evaluations != 7 and job.evaluations != 8 and job.evaluations != 19 and job.evaluations != 20 and
      job.evaluations != 50 and
      not (job.evaluations == 4 and job.model == session.Model.Reference) {
     return outcome(false, str.view(output_path),
@@ -2058,6 +2097,13 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
     err(message) => { return outcome(false,str.view(output_path),str.view(message)) },
   }
   var adapter_requests: array<h3_lora.Request> = []
+  // A pi-H3 profile brings its own adapter (first in the list, strength 1).
+  if with_pi {
+    array.push(adapter_requests, h3_lora.Request {
+      path: path.join(str.view(struct.borrow(job, field=pi_adapters)),
+        if job.evaluations == 2 { "pi_h3_2step_adapter" } else { "pi_h3_4step_adapter" }),
+      strength: 1.0})
+  }
   let adapter_entries = struct.borrow(job,field=loras)
   var adapter_index: u64 = 0
   loop {
@@ -2136,8 +2182,12 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
       // The creator stretches the first keyframe directly onto the requested
       // canvas and cover-crops the last keyframe through the same PIL-exact
       // Lanczos kernel.
-      var prepared: draw.Surface = match image_input.prepare_keyframe(surface,
-          job.geometry.width, job.geometry.height, reference_index == 0) {
+      // A pi-H3 profile fits both keyframes as its preset says (policy.keyframe_fit "box").
+      var prepared: draw.Surface = match (if with_pi {
+          image_input.prepare_keyframe_fit(surface, job.geometry.width, job.geometry.height)
+        } else {
+          image_input.prepare_keyframe(surface, job.geometry.width, job.geometry.height, reference_index == 0)
+        }) {
         ok(value) => value,
         err(problem) => { clean_scratch(str.view(scratch))
           return outcome(false, str.view(output_path), str.view(problem)) },
@@ -2157,12 +2207,28 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
     checkpoint_root: text.copy(str.view(checkpoint_root)), donor_root: text.copy(str.view(donor_root)),
     manifest_root: text.copy(str.view(manifests)), layout: layout}
   var run_policy: h3_policy.Policy = h3_policy.copy(struct.borrow(job, field=policy))
-  var sources: session.Sources = match h3_deployment.sources(deployment_roots, job.model,
-      job.task, job.evaluations, motion_context_enabled, job.timing, job.schedule_kind,
-      run_policy) {
-    ok(value) => value,
-    err(problem) => { clean_scratch(str.view(scratch))
-      return outcome(false, str.view(output_path), str.view(problem)) },
+  // pi-H3: the adapter preset's policy and its prepared modulation cache, checked here before the GPU opens.
+  var sources: session.Sources = if with_pi {
+    var chosen: h3_pi.Choice = match h3_pi.resolve_preset(str.view(struct.borrow(job, field=pi_preset)),
+        deployment_roots, str.view(struct.borrow(job, field=pi_adapters)), job.evaluations, job.task) {
+      ok(value) => value,
+      err(problem) => { clean_scratch(str.view(scratch))
+        return outcome(false, str.view(output_path), str.view(problem)) },
+    }
+    match h3_deployment.sources_with_modulation(deployment_roots, session.Model.Base, job.timing,
+        str.view(struct.borrow(chosen, field=modulation)), h3_policy.copy(struct.borrow(chosen, field=policy))) {
+      ok(value) => value,
+      err(problem) => { clean_scratch(str.view(scratch))
+        return outcome(false, str.view(output_path), str.view(problem)) },
+    }
+  } else {
+    match h3_deployment.sources(deployment_roots, job.model,
+        job.task, job.evaluations, motion_context_enabled, job.timing, job.schedule_kind,
+        run_policy) {
+      ok(value) => value,
+      err(problem) => { clean_scratch(str.view(scratch))
+        return outcome(false, str.view(output_path), str.view(problem)) },
+    }
   }
 
   var context: GpuContext = match agpu.open(0) {
