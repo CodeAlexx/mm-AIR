@@ -203,9 +203,13 @@ type FiboFile=struct {schema:string,request:FiboRequest} derive codec(strict)
 pub fn fibo_schema() -> str effects {} { "mm-air.fibo2.parameters.v1" }
 pub fn fibo_dev_name() -> str effects {} { "fibo-2.0-dev" }
 pub fn fibo_edit_name() -> str effects {} { "fibo-2.0-edit-turbo" }
+pub fn fibo_edit_int8_name() -> str effects {} { "fibo-2.0-edit-turbo-int8" }
+pub fn fibo_is_int8(request:ref<FiboRequest>) -> bool effects {} {
+  struct.borrow(request,field=model)==fibo_edit_int8_name()
+}
 pub fn fibo_max_images() -> u64 effects {} { fibo_defaults.max_images() }
 pub fn fibo_is_edit(request:ref<FiboRequest>) -> bool effects {} {
-  struct.borrow(request,field=model)==fibo_edit_name()
+  struct.borrow(request,field=model)==fibo_edit_name() or fibo_is_int8(request)
 }
 pub fn fibo_defaults_for(edit:bool) -> FiboRequest effects {alloc} {
   FiboRequest {model:string.copy(if edit{fibo_edit_name()}else{fibo_dev_name()}),prompt:"",negative:"",output:"",
@@ -215,7 +219,7 @@ pub fn fibo_defaults_for(edit:bool) -> FiboRequest effects {alloc} {
 }
 pub fn validate_fibo(request:ref<FiboRequest>) -> result<unit,string> effects {alloc} {
   let model=struct.borrow(request,field=model)
-  if model!=fibo_dev_name() and model!=fibo_edit_name() {return result.err("Unknown Fibo 2.0 model")}
+  if model!=fibo_dev_name() and not fibo_is_edit(request) {return result.err("Unknown Fibo 2.0 model")}
   let edit=fibo_is_edit(request)
   if text.trim(struct.borrow(request,field=prompt))=="" {
     return result.err(if edit{"Write the edit instruction first"}else{"Write a prompt first"})

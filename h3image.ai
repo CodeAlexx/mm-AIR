@@ -128,13 +128,13 @@ fn expand_with_model(request:ref<parameters.H3ImageRequest>,expander:str,pe_root
     aspect:str)->result<pe.Expansion,string> effects{alloc,env,fs.meta,fs.read,fs.write,gpu,net,process,time}{
   var context:GpuContext=match agpu.open(0){ok(found)=>found,err(problem)=>{return result.err(string.copy(problem.message))},}
   var stream:GpuStream=match agpu.compute_stream(context){ok(found)=>found,err(problem)=>{return result.err(string.copy(problem.message))},}
-  var store:pe.Store=try pe.open_store(context,pe_root)
+  var store:pe.Store=if parameters.h3image_is_edit(request){try pe.open_store(context,pe_root)}
+    else{try pe.open_text_store(context,pe_root)}
   var settings:pe.Settings=pe.defaults()
   struct.set(settings,effort_of(expander),field=effort)
   struct.set(settings,request.seed,field=seed)
   var done:result<pe.Expansion,string>=run_expander(request,context,stream,store,settings,aspect,scratch)
-  // The pinned host copy (17.5 GB) is closed here, before the image model reads anything: it does not fit
-  // beside the text encoder and the DiT's pinned tail.
+  // Release the expander's device weights and pinned RAM before the image model loads.
   let held:offload.Offloader=ref.swap(struct.borrow(store,field=offloader),offload.Offloader{raw:option.none()})
   match offload.close(held){ok(_)=>{},err(problem)=>{return result.err(string.copy(problem.message))},}
   done

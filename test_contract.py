@@ -177,12 +177,19 @@ for control, expected in expected_h3_defaults.items():
     assert widget is not None
     assert widget.find("property[@name='selected']").text == expected
 
+pi_h3 = tree.find(".//object[@id='gen_use_pi_h3']")
+assert pi_h3.get("class") == "GtkCheckButton"
+assert pi_h3.find("property[@name='active']") is None
+assert tree.find(".//object[@id='gen_pi_h3_steps']/property[@name='selected']").text == "0"
+assert 'if pi_h3_request {pi_h3_profile} else {profile_index}' in main
+assert 'generation.schedule_of(h3_presets, request.profile)' in main
+
 # Qwen edit must expose the creator-supported ordered 1..10 source path and
 # selectable generation settings; fixed seed-42 recipe text is forbidden.
 for control in ("qwen_edit_references", "qwen_edit_remove_source",
                 "qwen_edit_clear_sources", "qwen_edit_resolution",
                 "qwen_edit_scheduler", "qwen_edit_sampler", "qwen_edit_steps",
-                "qwen_edit_seed", "qwen_edit_seed_randomize", "qwen_edit_seed_lock",
+                "qwen_edit_seed", "qwen_edit_seed_randomize", "qwen_edit_seed_random",
                 "qwen_edit_width", "qwen_edit_height", "movie_width", "movie_height"):
     assert tree.find(f".//object[@id='{control}']") is not None, control
 assert "2048×2048 · 40 steps · seed 42" not in ui
@@ -191,12 +198,11 @@ assert "array.len(qwen_edit_references)>=edit_limit(qwen_edit_fibo,qwen_edit_h3i
 for seed_id in ("gen_seed", "qwen_edit_seed"):
     seed_widget = tree.find(f".//object[@id='{seed_id}']")
     assert seed_widget.find("property[@name='text']").text == "Random"
-for lock_id in ("gen_seed_lock", "qwen_edit_seed_lock"):
-    lock_widget = tree.find(f".//object[@id='{lock_id}']")
-    active = lock_widget.find("property[@name='active']")
-    assert active is None or active.text == "false"
-assert "and not seed_locked" in main
-assert "if not qwen_edit_seed_locked" in main
+for random_id in ("gen_seed_random", "qwen_edit_seed_random"):
+    random_widget = tree.find(f".//object[@id='{random_id}']")
+    assert random_widget.find("property[@name='active']").text == "true"
+assert "generate_random_seed=desk.boolean(event" in main
+assert 'if id=="qwen_edit_seed_random"' in main
 
 # Results are image-first and actionable: no filename/path labels, expanded
 # preview on click, and recoverable Trash removal.
@@ -292,7 +298,7 @@ assert [item.text for item in tree.findall(".//object[@id='gen_model_list']/item
     "MiniMax H3 Base", "MiniMax H3 Reference", "Krea 2 Turbo", "Qwen-Image-2.1",
     "MOSS-Image Base", "MOSS-Image SFT", "Fibo 2.0", "MiniMax H3-Image", "P-H3-Image"]
 assert [item.text for item in tree.findall(".//object[@id='qwen_edit_model_list']/items/item")] == [
-    "Qwen-Image-2.1", "Fibo 2.0 Edit Turbo", "MiniMax H3-Image", "P-H3-Image"]
+    "Qwen-Image-2.1", "Fibo 2.0 Edit Turbo", "MiniMax H3-Image", "P-H3-Image", "Fibo 2.0 Edit Turbo INT8"]
 assert [item.text for item in tree.findall(".//object[@id='h3_resolution_list']/items/item")] == [
     "16:9 · 1344×768", "21:9 · 1536×672", "4:3 · 1024×768",
     "1:1 · 768×768", "3:4 · 768×1024", "9:16 · 768×1344",
@@ -302,6 +308,7 @@ assert [item.text for item in tree.findall(".//object[@id='seedvr2_method_list']
 assert 'krea_session.run_to_png' in generate
 assert 'task.spawn(work,fn=generation.run_krea)' in main
 assert 'desk.clear_video(session,"result_video")' in main
+assert tree.find(".//object[@id='result_video']/style/class[@name='video-fullscreen']") is not None
 assert 'gen_use_image_reference' in main
 assert 'task.spawn(work,fn=prompt_lab.run)' in main
 assert 'prompt_lab.cancel' in main

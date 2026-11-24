@@ -54,18 +54,38 @@ Its six main surfaces are:
   captioning, shot planning, continuity notes, authoritative window plans, and
   reusable H3 prompt construction.
 
-The application uses AIR's optional GTK desktop toolkit. AIR owns navigation and
-application state; GTK supplies native controls and presentation. Generate and
+The application uses AIR's shared desktop toolkit with a native Windows presenter
+and a GTK presenter on Linux. AIR owns navigation and application state. Generate and
 ControlNet use native file dialogs, retain the selected local media, validate it
 through [`std.media_input`](../AIR/stdlib/media_input.md), and render selected
 images in their native preview widgets. Generate also captures the live prompt,
 model, task, schedule, independent conditioner and transformer projection
 paths, attention path, exact integer seed, resolution, duration,
 ordered visual/audio references, and MP4 destination into the shared
-H3 package's public `request.ai` contract. Schedule, both projections,
-and attention begin unselected and validation fails closed until the user
-chooses each policy explicitly; MM-AIR does not silently choose an H3
-execution path.
+H3 package's `request.ai` contract. H3 starts with the configured app preset's
+default schedule. Request validation checks the chosen model, schedule and inputs
+before generation.
+
+### pi-H3 video generation
+
+In **Generate → MiniMax H3 Base**, turn on **Use pi-H3** and choose **4 steps**
+or **2 steps**. The non-DWD adapters support text, first-frame, last-frame and
+first-plus-last-frame jobs. The app retains a separate selection for the standard
+H3 schedule. Reuse restores the selected result's pi-H3 mode and step count.
+
+Point **Settings → pi-H3 folder** (`MM_AIR_PI_H3_DIRECTORY`) to the folder holding
+`pi_h3_2step_adapter` and `pi_h3_4step_adapter`. The app preset supplies the two
+raw-linear sample presets. Prepare the pruned time basis and modulation caches
+against the H3 deployment on each machine using AIR's `h3-pi-prepare`.
+The setup message identifies missing files and gives the preparation command.
+pi-H3 uses ConvRot INT8 transformer weights and Dense INT8 attention. Reference
+mode, character swap, character sheets, latent windowing and Motion Context use
+their own H3 workflows.
+
+**Seeds.** Generate, Image Edit and SeedVR2 restoration have a **New** button to
+pick a displayed seed and a **Random** checkbox for a fresh seed on each run.
+Turn **Random** off to repeat the displayed seed. **Reuse** restores the saved
+request. You can edit the restored prompt before generating again.
 
 ### H3 targeted repair and motion timing
 
@@ -250,6 +270,17 @@ are hidden while it is selected. Outputs: `output/fibo2/generate` and `output/fi
 schema `mm-air.fibo2.parameters.v1`; Reuse restores Dev runs on Generate and edits on
 Image Edit.
 
+**Fibo 2.0 Edit Turbo INT8** is a separate choice in the same dropdown. It uses
+the same edit controls with a ConvRot INT8 transformer. Prepare it with
+`fibo2-quantize --model Fibo-2.0-edit-turbo --out Fibo-2.0-edit-turbo-int8`.
+Set **Fibo 2.0 Edit Turbo INT8 scales file** in Settings
+(`MM_AIR_FIBO_EDIT_TURBO_INT8_SCALES`) to the resulting
+`transformer/convrot_scales.safetensors`. Reuse restores the INT8 variant from
+its saved model ID.
+The INT8 entry defaults to a 5 GiB device weight budget. Remaining weights
+stage from pinned RAM and all model computation runs on the GPU. Set
+`MM_AIR_FIBO_EDIT_TURBO_INT8_RESIDENT_GIB=0` to keep all transformer weights in VRAM.
+
 Settings: `MM_AIR_FIBO_DEV_ROOT`, `MM_AIR_FIBO_EDIT_TURBO_ROOT` (the published folders) and
 `MM_AIR_FIBO_PIPELINE_PRESET` (AIR's `models/fibo2/presets/pipeline.json`). One generation
 through the app's worker: `image-generate fibo-2.0-dev OUT.png PROMPT SEED` or
@@ -367,7 +398,7 @@ explicit experimental choices pending VAE spatial tiling or a provider fix.
 
 ### H3 Movie Maker
 
-Movie Maker (`Ctrl+3`) is now a functional native AIR adaptation of Serenity's
+Movie Maker (`Ctrl+4`) is a native AIR adaptation of Serenity's
 MiniMax Filmmaker workspace rather than a static tab. It keeps the same durable
 Project → Shots → Takes → Edit model and keeps a native file-backed project
 library under `output/movies` using the
@@ -505,8 +536,8 @@ native freehand paint/erase through AIR's letterbox-aware mask overlay, a live
 video scrubber with frame-step/play controls and synchronized video-mask preview,
 tracked crop preview, localized H3 image/video execution, source-preserving
 reconstruction, and Save As. `Send to Edit` is available from both Prompt Lab and masked
-Generate. Prompt Lab is now `Ctrl+5`; Movie Maker and ControlNet are `Ctrl+3`
-and `Ctrl+4`.
+Generate. Movie Maker uses `Ctrl+4`, ControlNet uses `Ctrl+5`, and Prompt Lab
+uses `Ctrl+6`.
 
 Edit's ordinary **Character Replace · no mask** mode is the semantic replacement
 path: load source media, add at least one character identity image, describe the
@@ -983,7 +1014,7 @@ not a complete generated-video or quality result.
 Behavior reference: MojoDiffusion `serenity-server/canvas/js/generate.js`
 (`addLora`, `renderLoraList`) and `serenitymojo/serve/krea2_backend.mojo`.
 Model implementation stays in private AIR; MM-Air only owns controls and requests.
-Prompt Lab is a full fifth workspace (`Ctrl+5`), not a modal. Its left pane keeps the
+Prompt Lab has its own workspace (`Ctrl+6`). Its left pane keeps the
 conversation and ordered image/video references; its right pane holds the current workprint.
 The controls expose final prompts, variations, image/video captions, shot lists, continuity,
 scene plans, and director notes, plus H3 Expand, Shorten, Cinematic, and Shot List actions.
@@ -1027,20 +1058,20 @@ Generate completion and failure remain visible in the batch/run-state controls
 and also issue a best-effort `notify-send` desktop notification. A missing
 notification service never changes a generation result.
 
-The tab uses the reusable AIR [`toolkits/prompt`](../AIR/../AIR/toolkits/prompt/README.md)
-package in-process. Qwen3-VL 4B and 8B use resident BF16 language weights. The 8B profile
-uses the official checkpoint's untied language head and measured profile-driven vision
-tower. The optional Qwen3-VL 32B profile uses AIR's explicit approximate row-scaled W8A8 language projections with 64
-two-slot streamed blocks while its embedding, norms, untied head, and vision tower remain
-BF16 when that separately installed cache is present. A completed quantization receipt is required,
-and no model silently falls back to
-4B or 8B. Text, image,
-and bounded video inputs share the same request interface. Video decode samples two, four,
-or eight timestamped observations by duration and preserves their order.
+The tab uses AIR's `toolkits/prompt` package in-process. Select **Qwen3-VL 4B** or
+**Qwen3-VL 8B**, attach references, and run **Final H3 prompt** or **Prompt variations**.
+Use **Send to Generate** to send the result to the prompt field. The output is plain
+text and can be copied independently of the app. Text, image, and bounded video
+inputs share the request interface. Video decode samples two, four, or eight
+timestamped observations by duration and preserves their order.
 
-Before loading, Prompt Lab checks current free VRAM and requires about 11 GiB for 4B,
-20 GiB for 8B, or 8 GiB for the measured 32B row-INT8 profile. The 4B/8B language weights
-are resident BF16; 32B language blocks and every vision tower are streamed.
+Prompt Lab checks current free VRAM before loading. The 4B profile requires 11 GiB
+for resident BF16 language weights. The 8B path uses resident BF16 at 20 GiB free,
+can stage BF16 layers from pinned RAM on smaller cards, and uses the ConvRot INT8
+cache when both `qwen-text-convrot-i8.safetensors` and `qwen-layers-8b-i8.json`
+are installed. The smaller-card 8B path requires 8 GiB free. The optional 32B
+row-scaled W8A8 profile requires its prepared weights and quantization receipt.
+Each profile keeps its own checkpoint selection and releases the model before H3 runs.
 Measured 8B text and bounded-video gates peaked at 16,448,009,632 and 16,476,117,048 bytes,
 respectively, and returned the RTX 3090 Ti to its pre-request 721 MiB baseline. The UI marks H3
 blocked for the whole worker lifetime and enables it only after Qwen's synchronized full
@@ -1062,6 +1093,8 @@ a 4,296,010,552-byte peak. Both returned `fully_unloaded=true`; no compute proce
 - Videos in the preview have play/pause, back to start, a seek bar and the time
   (GTK's own controls on Linux, the AIR Windows host's bar on Windows); a click on the
   video also plays or pauses.
+- On Windows, **Fullscreen** fills the current monitor with the video preview.
+  **Exit fullscreen** or **Esc** restores the gallery while playback keeps its position.
 - Selecting an image result enables **Reference**. This explicit
   action appends the original image to the existing visual-reference list and
   selects H3 Ref2VA. It preserves the prompt, seed, geometry, audio references,
@@ -1305,7 +1338,13 @@ Image Edit lists it as a third model: 1 to 16 pictures in order, keep the first 
 one LoRA, Prompt expander Off / Low / Extra high / Qwen3-VL 8B. It runs in this process through AIR's
 `std.inference.h3image.session` (`h3image.ai`); LoRAs stay unmerged. Folders: `MM_AIR_H3IMAGE_ROOT`,
 `MM_AIR_H3IMAGE_AIR_ROOT`, `MM_AIR_H3IMAGE_PE_ROOT` (defaults under `~/models`). If files are missing the screen says so
-in one line. Needs an AIR with `std.inference.h3image` (branch work/h3image until merged).
+in one line.
+
+**Text-to-image prompt expansion.** Low and Extra high use the same GPU weight
+placement and prefetch path. One controlled Low run on an RTX 5080 took **143 s**
+with the new path versus **272 s** with the previous loader. Both runs produced
+the same caption, aspect ratio and reasoning bytes. The measurement covers the
+expander stage for the tested text request.
 
 ### P-H3-Image (2026-11-11)
 
@@ -1320,6 +1359,4 @@ process through AIR's `std.inference.ph3image.session` (`ph3image.ai`). Folders:
 `MM_AIR_PH3IMAGE_AIR_ROOT` (defaults `~/models/P-H3-Image`, `~/models/P-H3-Image-air`). If files are missing the screen
 says so in one line. Saved settings use their own schema (`mm-air.ph3image.parameters.v1`); the model takes list
 position 8 and no earlier position moved. Test: `ph3image-job OUTPUT.png PROMPT SEED WxH|keep on|off [IMAGE ...]`
-(`tests/ph3image_generate.ai`, the worker the two buttons start). Agent assumptions: Custom is limited to 256 px or
-more per side and to the area of 2912×2912; 1 GiB of the card is kept free and host memory minus 2 GiB is offered
-(the MiniMax H3-Image values).
+(`tests/ph3image_generate.ai`, the worker the two buttons start).

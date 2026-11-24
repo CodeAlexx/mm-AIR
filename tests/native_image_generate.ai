@@ -7,8 +7,8 @@ import std.text as text
 // One real MM-Air image generation through the application's own workers (generation.run_moss,
 // generation.run_fibo) with the deployment's runtime configuration (folders from Settings):
 //   image-generate MODEL OUTPUT.png PROMPT SEED [STEPS [SOURCE...]] [--sampler NAME] [--schedule NAME]
-//                  [--eta F] [--bongmath on|off]
-// MODEL: moss-image-base | moss-image-sft | fibo-2.0-dev | fibo-2.0-edit-turbo (SOURCEs: the
+//                  [--eta F] [--bongmath on|off] [--fibo-side PIXELS]
+// MODEL: moss-image-base | moss-image-sft | fibo-2.0-dev | fibo-2.0-edit-turbo[-int8] (SOURCEs: the
 // picture to change, then references). STEPS 0 or absent keeps the Generate / Image Edit default;
 // the sampler flags are Generate's Sampler / Schedule / Noise / Bong math (absent: Default);
 // every other value is the app's default too.
@@ -20,11 +20,12 @@ pub fn main(args:view<str>)->i32
   var schedule:string=string.copy("default")
   var eta:f64=0.5
   var bongmath:bool=true
+  var fibo_side:u64=0
   var at:u64=1
   loop{
     if at>=view.len(args){break}
     let arg=view.get(args,at)
-    if arg=="--sampler" or arg=="--schedule" or arg=="--eta" or arg=="--bongmath"{
+    if arg=="--sampler" or arg=="--schedule" or arg=="--eta" or arg=="--bongmath" or arg=="--fibo-side"{
       if at+1>=view.len(args){return 9}
       if at<count{count=at}
       let value=view.get(args,at+1)
@@ -32,6 +33,7 @@ pub fn main(args:view<str>)->i32
       if arg=="--schedule"{schedule=string.copy(value)}
       if arg=="--eta"{eta=match text.parse_f64(value){some(v)=>v,none=>{return 9},}}
       if arg=="--bongmath"{bongmath=value=="on" or value=="true"}
+      if arg=="--fibo-side"{fibo_side=match text.parse_u64(value){some(v)=>v,none=>{return 9},}}
       at=at+2
       continue
     }
@@ -39,18 +41,24 @@ pub fn main(args:view<str>)->i32
     at=at+1
   }
   if count<5 {
-    io.ewrite("usage: image-generate MODEL OUTPUT.png PROMPT SEED [STEPS [SOURCE...]] [--sampler NAME] [--schedule NAME] [--eta F] [--bongmath on|off]\n")
+    io.ewrite("usage: image-generate MODEL OUTPUT.png PROMPT SEED [STEPS [SOURCE...]] [--sampler NAME] [--schedule NAME] [--eta F] [--bongmath on|off] [--fibo-side PIXELS]\n")
     return 1
   }
   let model=view.get(args,1)
+  let int8=model==parameters.fibo_edit_int8_name()
   let seed=match text.parse_u64(view.get(args,4)){some(value)=>value,none=>{return 2},}
   let steps:u64=if count>5{match text.parse_u64(view.get(args,5)){some(value)=>value,none=>{return 4},}}else{0}
   var receiver=match channel.open(128,1024){ok(value)=>value,err(_)=>{return 5},}
-  var outcome=if model=="fibo-2.0-dev" or model=="fibo-2.0-edit-turbo" {
-    var request=parameters.fibo_defaults_for(model=="fibo-2.0-edit-turbo")
+  var outcome=if model=="fibo-2.0-dev" or model=="fibo-2.0-edit-turbo" or int8 {
+    var request=parameters.fibo_defaults_for(model=="fibo-2.0-edit-turbo" or int8)
+    let _=ref.swap(struct.borrow(request,field=model),string.copy(model))
     let _=ref.swap(struct.borrow(request,field=prompt),string.copy(view.get(args,3)))
     let _=ref.swap(struct.borrow(request,field=output),string.copy(view.get(args,2)))
     struct.set(request,seed,field=seed)
+    if fibo_side!=0{
+      struct.set(request,fibo_side,field=width)
+      struct.set(request,fibo_side,field=height)
+    }
     if steps!=0{struct.set(request,steps,field=steps)}
     let _=ref.swap(struct.borrow(request,field=sampler),string.copy(str.view(sampler)))
     let _=ref.swap(struct.borrow(request,field=schedule),string.copy(str.view(schedule)))
@@ -65,9 +73,18 @@ pub fn main(args:view<str>)->i32
       io.ewrite(message)
       return 6},}
     if not parameters.is_fibo(saved){return 7}
+    var restored=match parameters.decode_fibo(saved){
+      ok(value)=>value,
+      err(message)=>{
+        io.ewrite(message)
+        return 7
+      },
+    }
+    if parameters.fibo_is_int8(restored)!=int8{return 7}
     var work=generation.FiboJob{request:request,progress:channel.ticket(receiver)}
     generation.run_fibo(work)
   } else {
+    if fibo_side!=0{return 9}
     let index=match parameters.moss_model_index_of(model){some(value)=>value,none=>{
       io.ewrite("unknown MODEL\n")
       return 3},}
