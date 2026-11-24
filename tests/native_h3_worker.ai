@@ -13,7 +13,7 @@ pub fn main(args:view<str>)->i32 effects {alloc,env,fs.meta,fs.read,fs.write,gpu
   if view.len(args)!=2{return 2}
   let root=view.get(args,1)
   let output=path.join(root,"must-not-exist.mp4")
-  var config=generation.Configuration{checkpoint_root:path.join(root,"absent"),reference_checkpoint_root:"",
+  var config=generation.Configuration{pi_h3_directory:"",checkpoint_root:path.join(root,"absent"),reference_checkpoint_root:"",
     donor_root:path.join(root,"prepared"),manifest_root:path.join(root,"manifests"),
     deployment_file:path.join(root,"h3_deployment.json"),presets:fixture.presets(),
     scratch_root:string.copy(root)}

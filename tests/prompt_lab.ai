@@ -1,5 +1,6 @@
 module app.mm_air.tests.prompt_lab
 import "../prompt_lab.ai" as lab
+import "../image_edit_refs.ai" as image_edit_refs
 import "../.air/deps/prompt/types.ai" as prompt
 import std.files as files
 import std.text as text
@@ -16,6 +17,30 @@ pub fn main(args: view<str>) -> i32
   expect(lab.task(2) == prompt.Task.ImageCaption)
   expect(lab.task(3) == prompt.Task.VideoCaption)
   expect(lab.task(4) == prompt.Task.ShotList)
+  expect(lab.task(8) == prompt.Task.H3Reference)
+  expect(lab.task(9) == prompt.Task.H3Image)
+  expect(lab.task(10) == prompt.Task.H3ImageEdit)
+  expect(lab.attachment_limit(prompt.Task.H3ImageEdit) == 16)
+  let face = image_edit_refs.instructions("Keep the pose - the second picure is her face, use that",2)
+  expect(str.view(face) == "<Picture 2> is her face, use that.")
+  expect(image_edit_refs.keep("The pose is unchanged.",str.view(face)) ==
+    "<Picture 2> is her face, use that. The pose is unchanged.")
+  expect(image_edit_refs.keep(str.view(face),str.view(face)) == str.view(face))
+  expect(image_edit_refs.instructions("Use Photo 16 for the face.",16) == "Use <Picture 16> for the face.")
+  expect(image_edit_refs.instructions("Use image 2 for the face.",1) == "")
+  expect(image_edit_refs.instructions("The label says \"Picture 2\".",2) == "")
+  var ordered = prompt.request(prompt.ModelChoice.Qwen3VL4B,prompt.Task.H3Reference,
+    prompt.Transform.None,"Keep the composition",[],[
+      prompt.attachment("video.mp4",prompt.AttachmentKind.Video,1),
+      prompt.attachment("image.png",prompt.AttachmentKind.Image,2),
+      prompt.attachment("other-video.mp4",prompt.AttachmentKind.Video,3)])
+  expect(result.is_ok(lab.prepare_request(ordered)))
+  let attached = struct.borrow(ordered,field=attachments)
+  expect(array.borrow(attached,0).ordinal == 1)
+  expect(array.borrow(attached,1).ordinal == 1)
+  expect(array.borrow(attached,2).ordinal == 2)
+  struct.set(ordered,prompt.Task.H3ImageEdit,field=task)
+  expect(not result.is_ok(lab.prepare_request(ordered)))
   expect(lab.route_generate("old","new",false) == "new")
   expect(lab.route_generate("old","new",true) == "old\n\nnew")
   expect(lab.route_movie("[Shot 1] Wide") == "[Shot 1] Wide")

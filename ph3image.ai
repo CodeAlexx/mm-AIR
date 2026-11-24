@@ -108,6 +108,9 @@ fn run_inner(request:ref<parameters.PH3ImageRequest>,sender:ref<option<channel.S
     effects{alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
   let started=time.monotonic_ns()
   let output=string.copy(struct.borrow(request,field=output))
+  if channel.cancellation_requested(sender) {
+    return failure(str.view(output), "Generation cancelled")
+  }
   match parameters.validate_ph3image(request){
     err(message)=>{return failure(str.view(output),message)},ok(_)=>{},
   }

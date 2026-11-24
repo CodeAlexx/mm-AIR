@@ -9,6 +9,7 @@ import std.text as text
 import std.json as json
 import std.process as proc
 import std.channel as channel
+import std.tasks as tasks
 import std.math as math
 import std.codec as codec
 import std.media_input as media
@@ -101,14 +102,29 @@ fn show_prompt_session(session: ref<desk.Session>, state: ref<prompt_session.Ses
   let _ = desk.set_text(session,"prompt_chat_buffer",str.view(transcript))
   let attachments = struct.borrow(state,field=attachments)
   var summary = string.new()
+  var pictures: u64 = 0
+  var videos: u64 = 0
   index = 0
   loop {
     if index >= array.len(attachments) { break }
     let item = array.borrow(attachments,index)
     if index != 0 { string.append(summary,"  ·  ") }
-    string.append(summary,"#")
-    string.append(summary,str.view(string.from_int(item.ordinal)))
-    string.append(summary,if item.kind == prompt_types.AttachmentKind.Image {" image · "} else {" video · "})
+    if prompt_lab.guided_task(state.task) {
+      if item.kind == prompt_types.AttachmentKind.Image {
+        pictures = pictures + 1
+        string.append(summary,"Picture ")
+        string.append(summary,str.view(string.from_int(pictures)))
+      } else {
+        videos = videos + 1
+        string.append(summary,"Video ")
+        string.append(summary,str.view(string.from_int(videos)))
+      }
+      string.append(summary," · ")
+    } else {
+      string.append(summary,"#")
+      string.append(summary,str.view(string.from_int(item.ordinal)))
+      string.append(summary,if item.kind == prompt_types.AttachmentKind.Image {" image · "} else {" video · "})
+    }
     string.append(summary,str.view(path.basename(struct.borrow(item,field=path))))
     index = index + 1
   }
@@ -1365,6 +1381,18 @@ fn fail(message: str) -> i32 effects {alloc,io.write} {
   1
 }
 
+fn generation_stop_path(ticket: ref<channel.Ticket>, session_tag: str) -> string effects {alloc,env} {
+  path.join(system.temp_directory(), text.concat("mm-air-generation-stop-",
+    text.concat(session_tag, text.concat("-", struct.borrow(ticket, field=token)))))
+}
+
+fn generation_ticket(receiver: ref<channel.Receiver>, session_tag: str) -> channel.Ticket effects {alloc,env} {
+  var ticket = channel.ticket(receiver)
+  let signal = generation_stop_path(ticket, session_tag)
+  struct.set(ticket, signal, field=cancel_path)
+  ticket
+}
+
 fn generation_status(session:ref<desk.Session>,message:str) -> unit
     effects {alloc,net,time,io.write} {
   let _ = desk.set_text(session,"status",message)
@@ -1503,6 +1531,7 @@ fn show_movie(session:ref<desk.Session>,safe:ref<safe_mode.State>,project:ref<mo
   let _=desk.set_number(session,"movie_target","value",project.target_duration)
   let _=desk.set_number(session,"movie_takes","value",cast.float(project.takes_per_shot))
   let _=desk.set_text(session,"director_bible_buffer",struct.borrow(project,field=director_bible))
+  let _=desk.set_text(session,"movie_script_buffer",struct.borrow(project,field=script))
   let _=desk.set_text(session,"continuity_bible_buffer",struct.borrow(project,field=continuity_bible))
   let _=desk.set_text(session,"brand_bible_buffer",struct.borrow(project,field=brand_bible))
   let _=desk.set_number(session,"movie_endless_target","value",project.endless_target)
@@ -1658,12 +1687,12 @@ fn show_movie(session:ref<desk.Session>,safe:ref<safe_mode.State>,project:ref<mo
     let _=desk.set_bool(session,"movie_monitor_empty","visible",true)
     let _=desk.set_bool(session,"movie_monitor_video","visible",false)
   }
-  let _=desk.set_bool(session,"continue_take","sensitive",shot.selected_take>=0)
+  let _=desk.set_bool(session,"continue_take","sensitive",movie.has_finished_take(shot))
   var completed:u64=0
   i=0
   loop{if i >= count{break}
     var candidate=movie.snapshot_shot(project,i)
-    if candidate.selected_take>=0{completed=completed+1}
+    if movie.has_finished_take(candidate){completed=completed+1}
     i=i+1}
   let _=desk.set_bool(session,"assemble_movie","sensitive",completed!=0)
   ()
@@ -2095,6 +2124,9 @@ pub fn main(args: view<str>) -> i32
   },none=>{},}
   var running_parameters: string = string.new()
   var generation_started: u64 = 0
+  let generation_session_tag = string.from_int(time.now_ms())
+  var generation_stopping = false
+  var generation_stop_enabled = false
   var seed:i64=random_seed()
   var seed_valid: bool = true
   var generate_random_seed:bool=true
@@ -2152,6 +2184,8 @@ pub fn main(args: view<str>) -> i32
   var movie_drift_taper:u64=2
   var movie_drift_amount:f32=0.35
   var movie_director_input=string.copy("Build a short film from this idea, preserving subject identity and screen direction across every shot.")
+  var movie_script_project=string.new()
+  var movie_script_input=string.new()
   var prompt_manifest_directory: string = match prompt_lab.manifest_directory(bindir) {
     ok(value) => value,
     err(message) => {return fail(message)},
@@ -2224,6 +2258,7 @@ pub fn main(args: view<str>) -> i32
         show_qwen_sampling(session,qwen_turbo,(qwen_edit_fibo or qwen_edit_h3image or qwen_edit_ph3image),qwen_image_sampler,qwen_image_schedule,qwen_image_eta,qwen_image_bongmath)
         update_qwen_edit_sources(session,safe,qwen_edit_references,edit_limit(qwen_edit_fibo,qwen_edit_h3image,qwen_edit_ph3image))
         select_mode(session, "generate")
+        let _=desk.set_number(session,"gen_profile","selected",cast.float(profile_index))
         source_widgets(session, task_index)
         model_widgets(session,model_index,character_sheet_mode,generation_mode)
         show_lora_library(session,model_index)
@@ -3147,11 +3182,13 @@ pub fn main(args: view<str>) -> i32
                 some(item) => { var update: channel.Message = item
                   match channel.text_of(update) {
                     some(message) => {
+                      if not generation_stopping {
                       generation_status(session,str.view(message))
                       if qwen_edit_active{
                         let _=desk.set_text(session,"qwen_edit_status",str.view(message))}
                       if movie_generation_active{
                         let _=desk.set_text(session,"movie_runtime",str.view(message))}
+                      }
                     },
                     none => {},
                   }
@@ -3163,15 +3200,21 @@ pub fn main(args: view<str>) -> i32
             }
           }
           if array.len(generations) != 0 {
+            if not generation_stop_enabled and not generation_stopping {
+              let _ = desk.set_bool(session, "generation_stop", "sensitive", true)
+              generation_stop_enabled = true
+            }
             let elapsed: u64 = (time.monotonic_ns() - generation_started) / 1000000000
-            let _ = desk.set_text(session, "gen_run_state",
-              text.concat("Generating · ", text.concat(string.from_int(elapsed), " s")))
+            if not generation_stopping {
+              let _ = desk.set_text(session, "gen_run_state",
+                text.concat("Generating · ", text.concat(string.from_int(elapsed), " s")))
+            }
             let _ = desk.set_text(session,"gen_progress_elapsed",
               text.concat("Elapsed: ",text.concat(string.from_int(elapsed)," s")))
-            if movie_generation_active{
+            if movie_generation_active and not generation_stopping{
               let _=desk.set_text(session,"movie_runtime",text.concat("H3 take · ",
                 text.concat(str.view(string.from_int(elapsed))," s")))}
-            if str.len(str.view(relayvsr_progress_file))>0{
+            if not generation_stopping and str.len(str.view(relayvsr_progress_file))>0{
               match files.read_text(str.view(relayvsr_progress_file)){
                 ok(contents)=>{
                   let line=relayvsr_post.progress_text(str.view(contents))
@@ -3182,20 +3225,33 @@ pub fn main(args: view<str>) -> i32
             }
             match task.wait_any(generations, 0) {
               some(_) => {
+                let was_stopping = generation_stopping
+                generation_stopping = false
+                generation_stop_enabled = false
+                let _ = desk.set_bool(session, "generation_stop", "sensitive", false)
                 relayvsr_progress_file=string.new()
                 var completed: generation.Outcome = task.join(
                   option.unwrap(array.pop(generations)))
                 match array.pop(progress_receivers) {
-                  some(receiver) => { let _ = channel.close(receiver) },
+                  some(receiver) => {
+                    if was_stopping {
+                      let signal = generation_stop_path(channel.ticket(receiver), str.view(generation_session_tag))
+                      let _ = files.remove(str.view(signal))
+                    }
+                    let _ = channel.close(receiver)
+                  },
                   none => {},
                 }
                 let _ = desk.set_bool(session, "generate_action", "sensitive", true)
+                let completion_message = if was_stopping and not completed.succeeded {
+                  string.copy("Generation stopped")
+                } else { string.copy(struct.borrow(completed,field=message)) }
                 if qwen_edit_active{
                   let _=desk.set_bool(session,"qwen_edit_run","sensitive",true)
                   let _=desk.set_text(session,"qwen_edit_status",
                     struct.borrow(completed,field=message))
                 }
-                generation_status(session,str.view(struct.borrow(completed,field=message)))
+                generation_status(session,str.view(completion_message))
                 if completed.succeeded {
                   let seedvr2_sidecar=text.concat(
                     struct.borrow(completed,field=output),".seedvr2.json")
@@ -3299,7 +3355,7 @@ pub fn main(args: view<str>) -> i32
                       var found:bool=false
                       loop{if next>=array.len(struct.borrow(movie_state,field=shots)){break}
                         var candidate=movie.snapshot_shot(movie_state,next)
-                        if candidate.selected_take<0{
+                        if not movie.has_finished_take(candidate){
                           found=true
                           break
                         }
@@ -3354,12 +3410,14 @@ pub fn main(args: view<str>) -> i32
                   edit_generation_active=false
                   if qwen_edit_active{
                     let _=desk.set_text(session,"qwen_edit_status",
-                      struct.borrow(completed,field=message))
+                      str.view(completion_message))
                     let _=desk.set_bool(session,"qwen_edit_run","sensitive",true)
                   }
                   qwen_edit_active=false
                   if movie_generation_active{
-                    movie.record_take_at(movie_state,movie_generation_shot,"",cast.sat(seed),false)
+                    if not was_stopping {
+                      movie.record_take_at(movie_state,movie_generation_shot,"",cast.sat(seed),false)
+                    }
                     match save_movie(movie_state,str.view(movie_project_path)){
                       ok(_)=>{},err(message)=>{io.ewrite(text.concat("Movie autosave: ",text.concat(message,"\n")))}}
                     struct.set(movie_state,movie_generation_shot,field=selected_shot)
@@ -3367,14 +3425,18 @@ pub fn main(args: view<str>) -> i32
                     movie_render_all=false
                     struct.set(movie_state,false,field=endless_active)
                     show_movie(session,safe,movie_state)
-                    let _=desk.set_text(session,"movie_runtime","H3 take failed")
+                    let _=desk.set_text(session,"movie_runtime",if was_stopping {"H3 take stopped"} else {"H3 take failed"})
                   }
-                  let _ = desk.set_text(session, "gen_batch_status", "Failed")
-                  let _ = desk.set_text(session, "gen_run_state", "Failed")
-                  generation_notification("MM-Air generation failed",
-                    str.view(struct.borrow(completed,field=message)))
-                  io.ewrite(text.concat("mm-air generation failed: ",
-                    text.concat(str.view(struct.borrow(completed, field=message)), "\n")))
+                  let state = if was_stopping {"Stopped"} else {"Failed"}
+                  let _ = desk.set_text(session, "gen_batch_status", state)
+                  let _ = desk.set_text(session, "gen_run_state", state)
+                  if was_stopping {
+                    io.write("mm-air generation stopped\n")
+                  } else {
+                    generation_notification("MM-Air generation failed", str.view(completion_message))
+                    io.ewrite(text.concat("mm-air generation failed: ",
+                      text.concat(str.view(completion_message), "\n")))
+                  }
                 }
               },
               none => {},
@@ -3388,6 +3450,10 @@ pub fn main(args: view<str>) -> i32
               some(_) => {
                 var completed = task.join(option.unwrap(array.pop(prompt_jobs)))
                 let _ = desk.set_bool(session,"prompt_cancel","sensitive",false)
+                if prompt_target==4{
+                  let _=desk.set_bool(session,"movie_script_create","sensitive",true)
+                  let _=desk.set_bool(session,"movie_script_cancel","sensitive",false)
+                }
                 if str.len(str.view(prompt_cancel_path)) != 0 {
                   let removed=result.is_ok(files.remove(str.view(prompt_cancel_path)))
                   prompt_cancel_path=string.new()
@@ -3400,7 +3466,35 @@ pub fn main(args: view<str>) -> i32
                     " in · ",text.concat(str.view(string.from_int(completed.output_tokens)),
                     text.concat(" out · peak ",text.concat(str.view(string.from_int(mebibytes))," MiB"))))))
                   let _ = desk.set_text(session,"prompt_residency","Unloaded")
-                  if prompt_target==3{
+                  if prompt_target==4{
+                    let path_now=str.view(movie_project_path)
+                    let script_now=struct.borrow(movie_state,field=script)
+                    if path_now!=str.view(movie_script_project) or script_now!=str.view(movie_script_input){
+                      let _=desk.set_text(session,"movie_runtime","Script changed · create shots again")
+                    }else{
+                      match movie.with_script_shots(movie_state,struct.borrow(completed,field=response)){
+                        ok(value)=>{
+                          var updated=value
+                          match save_movie(updated,path_now){
+                            ok(_)=>{
+                              movie_state=updated
+                              show_movie(session,safe,movie_state)
+                              let _=desk.set_text(session,"movie_runtime","Script shots ready to review")
+                              let _=desk.set_text(session,"status","Script shots created and saved")
+                            },
+                            err(message)=>{
+                              let _=desk.set_text(session,"movie_runtime","Could not save script shots")
+                              let _=desk.set_text(session,"status",message)
+                            },
+                          }
+                        },
+                        err(message)=>{
+                          let _=desk.set_text(session,"movie_runtime","Could not create script shots")
+                          let _=desk.set_text(session,"status",message)
+                        },
+                      }
+                    }
+                  }else if prompt_target==3{
                     movie.apply_director_plan(movie_state,movie_state.selected_shot,
                       struct.borrow(completed,field=response))
                     match save_movie(movie_state,str.view(movie_project_path)){
@@ -3502,6 +3596,9 @@ pub fn main(args: view<str>) -> i32
                   }
                   if prompt_target==3{
                     let _=desk.set_text(session,"movie_runtime","Qwen director failed")
+                  }
+                  if prompt_target==4{
+                    let _=desk.set_text(session,"movie_runtime",struct.borrow(completed,field=message))
                   }
                 }
                 let _ = desk.set_bool(session,"gen_swap_build_prompt","sensitive",true)
@@ -4274,11 +4371,15 @@ pub fn main(args: view<str>) -> i32
               }
               if id == "prompt_attach" {
                 var chosen = desk.dialog_paths(event)
+                let selected_task = prompt_lab.task(prompt_task_index)
+                let limit = prompt_lab.attachment_limit(selected_task)
+                let guided = prompt_lab.guided_task(selected_task)
                 var choice: u64 = 0
                 loop {
                   if choice >= array.len(chosen) { break }
-                  if array.len(struct.borrow(prompt_state,field=attachments)) >= 8 {
-                    let _ = desk.set_text(session,"status","Prompt Lab accepts at most eight ordered references")
+                  if array.len(struct.borrow(prompt_state,field=attachments)) >= limit {
+                    let _ = desk.set_text(session,"status",text.concat("Prompt Lab reference limit: ",
+                      str.view(string.from_int(limit))))
                     break
                   }
                   let filename = array.borrow(chosen,choice)
@@ -4290,11 +4391,15 @@ pub fn main(args: view<str>) -> i32
                       if info.kind == media.Kind.Image {
                         prompt_session.attach(prompt_state,str.view(filename),
                           prompt_types.AttachmentKind.Image)
-                        prompt_task_index = 2
+                        if not guided { prompt_task_index = 2 }
                       } else if info.kind == media.Kind.Video {
-                        prompt_session.attach(prompt_state,str.view(filename),
-                          prompt_types.AttachmentKind.Video)
-                        prompt_task_index = 3
+                        if selected_task == prompt_types.Task.H3ImageEdit {
+                          let _ = desk.set_text(session,"status","H3-Image edit takes pictures. Use H3 Reference for video sources")
+                        } else {
+                          prompt_session.attach(prompt_state,str.view(filename),
+                            prompt_types.AttachmentKind.Video)
+                          if not guided { prompt_task_index = 3 }
+                        }
                       } else {
                         let _ = desk.set_text(session,"status","Prompt Lab accepts image and video references")
                       }
@@ -4698,6 +4803,15 @@ pub fn main(args: view<str>) -> i32
               movie_director_input=desk.field(event,"value")
               continue
             }
+            if id=="movie_script_buffer" or id=="movie_script_view"{
+              let script=desk.field(event,"value")
+              if script!=struct.borrow(movie_state,field=script){
+                let _=ref.swap(struct.borrow(movie_state,field=script),script)
+                match save_movie(movie_state,str.view(movie_project_path)){
+                  ok(_)=>{},err(message)=>{let _=desk.set_text(session,"status",message)}}
+              }
+              continue
+            }
             if id=="movie_drift_enabled"{
               movie_drift_enabled=desk.boolean(event,"value")
               continue
@@ -5079,6 +5193,7 @@ pub fn main(args: view<str>) -> i32
               prompt_task_index = cast.sat(desk.number(event,"value"))
               let _ = ref.swap(struct.borrow(prompt_state,field=task),
                 prompt_lab.task(prompt_task_index))
+              show_prompt_session(session,prompt_state)
             }
             if id=="prompt_total_seconds"{prompt_total_seconds=desk.number(event,"value")}
             if id=="prompt_window_seconds"{prompt_window_seconds=desk.number(event,"value")}
@@ -5898,7 +6013,7 @@ pub fn main(args: view<str>) -> i32
                 }
                 generation_started=time.monotonic_ns()
                 qwen_edit_active=true
-                var ph3_work=ph3image.PH3ImageJob{request:ph3_request,progress:channel.ticket(ph3_receiver)}
+                var ph3_work=ph3image.PH3ImageJob{request:ph3_request,progress:generation_ticket(ph3_receiver,str.view(generation_session_tag))}
                 array.push(progress_receivers,ph3_receiver)
                 array.push(generations,task.spawn(ph3_work,fn=ph3image.run))
                 let _=desk.set_bool(session,"qwen_edit_run","sensitive",false)
@@ -5951,7 +6066,7 @@ pub fn main(args: view<str>) -> i32
                 }
                 generation_started=time.monotonic_ns()
                 qwen_edit_active=true
-                var h3image_work=h3image.H3ImageJob{request:h3image_request,progress:channel.ticket(h3image_receiver)}
+                var h3image_work=h3image.H3ImageJob{request:h3image_request,progress:generation_ticket(h3image_receiver,str.view(generation_session_tag))}
                 array.push(progress_receivers,h3image_receiver)
                 array.push(generations,task.spawn(h3image_work,fn=h3image.run))
                 let _=desk.set_bool(session,"qwen_edit_run","sensitive",false)
@@ -5996,7 +6111,7 @@ pub fn main(args: view<str>) -> i32
                 }
                 generation_started=time.monotonic_ns()
                 qwen_edit_active=true
-                var fibo_work=generation.FiboJob{request:fibo_request,progress:channel.ticket(fibo_receiver)}
+                var fibo_work=generation.FiboJob{request:fibo_request,progress:generation_ticket(fibo_receiver,str.view(generation_session_tag))}
                 array.push(progress_receivers,fibo_receiver)
                 array.push(generations,task.spawn(fibo_work,fn=generation.run_fibo))
                 let _=desk.set_bool(session,"qwen_edit_run","sensitive",false)
@@ -6105,7 +6220,7 @@ pub fn main(args: view<str>) -> i32
               }
               generation_started=time.monotonic_ns()
               qwen_edit_active=true
-              var work=generation.QwenImageJob{request:request,progress:channel.ticket(receiver),
+              var work=generation.QwenImageJob{request:request,progress:generation_ticket(receiver,str.view(generation_session_tag)),
                 final_width:qwen_edit_width,final_height:qwen_edit_height}
               array.push(progress_receivers,receiver)
               array.push(generations,task.spawn(work,fn=generation.run_qwen_image))
@@ -6115,11 +6230,41 @@ pub fn main(args: view<str>) -> i32
               let _=desk.set_text(session,"gen_run_state","Generating")
               continue
             }
-            if id == "prompt_cancel" {
+            if id == "generation_stop" {
+              if array.len(progress_receivers) != 0 and not generation_stopping {
+                let ticket = channel.ticket(array.borrow(progress_receivers, 0))
+                let signal = generation_stop_path(ticket, str.view(generation_session_tag))
+                match tasks.token(str.view(signal)) {
+                  ok(token) => {
+                    if tasks.request(token) {
+                      generation_stopping = true
+                      let _ = desk.set_bool(session, "generation_stop", "sensitive", false)
+                      let _ = desk.set_text(session, "gen_run_state", "Stopping…")
+                      let _ = desk.set_text(session, "gen_batch_status", "Stopping…")
+                      generation_status(session, "Stopping generation…")
+                      if qwen_edit_active {
+                        let _ = desk.set_text(session, "qwen_edit_status", "Stopping generation…")
+                      }
+                      if movie_generation_active {
+                        let _ = desk.set_text(session, "movie_runtime", "Stopping generation…")
+                      }
+                    } else { generation_status(session, "Could not signal the generation to stop") }
+                  },
+                  err(message) => { generation_status(session, str.view(message)) },
+                }
+              }
+              continue
+            }
+            if id == "prompt_cancel" or id == "movie_script_cancel" {
+              if id=="movie_script_cancel" and prompt_target!=4{continue}
               if array.len(prompt_jobs) == 0 or str.len(str.view(prompt_cancel_path)) == 0 {
                 let _ = desk.set_text(session,"status","No Qwen request is running")
               } else if prompt_lab.cancel(str.view(prompt_cancel_path)) {
                 let _ = desk.set_bool(session,"prompt_cancel","sensitive",false)
+                if prompt_target==4{
+                  let _=desk.set_bool(session,"movie_script_cancel","sensitive",false)
+                  let _=desk.set_text(session,"movie_runtime","Cancelling script draft…")
+                }
                 let _ = desk.set_text(session,"prompt_metrics","Cancellation requested · unloading at the next safe phase boundary")
                 let _ = desk.set_text(session,"status","Cancelling Qwen; H3 remains blocked until teardown completes")
               } else {
@@ -7075,6 +7220,42 @@ pub fn main(args: view<str>) -> i32
               let _=desk.set_text(session,"status","Movie Director request opened in Prompt Lab with Qwen3-VL 8B")
               continue
             }
+            if id=="movie_script_create"{
+              if array.len(prompt_jobs)!=0 or array.len(generations)!=0{
+                let _=desk.set_text(session,"status","Wait for the active GPU job before creating script shots")
+                continue
+              }
+              let script=struct.borrow(movie_state,field=script)
+              if text.trim(script)==""{
+                let _=desk.set_text(session,"status","Paste or write a script first")
+                continue
+              }
+              let model=prompt_lab.model(prompt_model_index)
+              var availability=prompt_lab.discover(model)
+              if not availability.available{
+                let _=desk.set_text(session,"status",struct.borrow(availability,field=reason))
+                continue
+              }
+              movie_script_project=string.copy(str.view(movie_project_path))
+              movie_script_input=string.copy(script)
+              let input=text.concat("Script:\n",script)
+              var request=prompt_types.request(model,prompt_types.Task.ShotList,
+                prompt_types.Transform.None,str.view(input),[],[])
+              let _=ref.swap(struct.borrow(request,field=system),string.copy(
+                "Turn the script into an ordered list of shots for MiniMax H3. Honor any explicit shot count and durations. Choose a practical duration for each other shot. Keep characters, settings and events as written. Give each shot one concise sentence with visible action and camera direction, plus sound or dialogue when specified. Return only a JSON object matching this shape: {\"shots\":[{\"title\":\"A short shot name\",\"duration_seconds\":5,\"shot_description\":\"Visible action and camera direction.\",\"soundscape\":\"Sound and dialogue\",\"music\":\"N/A\"}]}. Close the JSON object within the reply."))
+              struct.set(request,0.0,field=temperature)
+              prompt_cancel_path=prompt_lab.cancellation_path()
+              let _=ref.swap(struct.borrow(request,field=cancel_path),string.copy(str.view(prompt_cancel_path)))
+              prompt_started=time.monotonic_ns()
+              prompt_target=4
+              var work=prompt_lab.Job{request:request,manifest_directory:string.copy(str.view(prompt_manifest_directory))}
+              array.push(prompt_jobs,task.spawn(work,fn=prompt_lab.run))
+              let _=desk.set_bool(session,"movie_script_create","sensitive",false)
+              let _=desk.set_bool(session,"movie_script_cancel","sensitive",true)
+              let _=desk.set_bool(session,"prompt_cancel","sensitive",true)
+              let _=desk.set_text(session,"movie_runtime","Creating shots from script…")
+              continue
+            }
             if id == "prepare_director" {
               if array.len(prompt_jobs)!=0 or array.len(generations)!=0{
                 let _=desk.set_text(session,"status","Wait for the active GPU job before running Movie Director")
@@ -7159,6 +7340,13 @@ pub fn main(args: view<str>) -> i32
               }
               var request = prompt_session.build_request(prompt_state,prompt_transform,
                 str.view(effective_instruction))
+              match prompt_lab.prepare_request(request) {
+                ok(_) => {},
+                err(message) => {
+                  let _ = desk.set_text(session,"status",str.view(message))
+                  continue
+                },
+              }
               prompt_cancel_path=prompt_lab.cancellation_path()
               let old_cancel:string=ref.swap(struct.borrow(request,field=cancel_path),
                 string.copy(str.view(prompt_cancel_path)))
@@ -7737,7 +7925,7 @@ pub fn main(args: view<str>) -> i32
               var found:bool=false
               loop{if next>=array.len(struct.borrow(movie_state,field=shots)){break}
                 var candidate=movie.snapshot_shot(movie_state,next)
-                if candidate.selected_take<0{
+                if not movie.has_finished_take(candidate){
                   found=true
                   break
                 }
@@ -8280,7 +8468,7 @@ pub fn main(args: view<str>) -> i32
                     generation_status(session,channel.message(held))
                     continue},
                 }
-                var work=ph3image.PH3ImageJob{request:request,progress:channel.ticket(receiver)}
+                var work=ph3image.PH3ImageJob{request:request,progress:generation_ticket(receiver,str.view(generation_session_tag))}
                 array.push(progress_receivers,receiver)
                 array.push(generations,task.spawn(work,fn=ph3image.run))
                 let _=desk.set_bool(session,"generate_action","sensitive",false)
@@ -8322,7 +8510,7 @@ pub fn main(args: view<str>) -> i32
                     generation_status(session,channel.message(held))
                     continue},
                 }
-                var work=h3image.H3ImageJob{request:request,progress:channel.ticket(receiver)}
+                var work=h3image.H3ImageJob{request:request,progress:generation_ticket(receiver,str.view(generation_session_tag))}
                 array.push(progress_receivers,receiver)
                 array.push(generations,task.spawn(work,fn=h3image.run))
                 let _=desk.set_bool(session,"generate_action","sensitive",false)
@@ -8357,7 +8545,7 @@ pub fn main(args: view<str>) -> i32
                     generation_status(session,channel.message(held))
                     continue},
                 }
-                var work=generation.FiboJob{request:request,progress:channel.ticket(receiver)}
+                var work=generation.FiboJob{request:request,progress:generation_ticket(receiver,str.view(generation_session_tag))}
                 array.push(progress_receivers,receiver)
                 array.push(generations,task.spawn(work,fn=generation.run_fibo))
                 let _=desk.set_bool(session,"generate_action","sensitive",false)
@@ -8394,7 +8582,7 @@ pub fn main(args: view<str>) -> i32
                     generation_status(session,channel.message(held))
                     continue},
                 }
-                var work=generation.MossJob{request:request,progress:channel.ticket(receiver)}
+                var work=generation.MossJob{request:request,progress:generation_ticket(receiver,str.view(generation_session_tag))}
                 array.push(progress_receivers,receiver)
                 array.push(generations,task.spawn(work,fn=generation.run_moss))
                 let _=desk.set_bool(session,"generate_action","sensitive",false)
@@ -8438,7 +8626,7 @@ pub fn main(args: view<str>) -> i32
                     continue},
                 }
                 var work=generation.QwenImageJob{request:request,
-                  progress:channel.ticket(receiver),final_width:0,final_height:0}
+                  progress:generation_ticket(receiver,str.view(generation_session_tag)),final_width:0,final_height:0}
                 array.push(progress_receivers,receiver)
                 array.push(generations,task.spawn(work,fn=generation.run_qwen_image))
                 let _=desk.set_bool(session,"generate_action","sensitive",false)
@@ -8477,7 +8665,7 @@ pub fn main(args: view<str>) -> i32
                     generation_status(session,channel.message(held))
                     continue },
                 }
-                var work = generation.KreaJob {sources:sources,request:request,progress:channel.ticket(receiver)}
+                var work = generation.KreaJob {sources:sources,request:request,progress:generation_ticket(receiver,str.view(generation_session_tag))}
                 array.push(progress_receivers,receiver)
                 array.push(generations,task.spawn(work,fn=generation.run_krea))
                 let _ = desk.set_bool(session,"generate_action","sensitive",false)
@@ -8685,7 +8873,7 @@ pub fn main(args: view<str>) -> i32
                       character_sheet_mode} else {character_sheet.off()},
                     str.view(sheet_output), actual_seed,
                     h3.evaluations(h3_presets, request.profile), conditioner_projection,
-                    transformer_projection, attention, channel.ticket(receiver),
+                    transformer_projection, attention, generation_ticket(receiver,str.view(generation_session_tag)),
                     generation.schedule_of(h3_presets, request.profile),
                     h3.sampler(h3_presets, request.profile))
                   // A swap source clip only supplies motion and scene, so encode

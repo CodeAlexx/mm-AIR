@@ -52,7 +52,12 @@ Its six main surfaces are:
 - H3 ControlNet, based on SerenityFlow's dedicated dense Union ControlNet screen.
 - Prompt Lab / Director, an AIR-native Qwen3-VL workspace for prompt chat, image/video
   captioning, shot planning, continuity notes, authoritative window plans, and
-  reusable H3 prompt construction.
+  reusable H3 prompt construction. Choose **H3-Image generation** for a still
+  description or **H3-Image edit** to describe a finished edit from ordered
+  pictures. **H3 Reference video (Ref2VA)** writes MiniMax's six-section reference
+  prompt from pictures and sampled video frames.
+  [MiniMax H3-Image guide](https://github.com/MiniMax-AI/MiniMax-H3-Image/tree/main/skills/h3-image-prompt-writing)
+  [MiniMax Ref2VA guide](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md)
 
 The application uses AIR's shared desktop toolkit with a native Windows presenter
 and a GTK presenter on Linux. AIR owns navigation and application state. Generate and
@@ -159,7 +164,7 @@ BF16 run was refused; the Encoder choice is hidden and reused settings use ConvR
 
 Generate's model picker includes **Qwen-Image-2.1** for native text-to-image
 generation. The dedicated **Image Edit** surface directly below Edit accepts
-one to ten ordered PNG sources and one natural-language edit instruction. The
+one to ten ordered PNG, JPEG, or WebP sources and one edit instruction. The
 first source is the primary picture and later sources retain their displayed
 order as additional visual conditions. Both paths call the
 same linked `models.qwenimage21.session` package inside the MM-Air process;
@@ -201,6 +206,20 @@ moves the selected artifact through the desktop trash service instead of
 permanently deleting it. File controls accept native picker selection and
 desktop drag-and-drop. Image Edit exposes the same Qwen resolution, schedule,
 solver, step and random-or-locked seed controls as Generate.
+
+#### Qwen face and head swap
+
+1. Open **Image Edit**, select **Qwen-Image-2.1** under **Edit Model**, and choose
+   **Head swap v1.1** under **FACE / HEAD / BODY SWAP**.
+2. Drop the target photo onto **＋ Image to change** (source 1) in the left
+   sidebar. Drop the donor portrait onto **＋ Face / head to put in** (source 2).
+   Click either button to browse. The large left pane previews the target.
+3. Use **Generate Edit**. The preset loads the LoRA unmerged at strength 1.0,
+   fills in its trained instruction, and turns Turbo and prompt enhancement off.
+
+Set `MM_AIR_FACE_SWAP_LORA_DIR` to the folder containing
+`bfs_head_v1.1_qwen_2.1.safetensors`. The base Qwen checkpoint and its AIR
+manifests are also required. [Head Swap v1.1 weights](https://huggingface.co/Alissonerdx/BFS-Best-Face-Swap/blob/main/bfs_head_v1.1_qwen_2.1.safetensors)
 
 Deployment provides the pinned creator snapshot and AIR manifests:
 
@@ -408,6 +427,18 @@ references, shared cast, endless-chain state, locks, selected takes, and output
 paths autosave and restore across application launches. The Projects picker can
 open any saved project; New and Import add projects, while Delete moves the
 selected project to Trash and never removes the final project.
+
+In **Script**, paste a script and choose **Create shots from script**. The
+selected Prompt Lab model drafts ordered shots with editable descriptions,
+durations, and sound in the current project. The script saves with the project.
+The first draft fills an untouched opening shot. Further drafts append shots.
+Review each shot and use **Choose opening frame** to attach an approved
+storyboard still before rendering it.
+
+Movie Maker uses the schedule selected in Generate. The 19- and 20-evaluation
+Exponential Euler profiles use separate prepared modulation tables for text
+and opening-frame video. A missing table is reported before GPU encoding.
+Failed takes stay in the shot's history so **Render all shots** can retry them.
 
 The same projects can be created, edited, rendered and assembled without the window through
 the Movie Maker MCP server (`mm-air-movie-mcp` with its render worker `mm-air-movie-render`);
@@ -1018,6 +1049,9 @@ Prompt Lab has its own workspace (`Ctrl+6`). Its left pane keeps the
 conversation and ordered image/video references; its right pane holds the current workprint.
 The controls expose final prompts, variations, image/video captions, shot lists, continuity,
 scene plans, and director notes, plus H3 Expand, Shorten, Cinematic, and Shot List actions.
+For **H3-Image edit**, name the source and each donor in attachment order. Use
+`<Picture 1>` for the first attachment and say exactly what each donor supplies.
+Explicit picture-role instructions carry through prompt expansion.
 Results can replace or append Generate's prompt, populate Movie Maker Director, be preserved
 as a variant, or be saved as versioned JSON under `output/prompt-history`.
 
@@ -1058,6 +1092,11 @@ Generate completion and failure remain visible in the batch/run-state controls
 and also issue a best-effort `notify-send` desktop notification. A missing
 notification service never changes a generation result.
 
+Use **Stop generation** in the top bar during a video render or image
+generation or edit. **Stopping…** stays visible while the worker reaches its
+next cancellation check. Movie Maker stops the remaining queue and retains
+completed takes.
+
 The tab uses AIR's `toolkits/prompt` package in-process. Select **Qwen3-VL 4B** or
 **Qwen3-VL 8B**, attach references, and run **Final H3 prompt** or **Prompt variations**.
 Use **Send to Generate** to send the result to the prompt field. The output is plain
@@ -1095,6 +1134,8 @@ a 4,296,010,552-byte peak. Both returned `fully_unloaded=true`; no compute proce
   video also plays or pauses.
 - On Windows, **Fullscreen** fills the current monitor with the video preview.
   **Exit fullscreen** or **Esc** restores the gallery while playback keeps its position.
+- Windows paints action buttons and the **−** and **+** controls inside numeric
+  fields with the active theme during progress updates.
 - Selecting an image result enables **Reference**. This explicit
   action appends the original image to the existing visual-reference list and
   selects H3 Ref2VA. It preserves the prompt, seed, geometry, audio references,
@@ -1345,6 +1386,13 @@ placement and prefetch path. One controlled Low run on an RTX 5080 took **143 s*
 with the new path versus **272 s** with the previous loader. Both runs produced
 the same caption, aspect ratio and reasoning bytes. The measurement covers the
 expander stage for the tested text request.
+
+**Turnaround sheets.** Approve a front view first, then use it to carry the
+wardrobe and proportions into separate side and rear views. Use one approved
+close portrait to anchor identity in separate expression edits. Assemble the
+approved views, detail crop, labels, and swatches into the final PNG. This
+workflow produced a 9536 × 5216 (49.7 MP) sheet on Windows with Qwen Head Swap
+v1.1 as the portrait anchor and H3-Image for the additional views.
 
 ### P-H3-Image (2026-11-11)
 

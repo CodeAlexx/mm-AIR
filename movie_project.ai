@@ -23,7 +23,7 @@ pub type Shot=struct{
 }
 pub type Project=struct{
   title:string,format:u32,target_duration:f64,takes_per_shot:u64,delivery_fps:u64,
-  director_bible:string,continuity_bible:string,brand_bible:string,
+  director_bible:string,continuity_bible:string,brand_bible:string,script:string,
   characters:array<Character>,cast_replaces_identities:bool,next_character_id:u64,
   selected_character:u64,
   endless_target:f64,endless_segment:f64,endless_active:bool,
@@ -44,7 +44,7 @@ pub fn create()->Project effects{alloc}{
     takes_per_shot:1,delivery_fps:24,
     director_bible:string.copy("Describe the story, visual language, performances, camera grammar, and sound direction for this movie."),
     continuity_bible:string.copy("Lock identity, wardrobe, geography, eyelines, screen direction, lighting, and motion seams across shots."),
-    brand_bible:string.new(),characters:array.new(),
+    brand_bible:string.new(),script:string.new(),characters:array.new(),
     cast_replaces_identities:true,next_character_id:1,selected_character:0,endless_target:60.0,
     endless_segment:8.0,endless_active:false,shots:[create_shot(1,"Opening shot")],
     selected_shot:0,next_shot_id:2}
@@ -443,6 +443,8 @@ pub fn encode(project:ref<Project>)->result<string,string> effects{alloc}{
   codec.field_text(writer,"director_brief",struct.borrow(project,field=director_bible))
   codec.field_text(writer,"continuity_bible",struct.borrow(project,field=continuity_bible))
   codec.field_text(writer,"brand_bible",struct.borrow(project,field=brand_bible))
+  let script=struct.borrow(project,field=script)
+  if str.len(script)!=0{codec.field_text(writer,"script",script)}
   codec.key(writer,"assets")
   codec.begin_array(writer)
   codec.end_array(writer)
@@ -634,6 +636,7 @@ pub fn decode(payload:string own)->result<Project,string> effects{alloc}{
   let _=ref.swap(struct.borrow(project,field=director_bible),match codec.text_or(document,reader,"director_brief",""){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}})
   let _=ref.swap(struct.borrow(project,field=continuity_bible),match codec.text_or(document,reader,"continuity_bible",""){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}})
   let _=ref.swap(struct.borrow(project,field=brand_bible),match codec.text_or(document,reader,"brand_bible",""){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}})
+  let _=ref.swap(struct.borrow(project,field=script),match codec.text_or(document,reader,"script",""){ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}})
   var character_values: array<Character> = array.new()
   if match codec.has_field(document,reader,"characters"){
       ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}} {
@@ -675,6 +678,85 @@ pub fn load(filename:str)->result<Project,string> effects{alloc,fs.meta,fs.read}
   if not present{return result.ok(create())}
   let payload=match files.read_text(filename){ok(value)=>value,err(problem)=>{return result.err(string.copy(problem.message))}}
   decode(payload)
+}
+
+fn opening_placeholder(project:ref<Project>)->bool effects{alloc}{
+  let shots=struct.borrow(project,field=shots)
+  if array.len(shots)!=1 or project.next_shot_id!=2{return false}
+  var current=codec.writer()
+  encode_shot(current,array.borrow(shots,0))
+  var initial=codec.writer()
+  var opening=create_shot(1,"Opening shot")
+  encode_shot(initial,opening)
+  match codec.finish(current){
+    ok(value)=>match codec.finish(initial){ok(default_value)=>value==default_value,err(_)=>false},
+    err(_)=>false,
+  }
+}
+
+// Validate the full draft before the caller saves it or installs it in the window.
+pub fn with_script_shots(source:ref<Project>,draft:str)->result<Project,string> effects{alloc}{
+  let body=text.trim(draft)
+  let payload=if str.starts_with(body,"```json") and text.ends_with(body,"```") and str.len(body)>10{
+    text.trim(str.slice(body,7,str.len(body)-3))
+  }else{body}
+  var document=match json.parse(payload){ok(value)=>value,err(_)=>{
+    return result.err("The script draft was incomplete. Try creating shots from a shorter section.")}}
+  var root=codec.root_reader(codec.strict())
+  var items=match codec.items_field(document,root,"shots",codec.strict()){
+    ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+  let template=array.borrow(struct.borrow(source,field=shots),source.selected_shot)
+  let width=template.width
+  let height=template.height
+  let steps=template.steps
+  let replace=opening_placeholder(source)
+  var id:u64=if replace{1}else{source.next_shot_id}
+  var drafted:array<Shot>=array.new()
+  loop {
+    var item=match codec.next_object(document,items){
+      ok(value)=>match value{some(found)=>found,none=>{break}},
+      err(problem)=>{return result.err(codec.describe(problem))}}
+    let title=match codec.text_field(document,item,"title"){
+      ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+    let seconds=match codec.f64_field(document,item,"duration_seconds"){
+      ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+    let action=match codec.text_field(document,item,"shot_description"){
+      ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+    let sound=match codec.text_or(document,item,"soundscape","N/A"){
+      ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+    let music=match codec.text_or(document,item,"music","N/A"){
+      ok(value)=>value,err(problem)=>{return result.err(codec.describe(problem))}}
+    match codec.reader_finish(document,item){ok(_)=>{},err(problem)=>{return result.err(codec.describe(problem))}}
+    if str.len(text.trim(str.view(title)))==0{return result.err("Every drafted shot needs a title")}
+    var shot=create_shot(id,text.trim(str.view(title)))
+    struct.set(shot,seconds,field=duration)
+    struct.set(shot,width,field=width)
+    struct.set(shot,height,field=height)
+    struct.set(shot,steps,field=steps)
+    let _=ref.swap(struct.borrow(shot,field=plan),action)
+    let _=ref.swap(struct.borrow(shot,field=soundscape),sound)
+    let _=ref.swap(struct.borrow(shot,field=music),music)
+    match validate(shot){ok(_)=>{},err(message)=>{return result.err(text.concat(str.view(title),text.concat(" · ",message)))}}
+    array.push(drafted,shot)
+    id=id+1
+  }
+  match codec.reader_finish(document,root){ok(_)=>{},err(problem)=>{return result.err(codec.describe(problem))}}
+  if array.len(drafted)==0{return result.err("The script draft contains no shots")}
+  var updated=try decode(try encode(source))
+  struct.set(updated,source.selected_character,field=selected_character)
+  if replace {
+    let _=ref.swap(struct.borrow(updated,field=shots),drafted)
+  }else{
+    let first_new=array.len(struct.borrow(updated,field=shots))
+    struct.set(updated,first_new,field=selected_shot)
+    let shots=struct.borrow(updated,field=shots)
+    var index:u64=0
+    loop{if index>=array.len(drafted){break}
+      array.push(shots,copy_at(drafted,index))
+      index=index+1}
+  }
+  struct.set(updated,id,field=next_shot_id)
+  result.ok(updated)
 }
 
 pub fn edit_manifest(project:ref<Project>)->result<string,string> effects{alloc}{
@@ -732,7 +814,7 @@ pub fn completed_seconds(project:ref<Project>)->f64 effects{}{
   var i:u64=0
   loop{if i>=array.len(struct.borrow(project,field=shots)){break}
     let shot=array.borrow(struct.borrow(project,field=shots),i)
-    if shot.selected_take>=0{total=total+shot.duration}
+    if has_finished_take(shot){total=total+shot.duration}
     i=i+1}
   total
 }
@@ -750,10 +832,20 @@ pub fn endless_segment_duration(completed:f64,target:f64,preferred:f64)->f64
   chosen
 }
 
+pub fn has_finished_take(shot:ref<Shot>)->bool effects{}{
+  let index:u64=cast.wrap(shot.selected_take)
+  let takes=struct.borrow(shot,field=takes)
+  if shot.selected_take<0 or index>=array.len(takes){return false}
+  let take=array.borrow(takes,index)
+  take.state=="done" and str.len(struct.borrow(take,field=output))!=0
+}
+
 pub fn record_take(shot:ref<Shot>,output:str,seed:u64,succeeded:bool)->unit effects{alloc}{
   array.push(struct.borrow(shot,field=takes),Take{output:string.copy(output),
     state:string.copy(if succeeded{"done"}else{"failed"}),seed:seed})
-  struct.set(shot,cast.sat(array.len(struct.borrow(shot,field=takes))-1),field=selected_take)
+  if succeeded {
+    struct.set(shot,cast.sat(array.len(struct.borrow(shot,field=takes))-1),field=selected_take)
+  }
   ()
 }
 

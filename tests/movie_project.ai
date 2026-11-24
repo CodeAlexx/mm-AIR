@@ -5,6 +5,38 @@ import std.inference.h3.request as h3
 import std.text as text
 
 pub fn main(args:view<str>)->i32 effects{alloc,env,fs.meta,fs.read,fs.write,io.write,process,time}{
+  var blank=movie.create()
+  let script="At dawn, Mira spots a paper boat drifting toward a drain. She catches it and sets it free downstream."
+  let _=ref.swap(struct.borrow(blank,field=script),string.copy(script))
+  let draft="{\"shots\":[{\"title\":\"The boat\",\"duration_seconds\":5,\"shot_description\":\"A close-up follows the paper boat drifting toward the drain.\"},{\"title\":\"The catch\",\"duration_seconds\":5,\"shot_description\":\"Mira catches the paper boat and lifts it out of the water.\",\"soundscape\":\"Water trickles.\"},{\"title\":\"Downstream\",\"duration_seconds\":5,\"shot_description\":\"Mira sets the boat back in the shallow water.\"}]}"
+  let fenced=text.concat("```json\n",text.concat(draft,"\n```"))
+  var scripted=match movie.with_script_shots(blank,str.view(fenced)){
+    ok(value)=>value,err(message)=>{
+      io.ewrite(message)
+      panic "decode script shots"}}
+  if array.len(struct.borrow(scripted,field=shots))!=3 or scripted.next_shot_id!=4 or
+     movie.total_seconds(scripted)!=15.0{panic "script should fill the blank project with three ordered shots"}
+  var second=movie.snapshot_shot(scripted,1)
+  if second.id!=2 or struct.borrow(second,field=title)!="The catch" or
+     struct.borrow(second,field=soundscape)!="Water trickles."{panic "script shot order and sound"}
+  movie.record_take_at(scripted,0,"",42,false)
+  var failed=movie.snapshot_shot(scripted,0)
+  if failed.selected_take!=-1 or movie.has_finished_take(failed) or movie.completed_seconds(scripted)!=0.0{
+    panic "failed takes must remain eligible for rendering"}
+  let persisted=match movie.encode(scripted){ok(value)=>value,err(_)=>{panic "encode script project"}}
+  var reopened=match movie.decode(persisted){ok(value)=>value,err(_)=>{panic "reopen script project"}}
+  if struct.borrow(reopened,field=script)!=script or array.len(struct.borrow(reopened,field=shots))!=3{
+    panic "script and shots survive reopen"}
+  movie.set_shot_text(blank,0,1,"An existing opener to preserve.")
+  movie.record_take_at(blank,0,"/tmp/existing.mp4",42,true)
+  var appended=match movie.with_script_shots(blank,draft){ok(value)=>value,err(_)=>{panic "append script shots"}}
+  var original=movie.snapshot_shot(appended,0)
+  if array.len(struct.borrow(appended,field=shots))!=4 or appended.selected_shot!=1 or
+     array.len(struct.borrow(original,field=takes))!=1{panic "draft appends without replacing an existing take"}
+  match movie.with_script_shots(blank,"{\"shots\":[]}"){
+    ok(_)=>{panic "empty draft"},err(_)=>{}}
+  match movie.with_script_shots(blank,"{\"shots\":[{\"title\":\"Broken\",\"duration_seconds\":0,\"shot_description\":\"View of the river.\"}]}"){
+    ok(_)=>{panic "invalid duration"},err(_)=>{}}
   var project=movie.create()
   var presets:h3.Presets=fixture.presets()
   if movie.resolution_for_aspect(presets,1161,2048)!=5 or

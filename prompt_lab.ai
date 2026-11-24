@@ -11,6 +11,7 @@ import std.system as system
 import std.tasks as tasks
 import std.text as text
 import "runtime_config.ai" as config
+import "image_edit_refs.ai" as image_edit_refs
 
 pub type Job = struct { request: prompt.Request, manifest_directory: string }
 pub type Outcome = struct {
@@ -67,6 +68,14 @@ pub fn cancellation_path() -> string effects {alloc,env,time} {
     text.concat(string.from_int(time.monotonic_ns()),".signal")))
 }
 
+pub fn guided_task(task: prompt.Task) -> bool effects {} {
+  task == prompt.Task.H3Reference or prompt.is_h3_image(task)
+}
+
+pub fn attachment_limit(task: prompt.Task) -> u64 effects {} {
+  if task == prompt.Task.H3ImageEdit {16} else {8}
+}
+
 pub fn task(index: u32) -> prompt.Task effects {} {
   if index == 1 { return prompt.Task.Variations }
   if index == 2 { return prompt.Task.ImageCaption }
@@ -75,6 +84,9 @@ pub fn task(index: u32) -> prompt.Task effects {} {
   if index == 5 { return prompt.Task.ContinuityNotes }
   if index == 6 { return prompt.Task.ScenePlan }
   if index == 7 { return prompt.Task.DirectorNotes }
+  if index == 8 { return prompt.Task.H3Reference }
+  if index == 9 { return prompt.Task.H3Image }
+  if index == 10 { return prompt.Task.H3ImageEdit }
   prompt.Task.Prompt
 }
 
@@ -113,6 +125,45 @@ pub fn cancel(path:str) -> bool effects {alloc,fs.write} {
   result.is_ok(files.write_text(path,"cancelled\n"))
 }
 
+pub fn prepare_request(request: ref<prompt.Request>) -> result<unit,string> effects {alloc} {
+  let attachments = struct.borrow(request,field=attachments)
+  let count = array.len(attachments)
+  let limit = attachment_limit(request.task)
+  if count > limit {
+    return result.err(text.concat("This Prompt Lab mode accepts up to ",
+      text.concat(string.from_int(limit)," references")))
+  }
+  if request.task == prompt.Task.H3Image and count != 0 {
+    return result.err("Use H3-Image edit to write a prompt based on pictures")
+  }
+  if request.task == prompt.Task.H3ImageEdit and count == 0 {
+    return result.err("Add at least one source picture for H3-Image edit")
+  }
+  if request.task == prompt.Task.H3Reference and count == 0 {
+    return result.err("Add at least one picture or video for H3 Reference")
+  }
+  if not guided_task(request.task) { return result.ok(()) }
+  var index: u64 = 0
+  var pictures: u64 = 0
+  var videos: u64 = 0
+  loop {
+    if index >= count { break }
+    let item = array.borrow(attachments,index)
+    if item.kind == prompt.AttachmentKind.Image {
+      pictures = pictures + 1
+      struct.set(item,pictures,field=ordinal)
+    } else {
+      if request.task == prompt.Task.H3ImageEdit {
+        return result.err("H3-Image edit takes pictures. Use H3 Reference for video sources")
+      }
+      videos = videos + 1
+      struct.set(item,videos,field=ordinal)
+    }
+    index = index + 1
+  }
+  result.ok(())
+}
+
 pub fn run(job: Job own) -> Outcome
     effects {alloc,env,fs.meta,fs.read,fs.write,gpu,process,time} {
   var owned = job
@@ -127,6 +178,15 @@ pub fn run(job: Job own) -> Outcome
   }
   var sources = engine.sources(availability,
     str.view(manifest_directory))
+  let source_instructions = if request.task == prompt.Task.H3ImageEdit {
+    image_edit_refs.instructions(struct.borrow(request,field=instruction),
+      array.len(struct.borrow(request,field=attachments)))
+  } else { string.new() }
+  if str.len(str.view(source_instructions)) != 0 {
+    let instruction = text.concat(struct.borrow(request,field=instruction),text.concat(
+      "\n\nPreserve these exact picture roles in the edit prompt. ",str.view(source_instructions)))
+    struct.set(request,instruction,field=instruction)
+  }
   match engine.generate(sources,request) {
     err(message) => failure(str.view(message)),
     ok(value) => {
@@ -135,7 +195,7 @@ pub fn run(job: Job own) -> Outcome
         return failure("Qwen response was rejected because GPU teardown did not complete; H3 was not started")
       }
       Outcome {succeeded:true,
-        response:string.copy(struct.borrow(response,field=content)),
+        response:image_edit_refs.keep(struct.borrow(response,field=content),str.view(source_instructions)),
         message:string.copy("Qwen response complete; model synchronized and unloaded"),
         input_tokens:response.input_tokens,output_tokens:response.output_tokens,
         peak_device_bytes:response.peak_device_bytes,

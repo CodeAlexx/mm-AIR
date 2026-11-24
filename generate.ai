@@ -4,6 +4,7 @@
 module app.mm_air.generate
 
 import std.channel as channel
+import std.tasks as tasks
 import std.compute_offload as offload
 import std.draw as draw
 import std.files as files
@@ -281,7 +282,7 @@ fn run_fibo_inner(request:ref<parameters.FiboRequest>,sender:ref<option<channel.
     sampler:string.copy(struct.borrow(request,field=sampler)),
     schedule:if parameters.fibo_uses_stepper(str.view(struct.borrow(request,field=sampler))){
       string.copy(struct.borrow(request,field=schedule))}else{string.copy("default")},
-    eta:request.eta,bongmath:request.bongmath}
+    eta:request.eta,bongmath:request.bongmath,cancel_path:channel.cancellation_path(sender)}
   report(sender,str.view(text.concat(label,": reading the model and generating")))
   match fibo_generate.run(job){
     ok(_)=>outcome_metrics(true,output,str.view(text.concat(label,
@@ -324,8 +325,14 @@ fn run_qwen_image_policy(owned:ref<QwenImageJob>,policy:qwen_image_attention.Pol
       "Cannot connect the MM-Air Qwen-Image-2.1 progress channel")},
   }
   var sender:option<channel.Sender> = option.some(connection)
+  let signal = if cancel_path == "" {channel.cancellation_path(sender)} else {string.copy(cancel_path)}
   let started=time.monotonic_ns()
   let request=struct.borrow(owned,field=request)
+  if str.view(signal)!="" and tasks.requested_at(str.view(signal)){
+    let stopped=outcome(false,struct.borrow(request,field=output),"Generation cancelled")
+    finish_progress(sender,stopped)
+    return stopped
+  }
   var finished=match parameters.validate_qwen_image(request){
     err(message)=>outcome(false,struct.borrow(request,field=output),message),
     ok(_)=>{
@@ -369,6 +376,11 @@ fn run_qwen_image_policy(owned:ref<QwenImageJob>,policy:qwen_image_attention.Pol
             finish_progress(sender,failed)
             return failed},
         }
+        if str.view(signal)!="" and tasks.requested_at(str.view(signal)){
+          let stopped=outcome(false,struct.borrow(request,field=output),"Generation cancelled")
+          finish_progress(sender,stopped)
+          return stopped
+        }
         prompt=string.copy(struct.borrow(enhanced,field=prompt))
         // wh_ratio picks a preset; an edit's ratio_follow ("<imageN>") keeps the
         // preset nearest that source's aspect ratio.
@@ -407,7 +419,7 @@ fn run_qwen_image_policy(owned:ref<QwenImageJob>,policy:qwen_image_attention.Pol
           finish_progress(sender,failed)
           return failed},
       }
-      qwen_image_session.set_cancel_path(session,cancel_path)
+      qwen_image_session.set_cancel_path(session,str.view(signal))
       report(sender,if condition_count==0{
         "Running Qwen-Image-2.1 text-to-image"}else{
         "Running Qwen-Image-2.1 image edit"})
@@ -452,7 +464,7 @@ fn run_qwen_image_policy(owned:ref<QwenImageJob>,policy:qwen_image_attention.Pol
       let result=qwen_image_generate.run_request_images_adapted(
         if condition_count==0{"t2i"}else{"edit"},
         str.view(prompt),struct.borrow(request,field=output),sources,
-        session.request,sender,policy,cancel_path,root,manifests,residency,adapters)
+        session.request,sender,policy,str.view(signal),root,manifests,residency,adapters)
       match result{
         ok(_)=>{
           if owned.final_width>0 and owned.final_height>0 and
@@ -501,7 +513,8 @@ fn run_krea_policy(owned:ref<KreaJob>,policy:krea_attention.Policy,cancel_path:s
       "Cannot connect the MM-Air Krea progress channel") },
   }
   var sender: option<channel.Sender> = option.some(connection)
-  var finished = run_krea_inner(owned,sender,policy,cancel_path)
+  let signal = if cancel_path == "" {channel.cancellation_path(sender)} else {string.copy(cancel_path)}
+  var finished = run_krea_inner(owned,sender,policy,str.view(signal))
   finish_progress(sender,finished)
   finished
 }
@@ -1219,10 +1232,12 @@ fn apply_relayvsr(job:ref<Job>,generated:Outcome own,
   report(sender,if job.relayvsr_settings.variant==1{
     "Loading RelayVSR 4x"}else{"Loading RelayVSR 2x"})
   report(sender,"Upscaling generated video")
+  let signal = channel.cancellation_path(sender)
+  let cancel = if str.view(signal) == "" {string.copy(struct.borrow(job,field=relayvsr_cancel_path))} else {signal}
   match relayvsr_post.run_with(str.view(source),str.view(final_output),
       struct.borrow(job,field=scratch_root),job.relayvsr_settings,
       str.view(struct.borrow(job,field=relayvsr_progress_path)),
-      str.view(struct.borrow(job,field=relayvsr_cancel_path))){
+      str.view(cancel)){
     ok(completed)=>{
       var held=completed
       outcome(true,struct.borrow(held,field=final_output),
@@ -1236,7 +1251,9 @@ fn apply_relayvsr(job:ref<Job>,generated:Outcome own,
 fn apply_post(job:ref<Job>,generated:Outcome own,
               sender:ref<option<channel.Sender>>)->Outcome
     effects {alloc,env,fs.meta,fs.read,fs.write,gpu,net,process,time} {
+  if channel.cancellation_requested(sender) { return generated }
   let restored=apply_seedvr2(job,generated,sender)
+  if channel.cancellation_requested(sender) { return restored }
   apply_relayvsr(job,restored,sender)
 }
 
@@ -2261,6 +2278,16 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
     }
   }
 
+  let evaluations=str.view(string.from_int(job.evaluations))
+  let cache=struct.borrow(struct.borrow(sources,field=transformer),field=modulation_checkpoint)
+  let available=match files.is_file(cache){ok(found)=>found,err(_)=>false}
+  if not available {
+    let message=text.concat("H3 needs the prepared cache for ",text.concat(evaluations,
+      text.concat(" evaluations. Missing file: ",cache)))
+    clean_scratch(str.view(scratch))
+    return outcome(false,str.view(output_path),str.view(message))
+  }
+  report(sender,text.concat("H3 · ",text.concat(evaluations," evaluations · prepared tables ready")))
   var context: GpuContext = match agpu.open(0) {
     ok(value) => value,
     err(problem) => { clean_scratch(str.view(scratch))
@@ -2728,6 +2755,11 @@ pub fn run(source: Job own) -> Outcome
       "Cannot connect the MM-Air H3 progress channel") },
   }
   var sender: option<channel.Sender> = option.some(connection)
+  if channel.cancellation_requested(sender) {
+    let stopped = outcome(false, struct.borrow(job, field=output), "Generation cancelled")
+    finish_progress(sender, stopped)
+    return stopped
+  }
   if job.outpaint {
     var finished=run_outpaint(job,sender)
     finished=apply_post(job,finished,sender)

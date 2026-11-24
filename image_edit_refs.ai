@@ -1,0 +1,122 @@
+// Keep the user's ordered source instructions when an image edit is rewritten.
+module app.mm_air.image_edit_refs
+import std.regex as regex
+import std.text as text
+
+fn picture_tag(index: u64) -> string effects {alloc} {
+  text.concat("<Picture ",text.concat(string.from_int(index),">"))
+}
+
+fn capture(found: ref<regex.Match>, source: str, group: u64) -> string effects {alloc} {
+  let lo = array.get(struct.borrow(found,field=group_lo),group - 1)
+  let hi = array.get(struct.borrow(found,field=group_hi),group - 1)
+  string.copy(str.slice(source,lo,hi))
+}
+
+fn ordinal(value: str) -> u64 effects {alloc} {
+  let names: array<str> = ["first","second","third","fourth","fifth","sixth","seventh",
+    "eighth","ninth","tenth","eleventh","twelfth","thirteenth","fourteenth","fifteenth","sixteenth"]
+  var index: u64 = 0
+  loop {
+    if index >= array.len(names) { break }
+    if array.get(names,index) == value { return index + 1 }
+    index = index + 1
+  }
+  0
+}
+
+fn quoted(data: view<byte>, offset: u64) -> bool effects {} {
+  var quote: u64 = 0
+  var pos: u64 = 0
+  loop {
+    if pos >= offset { break }
+    let current: u8 = cast.bits(view.get(data,pos))
+    if current == 34 {
+      if quote == 34 { quote = 0 } else if quote == 0 { quote = 34 }
+    } else if current == 39 {
+      if quote == 39 { quote = 0 }
+      else if quote == 0 and (pos == 0 or not text.ascii_is_alnum(view.get(data,pos - 1))) { quote = 39 }
+    } else if current == 226 and pos + 2 < offset and view.get(data,pos + 1) == 128 {
+      let mark_byte: u8 = cast.bits(view.get(data,pos + 2))
+      let mark: u64 = cast.wrap(mark_byte)
+      if (mark == 156 or mark == 152) and quote == 0 { quote = mark + 1 }
+      else if mark == quote { quote = 0 }
+    }
+    pos = pos + 1
+  }
+  quote != 0
+}
+
+// A lowercase ASCII scan preserves byte offsets in the original UTF-8 brief.
+fn label_clause(clause: str, pattern: ref<regex.Program>, count: u64) -> option<string> effects {alloc} {
+  let lower = text.lower_ascii(clause)
+  var matches = match regex.find_all(pattern,str.view(lower)) {
+    ok(value) => value, err(_) => { return option.none() },
+  }
+  let data = str.bytes(clause)
+  var tagged = string.new()
+  var cursor: u64 = 0
+  var i: u64 = 0
+  loop {
+    if i >= array.len(matches) { break }
+    let found = array.borrow(matches,i)
+    i = i + 1
+    if found.start > 0 and text.ascii_is_alnum(view.get(data,found.start - 1)) { continue }
+    if found.end < str.len(clause) and text.ascii_is_alnum(view.get(data,found.end)) { continue }
+    if quoted(data,found.start) { continue }
+    let tagged_number = capture(found,str.view(lower),1)
+    let plain_number = capture(found,str.view(lower),3)
+    let named = capture(found,str.view(lower),5)
+    let index: u64 = if str.len(str.view(named)) > 0 { ordinal(str.view(named)) } else {
+      let number = if str.len(str.view(tagged_number)) > 0 {tagged_number} else {plain_number}
+      match text.parse_u64(str.view(number)) {
+        some(value) => value, none => 0,
+      }
+    }
+    if index == 0 or index > count { continue }
+    string.append(tagged,str.slice(clause,cursor,found.start))
+    string.append(tagged,str.view(picture_tag(index)))
+    cursor = found.end
+  }
+  if cursor == 0 { return option.none() }
+  string.append(tagged,str.slice(clause,cursor,str.len(clause)))
+  option.some(tagged)
+}
+
+pub fn instructions(brief: str, count: u64) -> string effects {alloc} {
+  if count == 0 { return string.new() }
+  var labels = match regex.compile("<picture\\s+(\\d+)\\s*>|(picture|picure|pic|image|photo|reference|attachment)\\s+(\\d+)|(the\\s+)?(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth)\\s+(picture|picure|pic|image|photo|reference|attachment)") {
+    ok(value) => value, err(_) => { return string.new() },
+  }
+  let lines = text.replace(brief," - ","\n")
+  let sentences = text.replace(str.view(lines),". ",".\n")
+  var clauses = text.split(str.view(sentences),"\n")
+  var kept = string.new()
+  var i: u64 = 0
+  loop {
+    if i >= array.len(clauses) { break }
+    let clause = text.trim(str.view(array.borrow(clauses,i)))
+    i = i + 1
+    match label_clause(str.view(clause),labels,count) {
+      some(value) => {
+        if str.len(str.view(kept)) != 0 { string.append(kept," ") }
+        string.append(kept,str.view(value))
+        if not (text.ends_with(str.view(value),".") or text.ends_with(str.view(value),"!") or text.ends_with(str.view(value),"?")) {
+          string.append(kept,".")
+        }
+      },
+      none => {},
+    }
+  }
+  kept
+}
+
+pub fn keep(response: str, source_instructions: str) -> string effects {alloc} {
+  if source_instructions == "" or text.contains(response,source_instructions) {
+    return string.copy(response)
+  }
+  var result = string.copy(source_instructions)
+  string.append(result," ")
+  string.append(result,response)
+  result
+}
