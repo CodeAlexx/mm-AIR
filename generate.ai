@@ -2086,6 +2086,23 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
        job.transformer_projection != session.Projection.ConvRotI8Streaming {
       return outcome(false, str.view(output_path), "pi-H3 runs with the ConvRot INT8 transformer projection")
     }
+    if job.window_frames < job.geometry.frames or str.len(struct.borrow(job, field=motion_context_path)) != 0 {
+      return outcome(false, str.view(output_path), "pi-H3 does not run with latent windowing or Motion Context")
+    }
+    // The adapter, its preset and the prepared files, checked before anything else (plain message when missing).
+    var early_layout: h3_deployment.Layout = match h3_deployment.load(
+        str.view(struct.borrow(job, field=deployment_file))) {
+      ok(value) => value,
+      err(problem) => { return outcome(false, str.view(output_path), str.view(problem)) },
+    }
+    var early_roots: h3_deployment.Roots = h3_deployment.Roots {
+      checkpoint_root: text.copy(str.view(checkpoint_root)), donor_root: text.copy(str.view(donor_root)),
+      manifest_root: text.copy(str.view(manifests)), layout: early_layout}
+    match h3_pi.resolve_preset(str.view(struct.borrow(job, field=pi_preset)), early_roots,
+        str.view(struct.borrow(job, field=pi_adapters)), job.evaluations, job.task) {
+      ok(_) => {},
+      err(problem) => { return outcome(false, str.view(output_path), str.view(problem)) },
+    }
   } else if job.evaluations != 7 and job.evaluations != 8 and job.evaluations != 19 and job.evaluations != 20 and
      job.evaluations != 50 and
      not (job.evaluations == 4 and job.model == session.Model.Reference) {
@@ -2125,7 +2142,8 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
   }
   // Keep format admission ahead of tokenizer/model/GPU setup. A bad adapter is
   // a CPU-classified application failure, not a late provider string.
-  var admission_index: u64 = 0
+  // The pi-H3 adapter (first when present) was checked with its preset above; the LoRA admission reads PEFT files.
+  var admission_index: u64 = if with_pi { 1 } else { 0 }
   loop {
     if admission_index >= array.len(adapter_requests) { break }
     let adapter: ref<h3_lora.Request> = array.borrow(adapter_requests,
