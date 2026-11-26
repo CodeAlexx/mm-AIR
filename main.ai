@@ -1897,6 +1897,7 @@ pub fn main(args: view<str>) -> i32
   var profile_index: u32 = default_h3_profile(h3_presets)
   var use_pi_h3: bool = false
   var pi_h3_profile: u32 = h3.profile_pi_4()
+  var pi_h3_dwd: bool = false   // the pixel-head adapter (steps list entries 2 and 3)
   var conditioner_projection_index: u32 = h3.projection_convrot_int8()
   var transformer_projection_index: u32 = h3.projection_convrot_int8()
   var attention_index: u32 = h3.attention_dense_int8()
@@ -3040,6 +3041,7 @@ pub fn main(args: view<str>) -> i32
                 apply_parameter_widgets(session, restored, profile_index)
                 let _ = desk.set_bool(session,"gen_use_pi_h3","active",use_pi_h3)
                 let _ = desk.set_bool(session,"gen_pi_h3_steps","visible",use_pi_h3)
+                pi_h3_dwd = false
                 let _ = desk.set_number(session,"gen_pi_h3_steps","selected",
                   if pi_h3_profile==h3.profile_pi_2(){1.0}else{0.0})
                 model_widgets(session,model_index,character_sheet_mode,generation_mode)
@@ -5498,8 +5500,10 @@ pub fn main(args: view<str>) -> i32
               } else { "Standard H3 schedule ready" })
             }
             if id == "gen_pi_h3_steps" {
-              pi_h3_profile = if desk.number(event,"value")==1.0 {h3.profile_pi_2()}
+              let pi_choice: f64 = desk.number(event,"value")
+              pi_h3_profile = if pi_choice==1.0 or pi_choice==3.0 {h3.profile_pi_2()}
                 else {h3.profile_pi_4()}
+              pi_h3_dwd = pi_choice>=2.0
             }
             if id == "gen_conditioner_projection" {
               conditioner_projection_index = h3.projection_convrot_int8()
@@ -8932,6 +8936,7 @@ pub fn main(args: view<str>) -> i32
                     generation.enable_reference_video_match(job)
                   }
                   if guided { generation.enable_guide_video(job,str.view(swap_source_video)) }
+                  if pi_h3_request and pi_h3_dwd { generation.enable_pi_dwd(job) }
                   generation.set_windows(job,v2v_window_frames,v2v_overlap_frames,v2v_short_last,v2v_color_match)
                   if swap and masked and str.len(str.view(swap_motion_reference))!=0 {
                     generation.set_masked_composite_source(job,str.view(vs_part_video))

@@ -194,7 +194,7 @@
     <items><item>Select schedule…</item><item>Donor RES · 7 evaluations</item><item>Euler simple · 19 evaluations</item><item>DC exponential Euler · 19 evaluations</item><item>Turbo Euler · 4 evaluations (swap turbo root)</item><item>RES simple · 20 evaluations</item><item>Turbo Euler · 8 evaluations</item><item>Exponential Euler · 20 evaluations</item><item>Exponential Euler · 50 evaluations</item></items>
   </object>
   <object class="GtkStringList" id="pi_h3_step_list">
-    <items><item>4 steps</item><item>2 steps</item></items>
+    <items><item>4 steps</item><item>2 steps</item><item>4 steps · pixel head (no video VAE; text or first frame)</item><item>2 steps · pixel head (no video VAE; text or first frame)</item></items>
   </object>
   <object class="GtkStringList" id="h3_projection_list">
     <items><item>Select projection…</item><item>Exact BF16</item><item>ConvRot INT8</item></items>

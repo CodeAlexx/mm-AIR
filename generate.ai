@@ -820,6 +820,8 @@ pub type Job = struct {
   // A pi-H3 profile (schedule raw_linear): its sample preset file and the adapter folder; empty otherwise.
   pi_preset: string,
   pi_adapters: string,
+  // The pi-H3 adapter with the pixel head (decodes without the video VAE) instead of the plain one.
+  pi_dwd: bool = false,
   checkpoint_root: string,
   reference_checkpoint_root: string,
   donor_root: string,
@@ -1310,6 +1312,11 @@ pub fn masked_composite_prompt(prompt:str) -> string effects {alloc} {
 // strategy when strict token-local denoising retains the source identity.
 pub fn enable_reference_video_match(job: ref<Job>) -> unit effects {} {
   struct.set(job,true,field=reference_video_match)
+}
+
+pub fn enable_pi_dwd(job: ref<Job>) -> unit effects {} {
+  struct.set(job, true, field=pi_dwd)
+  ()
 }
 
 pub fn enable_guide_video(job: ref<Job>, source: str) -> unit effects {alloc} {
@@ -2379,8 +2386,8 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
     var early_roots: h3_deployment.Roots = h3_deployment.Roots {
       checkpoint_root: text.copy(str.view(checkpoint_root)), donor_root: text.copy(str.view(donor_root)),
       manifest_root: text.copy(str.view(manifests)), layout: early_layout}
-    match h3_pi.resolve_preset(str.view(struct.borrow(job, field=pi_preset)), early_roots,
-        str.view(struct.borrow(job, field=pi_adapters)), job.evaluations, job.task) {
+    match h3_pi.resolve_preset_head(str.view(struct.borrow(job, field=pi_preset)), early_roots,
+        str.view(struct.borrow(job, field=pi_adapters)), job.evaluations, job.task, job.pi_dwd) {
       ok(_) => {},
       err(problem) => { return outcome(false, str.view(output_path), str.view(problem)) },
     }
@@ -2399,7 +2406,7 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
   if with_pi {
     array.push(adapter_requests, h3_lora.Request {
       path: path.join(str.view(struct.borrow(job, field=pi_adapters)),
-        if job.evaluations == 2 { "pi_h3_2step_adapter" } else { "pi_h3_4step_adapter" }),
+        h3_pi.adapter_folder(job.evaluations, job.pi_dwd)),
       strength: 1.0})
   }
   let adapter_entries = struct.borrow(job,field=loras)
@@ -2508,8 +2515,8 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
   var run_policy: h3_policy.Policy = h3_policy.copy(struct.borrow(job, field=policy))
   // pi-H3: the adapter preset's policy and its prepared modulation cache, checked here before the GPU opens.
   var sources: session.Sources = if with_pi {
-    var chosen: h3_pi.Choice = match h3_pi.resolve_preset(str.view(struct.borrow(job, field=pi_preset)),
-        deployment_roots, str.view(struct.borrow(job, field=pi_adapters)), job.evaluations, job.task) {
+    var chosen: h3_pi.Choice = match h3_pi.resolve_preset_head(str.view(struct.borrow(job, field=pi_preset)),
+        deployment_roots, str.view(struct.borrow(job, field=pi_adapters)), job.evaluations, job.task, job.pi_dwd) {
       ok(value) => value,
       err(problem) => { clean_scratch(str.view(scratch))
         return outcome(false, str.view(output_path), str.view(problem)) },
