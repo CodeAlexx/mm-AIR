@@ -2217,6 +2217,17 @@ pub fn main(args: view<str>) -> i32
     var video_swap_jobs:array<task<video_swap.Outcome>> = array.new()
     var people_jobs:array<task<people.Found>> = array.new()
     var progress_receivers: array<channel.Receiver> = array.new()
+    // The Krea worker (generation.krea_worker) keeps the Krea model loaded between Krea images.
+    // Started on the first Krea image; told to free its memory whenever any other GPU job starts.
+    var krea_workers: array<task<generation.Outcome>> = array.new()
+    var krea_worker_address: string = string.new()
+    let krea_signal_base = path.join(system.temp_directory(),text.concat("mm-air-krea-worker-",
+      string.from_int(time.monotonic_ns())))
+    let krea_release_path = text.concat(str.view(krea_signal_base),"-release")
+    let krea_quit_path = text.concat(str.view(krea_signal_base),"-quit")
+    let krea_address_path = text.concat(str.view(krea_signal_base),"-address")
+    var krea_gpu_tasks: u64 = 0
+    var krea_spawned: bool = false
     match desk.connect(session) {
       err(problem) => { result_code = fail(problem) },
       ok(_) => {
@@ -2289,6 +2300,14 @@ pub fn main(args: view<str>) -> i32
           prompt_window_seconds,prompt_overlap_seconds)
         let _ = desk.set_bool(session,"gen_history_empty","visible",safe_mode.visible_count(safe,history)==0)
         loop {
+          // Another GPU job just started: the Krea worker frees the model it keeps loaded.
+          let gpu_task_count = array.len(generations) + array.len(prompt_jobs) + array.len(auto_mask_jobs) +
+            array.len(video_swap_jobs) + array.len(people_jobs)
+          if gpu_task_count > krea_gpu_tasks and not krea_spawned and str.len(str.view(krea_worker_address)) != 0 {
+            let _ = files.write_text(str.view(krea_release_path),"release")
+          }
+          krea_gpu_tasks = gpu_task_count
+          krea_spawned = false
           if pending_parameters != "" {
             if parameters.is_retired_flux3(pending_parameters){
               let restored_prompt=parameters.retired_flux3_prompt(str.view(pending_parameters))
@@ -8665,9 +8684,40 @@ pub fn main(args: view<str>) -> i32
                     generation_status(session,channel.message(held))
                     continue },
                 }
-                var work = generation.KreaJob {sources:sources,request:request,progress:generation_ticket(receiver,str.view(generation_session_tag))}
+                if str.len(str.view(krea_worker_address)) == 0 {
+                  let _ = files.remove(str.view(krea_release_path))
+                  let _ = files.remove(str.view(krea_quit_path))
+                  match channel.open(2,65536) {
+                    ok(control) => {
+                      var started_control = control
+                      let start = generation.KreaWorkerStart {control:channel.ticket(started_control),
+                        release_path:string.copy(str.view(krea_release_path)),quit_path:string.copy(str.view(krea_quit_path)),
+                        address_path:string.copy(str.view(krea_address_path))}
+                      array.push(krea_workers,task.spawn(start,fn=generation.krea_worker))
+                      match channel.recv(started_control,time.monotonic_ns()+30000000000) {
+                        ok(received) => {
+                          match received {
+                            some(message) => {
+                              match channel.text_of(message) { some(value) => { krea_worker_address = value }, none => {} }
+                            },
+                            none => {},
+                          }
+                        },
+                        err(_) => {},
+                      }
+                      let _ = channel.close(started_control)
+                    },
+                    err(_) => {},
+                  }
+                  if str.len(str.view(krea_worker_address)) == 0 {
+                    io.ewrite("mm-air: the Krea worker did not start; Krea loads its model per image\n")
+                  }
+                }
+                var work = generation.KreaJob {sources:sources,request:request,progress:generation_ticket(receiver,str.view(generation_session_tag)),
+                  worker:string.copy(str.view(krea_worker_address))}
                 array.push(progress_receivers,receiver)
                 array.push(generations,task.spawn(work,fn=generation.run_krea))
+                krea_spawned = true
                 let _ = desk.set_bool(session,"generate_action","sensitive",false)
                 let _ = desk.set_text(session,"gen_run_state","Generating")
                 let _ = desk.set_text(session,"gen_batch_status","Running")
@@ -9113,6 +9163,11 @@ pub fn main(args: view<str>) -> i32
           }
         }
       },
+    }
+    if array.len(krea_workers) != 0 {
+      let _ = files.write_text(str.view(krea_quit_path),"quit")
+      let _ = task.join(option.unwrap(array.pop(krea_workers)))
+      let _ = files.remove(str.view(krea_quit_path))
     }
     desk.close(session)
     let _ = proc.settle(hosts, session.root, 2000, 300)

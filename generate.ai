@@ -50,6 +50,7 @@ import std.inference.krea2.config as krea_config
 import std.inference.krea2.attention as krea_attention
 import std.inference.krea2.lora as krea_lora
 import std.inference.krea2.pose_control as krea_pose
+import std.inference.krea2.sampler as krea_sampler
 import ".air/deps/qwenimage21/session.ai" as qwen_image_session
 import ".air/deps/qwenimage21/generate.ai" as qwen_image_generate
 import ".air/deps/qwenimage21/contract.ai" as qwen_image_contract
@@ -91,7 +92,10 @@ fn schedule_id(value:session.Schedule)->u64 effects{}{
   if value==session.Schedule.Exponential{1}else{0}
 }
 
-pub type KreaJob = struct {sources:krea_session.Sources,request:parameters.KreaRequest,progress:channel.Ticket}
+// worker: the encoded request address of MM-Air's Krea worker (see krea_worker); empty runs the
+// request in this task with a model loaded for it alone.
+pub type KreaJob = struct {sources:krea_session.Sources,request:parameters.KreaRequest,progress:channel.Ticket,
+  worker:string = ""}
 pub type KreaCancelableJob = struct {job:KreaJob,cancel_path:string}
 pub type MossJob = struct {request:parameters.MossRequest,progress:channel.Ticket}
 pub type FiboJob = struct {request:parameters.FiboRequest,progress:channel.Ticket}
@@ -506,6 +510,7 @@ pub fn run_krea_cancelable(work:KreaCancelableJob own)->Outcome effects {alloc,f
 }
 fn run_krea_policy(owned:ref<KreaJob>,policy:krea_attention.Policy,cancel_path:str)
     -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time,env} {
+  if str.len(str.view(struct.borrow(owned,field=worker))) != 0 { return run_krea_via_worker(owned,cancel_path) }
   var ticket = ref.swap(struct.borrow(owned,field=progress),no_progress())
   var connection = match channel.connect(ticket,time.monotonic_ns()+30000000000) {
     ok(value) => value,
@@ -514,11 +519,225 @@ fn run_krea_policy(owned:ref<KreaJob>,policy:krea_attention.Policy,cancel_path:s
   }
   var sender: option<channel.Sender> = option.some(connection)
   let signal = if cancel_path == "" {channel.cancellation_path(sender)} else {string.copy(cancel_path)}
-  var finished = run_krea_inner(owned,sender,policy,str.view(signal))
+  var none_runtime: option<krea_session.Runtime> = option.none()
+  var finished = run_krea_inner(owned,sender,policy,str.view(signal),none_runtime,false)
   finish_progress(sender,finished)
   finished
 }
-fn run_krea_inner(owned: ref<KreaJob>,sender:ref<option<channel.Sender>>,policy:krea_attention.Policy,cancel_path:str) -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time,env} {
+
+// ---- Krea worker: the model stays loaded between Krea requests ------------------------------------
+// MM-Air starts one worker task the first time Krea runs. It owns the GPU state of a
+// krea_session.Runtime (transformer pinned store and static weights, VAE, text encoder on cards
+// with room), so later Krea images skip the ~25 s of weight loading. It releases everything when
+// MM-Air raises `release_path` (another model is about to use the GPU) and exits on `quit_path`.
+// Requests arrive as text on the worker's own channel: progress ticket, reply ticket, cancel path,
+// then the parameters.encode_krea document; the reply is "ok"/"fail", the output and the message.
+// A channel has one sender: the worker opens a fresh request channel for every request and keeps its
+// encoded address in `address_path`, which the proxy reads before it connects.
+pub type KreaWorkerStart = struct { control: channel.Ticket, release_path: string, quit_path: string,
+  address_path: string }
+
+fn open_requests(address_path: str) -> option<channel.Receiver> effects {alloc,fs.write,net,time} {
+  match channel.open(4,65536) {
+    ok(value) => {
+      var receiver = value
+      let address = channel.encode_ticket(channel.ticket(receiver))
+      let temporary = text.concat(address_path,".tmp")
+      match files.write_atomic(address_path,str.view(temporary),str.view(address)) {
+        ok(_) => option.some(receiver),
+        err(_) => { let _ = channel.close(receiver)
+          option.none() },
+      }
+    },
+    err(_) => option.none(),
+  }
+}
+
+fn release_krea_runtime(slot: ref<option<krea_session.Runtime>>) -> unit effects {alloc,gpu} {
+  match ref.swap(slot, option.none()) { some(value) => { krea_session.close_runtime(value) }, none => {}, }
+  ()
+}
+
+pub fn krea_worker(start: KreaWorkerStart own) -> Outcome
+    effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time,env} {
+  var owned = start
+  let address_path = string.copy(str.view(struct.borrow(owned,field=address_path)))
+  var requests = match open_requests(str.view(address_path)) {
+    some(value) => value,
+    none => { return outcome(false,"","The MM-Air Krea worker cannot open its request channel") },
+  }
+  var control = match channel.connect(struct.borrow(owned,field=control),time.monotonic_ns()+30000000000) {
+    ok(value) => value,
+    err(_) => { let _ = channel.close(requests)
+      return outcome(false,"","The MM-Air Krea worker cannot reach MM-Air") },
+  }
+  let _ = channel.finish(control,1,str.bytes(str.view(address_path)),time.monotonic_ns()+30000000000)
+  let _ = channel.hang_up(control)
+  let release_path = string.copy(str.view(struct.borrow(owned,field=release_path)))
+  let quit_path = string.copy(str.view(struct.borrow(owned,field=quit_path)))
+  var runtime: option<krea_session.Runtime> = option.none()
+  loop {
+    if tasks.requested_at(str.view(quit_path)) { break }
+    if tasks.requested_at(str.view(release_path)) {
+      release_krea_runtime(runtime)
+      let _ = files.remove(str.view(release_path))
+    }
+    var renew: bool = false
+    match channel.recv(requests,time.monotonic_ns()+200000000) {
+      ok(received) => {
+        match received {
+          some(message) => {
+            match channel.text_of(message) {
+              some(body) => { krea_worker_request(runtime,str.view(body)) },
+              none => {},
+            }
+            renew = true
+          },
+          none => {},
+        }
+      },
+      err(problem) => { if channel.error_code(problem) != channel.code_empty() { renew = true } },
+    }
+    if renew {
+      // The request's sender is gone: a new channel (and address) for the next one.
+      var fresh = match open_requests(str.view(address_path)) { some(value) => value, none => { break } }
+      var old = ref.swap(requests, fresh)
+      let _ = channel.close(old)
+    }
+  }
+  release_krea_runtime(runtime)
+  let _ = channel.close(requests)
+  let _ = files.remove(str.view(release_path))
+  let _ = files.remove(str.view(address_path))
+  outcome(true,"","MM-Air Krea worker stopped")
+}
+
+// Line `index` of a request/answer, and everything from line `from` on (rejoined).
+fn line_at(parts: ref<array<string>>, index: u64) -> string effects {alloc} {
+  if index < array.len(parts) { string.copy(str.view(array.borrow(parts,index))) } else { string.new() }
+}
+
+fn lines_from(parts: ref<array<string>>, from: u64) -> string effects {alloc} {
+  var joined: string = string.new()
+  var index: u64 = from
+  loop { if index >= array.len(parts) { break }
+    if index > from { string.append(joined,"\n") }
+    string.append(joined,str.view(array.borrow(parts,index)))
+    index = index + 1 }
+  joined
+}
+
+fn krea_worker_request(runtime: ref<option<krea_session.Runtime>>, body: str) -> unit
+    effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time,env} {
+  var parts: array<string> = text.split(body,"\n")
+  let progress_text = line_at(parts,0)
+  let reply_text = line_at(parts,1)
+  let cancel_path = line_at(parts,2)
+  let document = lines_from(parts,3)
+  var reply_ticket = match channel.decode_ticket(str.view(reply_text)) { ok(value) => value, err(_) => { return () } }
+  var reply = match channel.connect(reply_ticket,time.monotonic_ns()+30000000000) {
+    ok(value) => value, err(_) => { return () },
+  }
+  var finished = krea_worker_run(runtime,str.view(progress_text),str.view(cancel_path),str.view(document))
+  var answer: string = text.copy(if finished.succeeded {"ok\n"} else {"fail\n"})
+  string.append(answer,str.view(struct.borrow(finished,field=output)))
+  string.append(answer,"\n")
+  string.append(answer,str.view(struct.borrow(finished,field=message)))
+  let _ = channel.finish(reply,1,str.bytes(str.view(answer)),time.monotonic_ns()+30000000000)
+  let _ = channel.hang_up(reply)
+}
+
+fn krea_worker_run(runtime: ref<option<krea_session.Runtime>>, progress_text: str, cancel_path: str,
+    document: str) -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time,env} {
+  var request = match parameters.decode_krea(document) {
+    ok(value) => value, err(message) => { return outcome(false,"",message) },
+  }
+  var sources = match krea_sources() {
+    ok(value) => value,
+    err(message) => { return outcome(false,str.view(struct.borrow(request,field=output)),message) },
+  }
+  var ticket = match channel.decode_ticket(progress_text) {
+    ok(value) => value,
+    err(_) => { return outcome(false,str.view(struct.borrow(request,field=output)),
+      "The MM-Air Krea progress address is invalid") },
+  }
+  var connection = match channel.connect(ticket,time.monotonic_ns()+30000000000) {
+    ok(value) => value,
+    err(_) => { return outcome(false,str.view(struct.borrow(request,field=output)),
+      "Cannot connect the MM-Air Krea progress channel") },
+  }
+  var sender: option<channel.Sender> = option.some(connection)
+  let signal = if cancel_path == "" {channel.cancellation_path(sender)} else {string.copy(cancel_path)}
+  var job = KreaJob {sources:sources,request:request,progress:no_progress()}
+  var finished = run_krea_inner(job,sender,krea_attention.Policy.CkInt8,str.view(signal),runtime,true)
+  finish_progress(sender,finished)
+  finished
+}
+
+// The proxy half: hand the request to the worker and wait for its answer. Progress goes from the
+// worker straight to MM-Air's progress receiver.
+fn run_krea_via_worker(owned:ref<KreaJob>,cancel_path:str) -> Outcome
+    effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time,env} {
+  let output = str.view(struct.borrow(struct.borrow(owned,field=request),field=output))
+  let address_text = match files.read_text(str.view(struct.borrow(owned,field=worker))) {
+    ok(value) => value, err(_) => { return outcome(false,output,"The MM-Air Krea worker is not running") },
+  }
+  var address = match channel.decode_ticket(str.view(address_text)) {
+    ok(value) => value, err(_) => { return outcome(false,output,"The MM-Air Krea worker address is invalid") },
+  }
+  var replies = match channel.open(4,65536) {
+    ok(value) => value, err(_) => { return outcome(false,output,"Cannot open the MM-Air Krea reply channel") },
+  }
+  let document = match parameters.encode_krea(struct.borrow(owned,field=request)) {
+    ok(value) => value, err(message) => { let _ = channel.close(replies)
+      return outcome(false,output,message) },
+  }
+  var progress = ref.swap(struct.borrow(owned,field=progress),no_progress())
+  var body: string = channel.encode_ticket(progress)
+  string.append(body,"\n")
+  string.append(body,str.view(channel.encode_ticket(channel.ticket(replies))))
+  string.append(body,"\n")
+  string.append(body,cancel_path)
+  string.append(body,"\n")
+  string.append(body,str.view(document))
+  var sender = match channel.connect(address,time.monotonic_ns()+30000000000) {
+    ok(value) => value,
+    err(_) => { let _ = channel.close(replies)
+      return outcome(false,output,"The MM-Air Krea worker is not running") },
+  }
+  let sent = channel.finish(sender,1,str.bytes(str.view(body)),time.monotonic_ns()+30000000000)
+  let _ = channel.hang_up(sender)
+  match sent { ok(_) => {}, err(_) => { let _ = channel.close(replies)
+    return outcome(false,output,"Cannot hand the request to the MM-Air Krea worker") } }
+  loop {
+    var received: option<channel.Message> = match channel.recv(replies,time.monotonic_ns()+1000000000) {
+      ok(value) => value,
+      err(problem) => {
+        if channel.error_code(problem) != channel.code_empty() {
+          let _ = channel.close(replies)
+          return outcome(false,output,"The MM-Air Krea worker stopped before answering")
+        }
+        option.none()
+      },
+    }
+    match received {
+      some(message) => {
+        let answer = match channel.text_of(message) { some(value) => value, none => string.new() }
+        let _ = channel.close(replies)
+        var parts: array<string> = text.split(str.view(answer),"\n")
+        let status = line_at(parts,0)
+        let produced = line_at(parts,1)
+        let detail = lines_from(parts,2)
+        return outcome(str.view(status) == "ok",str.view(produced),str.view(detail))
+      },
+      none => {},
+    }
+  }
+  outcome(false,output,"The MM-Air Krea worker stopped before answering")
+}
+
+fn run_krea_inner(owned: ref<KreaJob>,sender:ref<option<channel.Sender>>,policy:krea_attention.Policy,cancel_path:str,
+    runtime: ref<option<krea_session.Runtime>>, keep: bool) -> Outcome effects {alloc,fs.meta,fs.read,fs.write,gpu,net,time,env} {
   let request = struct.borrow(owned,field=request)
   let seed: u64 = cast.sat(request.seed)
   let settings = krea_config.Config {width:request.width,height:request.height}
@@ -539,6 +758,7 @@ fn run_krea_inner(owned: ref<KreaJob>,sender:ref<option<channel.Sender>>,policy:
     index = index + 1
   }
   if request.pose != "" {
+    release_krea_runtime(runtime)
     // Pose control: native geometry, the release's own input layer and LoRA (unmerged); the pose is a
     // skeleton raster used as is (.png) or a keypoint file drawn at its own canvas (.json).
     let release = match required_environment("MM_AIR_KREA_POSE_RELEASE") {
@@ -557,10 +777,39 @@ fn run_krea_inner(owned: ref<KreaJob>,sender:ref<option<channel.Sender>>,policy:
       err(message) => outcome(false,struct.borrow(request,field=output),message),
     }
   }
-  match krea_session.run_to_png_cancelable(struct.borrow(owned,field=sources),
-      struct.borrow(request,field=prompt),seed,settings,struct.borrow(request,field=output),loras,0,sender,policy,cancel_path) {
+  if not keep {
+    return match krea_session.run_to_png_cancelable(struct.borrow(owned,field=sources),
+        struct.borrow(request,field=prompt),seed,settings,struct.borrow(request,field=output),loras,0,sender,policy,cancel_path) {
+      ok(_) => outcome(true,struct.borrow(request,field=output),"Linked AIR Krea 2 Turbo image completed"),
+      err(message) => outcome(false,struct.borrow(request,field=output),message),
+    }
+  }
+  // Worker: reuse the loaded model when it is the same one; otherwise (first image, other files)
+  // load it once and keep it.
+  let key = krea_session.runtime_key(struct.borrow(owned,field=sources),settings,0)
+  let loaded = match runtime { some(value) => krea_session.runtime_matches(value,str.view(key)), none => false }
+  if not loaded {
+    release_krea_runtime(runtime)
+    match krea_session.open_runtime(struct.borrow(owned,field=sources),settings,0,sender) {
+      ok(value) => { let _ = ref.swap(runtime,option.some(value)) },
+      err(message) => { return outcome(false,struct.borrow(request,field=output),message) },
+    }
+  } else {
+    report(sender,"Krea model already loaded")
+  }
+  let ran = match runtime {
+    some(value) => krea_session.run_on_runtime(value,struct.borrow(owned,field=sources),
+      struct.borrow(request,field=prompt),"",seed,settings,krea_sampler.turbo(),
+      struct.borrow(request,field=output),loras,sender,policy,cancel_path),
+    none => result.err(string.copy("The Krea model is not loaded")),
+  }
+  match ran {
     ok(_) => outcome(true,struct.borrow(request,field=output),"Linked AIR Krea 2 Turbo image completed"),
-    err(message) => outcome(false,struct.borrow(request,field=output),message),
+    err(message) => {
+      // A GPU failure may leave the kept state unusable: load it again next time.
+      if str.view(message) != "Generation cancelled" { release_krea_runtime(runtime) }
+      outcome(false,struct.borrow(request,field=output),message)
+    },
   }
 }
 
