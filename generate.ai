@@ -786,11 +786,14 @@ fn run_krea_inner(owned: ref<KreaJob>,sender:ref<option<channel.Sender>>,policy:
   }
   // Worker: reuse the loaded model when it is the same one; otherwise (first image, other files)
   // load it once and keep it.
-  let key = krea_session.runtime_key(struct.borrow(owned,field=sources),settings,0)
+  // Transformer blocks stay on the GPU as far as the card allows (krea_session.resident_limit caps the
+  // request at free memory minus the sampler's reserve); the rest stream from pinned memory per step.
+  let resident: u64 = 18446744073709551615
+  let key = krea_session.runtime_key(struct.borrow(owned,field=sources),settings,resident)
   let loaded = match runtime { some(value) => krea_session.runtime_matches(value,str.view(key)), none => false }
   if not loaded {
     release_krea_runtime(runtime)
-    match krea_session.open_runtime(struct.borrow(owned,field=sources),settings,0,sender) {
+    match krea_session.open_runtime(struct.borrow(owned,field=sources),settings,resident,sender) {
       ok(value) => { let _ = ref.swap(runtime,option.some(value)) },
       err(message) => { return outcome(false,struct.borrow(request,field=output),message) },
     }
