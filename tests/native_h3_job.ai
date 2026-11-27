@@ -8,7 +8,7 @@ import std.inference.h3.session as session
 import std.channel as channel
 
 pub fn main(args:view<str>)->i32 effects {alloc,env,fs.read,io.write,net,random,time} {
-  var config=generation.Configuration{checkpoint_root:"base",reference_checkpoint_root:"reference",
+  var config=generation.Configuration{pi_h3_directory:"",checkpoint_root:"base",reference_checkpoint_root:"reference",
     donor_root:"prepared",manifest_root:"manifests",deployment_file:"h3_deployment.json",
     presets:fixture.presets(),scratch_root:"scratch"}
   var receiver=match channel.open(8,1024){ok(v)=>v,err(_)=>{return 1},}

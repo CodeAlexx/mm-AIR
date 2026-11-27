@@ -25,7 +25,7 @@ fn require(value:bool,message:str)->unit effects {io.write} {
 fn make_job(receiver:ref<channel.Receiver>,mode:u32,output:str,
             transformer:session.Projection)
     ->generation.Job effects {alloc,env,fs.read,io.write} {
-  var configuration=generation.Configuration {checkpoint_root:string.copy("/h3"),
+  var configuration=generation.Configuration {pi_h3_directory:string.new(),checkpoint_root:string.copy("/h3"),
     reference_checkpoint_root:string.copy("/h3-ref"),donor_root:string.copy("/donor"),
     manifest_root:string.copy("/manifests"),
     deployment_file:string.copy("/h3_deployment.json"),presets:fixture.presets(),
