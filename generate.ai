@@ -822,6 +822,8 @@ pub type Job = struct {
   pi_adapters: string,
   // The pi-H3 adapter with the pixel head (decodes without the video VAE) instead of the plain one.
   pi_dwd: bool = false,
+  // Text encoder "Plato's Key" (text to video): the donor folder and key file of the Settings; none = the 32B encoder.
+  text_key: option<h3_policy.TextKey>,
   checkpoint_root: string,
   reference_checkpoint_root: string,
   donor_root: string,
@@ -1128,6 +1130,7 @@ pub fn job_loras(configuration: ref<Configuration>, prompt: str,
   let bounded_transformer_projection=if transformer_projection==session.Projection.ConvRotI8{
       session.Projection.ConvRotI8Streaming}else{transformer_projection}
   Job {
+    text_key: option.none(),
     pi_preset: pi_preset,
     pi_adapters: text.copy(str.view(struct.borrow(configuration, field=pi_h3_directory))),
     checkpoint_root: text.copy(str.view(struct.borrow(configuration,
@@ -1312,6 +1315,29 @@ pub fn masked_composite_prompt(prompt:str) -> string effects {alloc} {
 // strategy when strict token-local denoising retains the source identity.
 pub fn enable_reference_video_match(job: ref<Job>) -> unit effects {} {
   struct.set(job,true,field=reference_video_match)
+}
+
+/// Text encoder "Plato's Key" for this job: the donor folder and the key file from the Settings
+/// (MM_AIR_H3_TEXT_DONOR, MM_AIR_H3_TEXT_KEY; defaults under ~/models). The session checks them when the job runs.
+pub fn enable_text_key(job: ref<Job>, strength: f64) -> result<unit,string> effects {alloc,env,fs.read,fs.meta} {
+  var donor: string = match try runtime_config.value("MM_AIR_H3_TEXT_DONOR") { some(value) => value, none => string.new(), }
+  var key: string = match try runtime_config.value("MM_AIR_H3_TEXT_KEY") { some(value) => value, none => string.new(), }
+  match env.get("HOME") {
+    some(home) => {
+      if str.len(str.view(donor)) == 0 { donor = path.join(str.view(home), "models/Qwen3.5-2B") }
+      if str.len(str.view(key)) == 0 {
+        key = path.join(str.view(home), "models/PlatosKey/minimax-h3/qwen3.5/minimax_h3_32b_pk_ridge_qwen3.5_2b.safetensors")
+      }
+    },
+    none => {},
+  }
+  if str.len(str.view(donor)) == 0 or str.len(str.view(key)) == 0 {
+    return result.err("Set the Plato's Key donor folder and key file in Settings")
+  }
+  let chosen: f32 = cast.float(strength)
+  struct.set(job, option.some(h3_policy.TextKey {donor: donor, key: key, manifest: string.new(), strength: chosen}),
+    field=text_key)
+  result.ok(())
 }
 
 pub fn enable_pi_dwd(job: ref<Job>) -> unit effects {} {
@@ -2535,6 +2561,17 @@ fn execute(job: ref<Job>, sender: ref<option<channel.Sender>>) -> Outcome
       err(problem) => { clean_scratch(str.view(scratch))
         return outcome(false, str.view(output_path), str.view(problem)) },
     }
+  }
+
+  // Text encoder "Plato's Key": selected on the session's sources; the session checks the request before any device work.
+  match h3_policy.copy_text_key(struct.borrow(job, field=text_key)) {
+    some(found) => {
+      var chosen_key: h3_policy.TextKey = found
+      let _unset: string = ref.swap(struct.borrow(chosen_key, field=manifest),
+        path.join(str.view(scratch), "platos-key-donor.json"))
+      let _selected: bool = session.set_text_key(sources, chosen_key)
+    },
+    none => {},
   }
 
   let evaluations=str.view(string.from_int(job.evaluations))

@@ -196,6 +196,10 @@
   <object class="GtkStringList" id="pi_h3_step_list">
     <items><item>4 steps</item><item>2 steps</item><item>4 steps · pixel head (no video VAE; text or first frame)</item><item>2 steps · pixel head (no video VAE; text or first frame)</item></items>
   </object>
+  <object class="GtkStringList" id="h3_text_encoder_list">
+    <items><item>Qwen3-VL 32B</item><item>Plato's Key</item></items>
+  </object>
+  <object class="GtkAdjustment" id="gen_text_key_strength_adjustment"><property name="lower">0</property><property name="upper">2</property><property name="step-increment">0.05</property><property name="value">1</property></object>
   <object class="GtkStringList" id="h3_projection_list">
     <items><item>Select projection…</item><item>Exact BF16</item><item>ConvRot INT8</item></items>
   </object>
@@ -400,6 +404,10 @@
                     <child><object class="GtkBox"><property name="spacing">8</property><child><object class="GtkEntry" id="settings_path_42"><property name="hexpand">true</property></object></child><child><object class="GtkButton" id="settings_browse_42"><property name="label">Browse…</property></object></child></object></child>
                     <child><object class="GtkLabel"><property name="label">pi-H3 folder</property><property name="xalign">0</property></object></child>
                     <child><object class="GtkBox"><property name="spacing">8</property><child><object class="GtkEntry" id="settings_path_43"><property name="hexpand">true</property></object></child><child><object class="GtkButton" id="settings_browse_43"><property name="label">Browse…</property></object></child></object></child>
+                    <child><object class="GtkLabel"><property name="label">Plato's Key donor folder</property><property name="xalign">0</property></object></child>
+                    <child><object class="GtkBox"><property name="spacing">8</property><child><object class="GtkEntry" id="settings_path_44"><property name="hexpand">true</property></object></child><child><object class="GtkButton" id="settings_browse_44"><property name="label">Browse…</property></object></child></object></child>
+                    <child><object class="GtkLabel"><property name="label">Plato's Key file</property><property name="xalign">0</property></object></child>
+                    <child><object class="GtkBox"><property name="spacing">8</property><child><object class="GtkEntry" id="settings_path_45"><property name="hexpand">true</property></object></child><child><object class="GtkButton" id="settings_browse_45"><property name="label">Browse…</property></object></child></object></child>
                     <child><object class="GtkLabel"><property name="visible">false</property><property name="label">Saved paths apply to the next generation. Running jobs keep their current settings.</property><property name="wrap">true</property><property name="xalign">0</property><style><class name="capability-note"/></style></object></child>
                   </object></child>
                   <child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">12</property><property name="width-request">260</property>
@@ -591,6 +599,12 @@
                     <child><object class="GtkBox" id="gen_pi_h3_controls"><property name="orientation">vertical</property><property name="spacing">6</property>
                       <child><object class="GtkCheckButton" id="gen_use_pi_h3"><property name="label">Use pi-H3</property><property name="tooltip-text">Use pi-H3 for text and first- or last-frame video.</property></object></child>
                       <child><object class="GtkDropDown" id="gen_pi_h3_steps"><property name="model">pi_h3_step_list</property><property name="selected">0</property><property name="visible">false</property><property name="tooltip-text">pi-H3 sampling steps</property></object></child>
+                    </object></child>
+                    <child><object class="GtkBox" id="gen_text_key_controls"><property name="orientation">vertical</property><property name="spacing">6</property>
+                      <child><object class="GtkLabel"><property name="label">Text encoder</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child>
+                      <child><object class="GtkDropDown" id="gen_text_encoder"><property name="model">h3_text_encoder_list</property><property name="selected">0</property></object></child>
+                      <child><object class="GtkLabel"><property name="label">Key strength</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child>
+                      <child><object class="GtkSpinButton" id="gen_text_key_strength"><property name="adjustment">gen_text_key_strength_adjustment</property><property name="digits">2</property><property name="numeric">true</property><property name="sensitive">false</property></object></child>
                     </object></child>
                     <child><object class="GtkLabel"><property name="label">Schedule profile</property><property name="tooltip-text">Standard H3 schedule when Use pi-H3 is unchecked.</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child>
                     <child><object class="GtkDropDown" id="gen_profile"><property name="factory"><object class="GtkBuilderListItemFactory"><property name="bytes"><![CDATA[<?xml version="1.0" encoding="UTF-8"?><interface><template class="GtkListItem"><property name="child"><object class="GtkLabel"><property name="xalign">0</property><property name="ellipsize">end</property><binding name="label"><lookup name="string" type="GtkStringObject"><lookup name="item">GtkListItem</lookup></lookup></binding></object></property></template></interface>]]></property></object></property><property name="list-factory"><object class="GtkBuilderListItemFactory"><property name="bytes"><![CDATA[<?xml version="1.0" encoding="UTF-8"?><interface><template class="GtkListItem"><property name="child"><object class="GtkLabel"><property name="xalign">0</property><binding name="label"><lookup name="string" type="GtkStringObject"><lookup name="item">GtkListItem</lookup></lookup></binding></object></property></template></interface>]]></property></object></property><property name="model">h3_profile_list</property><property name="selected">7</property></object></child>

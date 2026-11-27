@@ -1085,6 +1085,7 @@ fn model_widgets(session: ref<desk.Session>, model:u32, sheet_mode: u32,
   let _ = desk.set_bool(session,"gen_sources_group","sensitive",not image_model and not swap)
   let sheet: bool = character_sheet.valid(sheet_mode)
   let _ = desk.set_bool(session,"gen_pi_h3_controls","visible",pi_h3_available(model,sheet_mode,swap_mode))
+  let _ = desk.set_bool(session,"gen_text_key_controls","visible",pi_h3_available(model,sheet_mode,swap_mode))
   let _ = desk.set_text(session,"generate_action",if ph3 {"Generate P-H3-Image PNG"} else if wide {"Generate H3-Image PNG"} else if fibo {"Generate Fibo PNG"} else if moss {"Generate MOSS PNG"} else if qwen_image {"Generate Qwen PNG"} else if krea {"Generate Krea PNG"} else if sheet {"Generate H3 Character Sheet"} else if masked {"Generate Masked H3 Swap"} else if swap {"Generate H3 Character Swap"} else {"Generate H3 MP4"})
   let _ = desk.set_text(session,"gen_media_badge",if image_model {"Image"} else if sheet {"Sheet"} else if masked {"Masked"} else if swap {"Swap"} else {"Video"})
   let _ = desk.set_text(session,"gen_stage_badge",if ph3 {"PH3"} else if wide {"H3I"} else if fibo {"FIBO"} else if moss {"MOSS"} else if qwen_image {"Q21"} else if krea {"K2"} else {"H3"})
@@ -1898,6 +1899,9 @@ pub fn main(args: view<str>) -> i32
   var use_pi_h3: bool = false
   var pi_h3_profile: u32 = h3.profile_pi_4()
   var pi_h3_dwd: bool = false   // the pixel-head adapter (steps list entries 2 and 3)
+  // Text encoder of H3 Base text to video: 0 = Qwen3-VL 32B, 1 = Plato's Key; and the key's strength.
+  var text_encoder_index: u32 = 0
+  var text_key_strength: f64 = 1.0
   var conditioner_projection_index: u32 = h3.projection_convrot_int8()
   var transformer_projection_index: u32 = h3.projection_convrot_int8()
   var attention_index: u32 = h3.attention_dense_int8()
@@ -2919,6 +2923,8 @@ pub fn main(args: view<str>) -> i32
               err(message) => { let _ = desk.set_text(session, "status", message) },
               ok(value) => {
                 var restored_parameters: parameters.H3Parameters = value
+                text_encoder_index = if restored_parameters.text_key {1} else {0}
+                text_key_strength = restored_parameters.text_key_strength
                 generate_loras = parameters.clone_loras(
                   struct.borrow(restored_parameters,field=loras))
                 selected_lora = 18446744073709551615
@@ -3040,6 +3046,9 @@ pub fn main(args: view<str>) -> i32
                 let _ = desk.set_number(session,"gen_mode","selected",cast.float(generation_mode))
                 apply_parameter_widgets(session, restored, profile_index)
                 let _ = desk.set_bool(session,"gen_use_pi_h3","active",use_pi_h3)
+                let _ = desk.set_number(session,"gen_text_encoder","selected",cast.float(text_encoder_index))
+                let _ = desk.set_number(session,"gen_text_key_strength","value",text_key_strength)
+                let _ = desk.set_bool(session,"gen_text_key_strength","sensitive",text_encoder_index==1)
                 let _ = desk.set_bool(session,"gen_pi_h3_steps","visible",use_pi_h3)
                 pi_h3_dwd = false
                 let _ = desk.set_number(session,"gen_pi_h3_steps","selected",
@@ -5470,6 +5479,8 @@ pub fn main(args: view<str>) -> i32
               let _ = desk.set_number(session, "gen_model", "selected", cast.float(model_index))
               let _ = desk.set_bool(session,"gen_pi_h3_controls","visible",
                 pi_h3_available(model_index,character_sheet_mode,generation_mode))
+              let _ = desk.set_bool(session,"gen_text_key_controls","visible",
+                pi_h3_available(model_index,character_sheet_mode,generation_mode))
               source_widgets(session, task_index)
             }
             if id == "gen_character_sheet_mode" {
@@ -5505,6 +5516,11 @@ pub fn main(args: view<str>) -> i32
                 else {h3.profile_pi_4()}
               pi_h3_dwd = pi_choice>=2.0
             }
+            if id == "gen_text_encoder" {
+              text_encoder_index = cast.sat(desk.number(event,"value"))
+              let _ = desk.set_bool(session,"gen_text_key_strength","sensitive",text_encoder_index==1)
+            }
+            if id == "gen_text_key_strength" { text_key_strength = desk.number(event,"value") }
             if id == "gen_conditioner_projection" {
               conditioner_projection_index = h3.projection_convrot_int8()
             }
@@ -8760,6 +8776,13 @@ pub fn main(args: view<str>) -> i32
               let pi_h3_request:bool = use_pi_h3 and
                 (id=="generate_action" or id=="queue_take" or id=="gen_save_parameters") and
                 pi_h3_available(model_index,character_sheet_mode,generation_mode) and task_index!=h3.task_ref2va()
+              let text_key_request:bool = text_encoder_index==1 and
+                (id=="generate_action" or id=="queue_take" or id=="gen_save_parameters") and
+                pi_h3_available(model_index,character_sheet_mode,generation_mode)
+              if text_key_request and task_index != h3.task_t2va() {
+                generation_status(session,"Plato's Key reads text to video prompts only")
+                continue
+              }
               var request: h3.Request = h3.request(str.view(request_prompt), model_index, task_index,
                 if pi_h3_request {pi_h3_profile} else {profile_index}, conditioner_projection_index,
                 if pi_h3_request {h3.projection_convrot_int8()} else {transformer_projection_index},
@@ -8791,7 +8814,7 @@ pub fn main(args: view<str>) -> i32
                   continue },
               }
               if id == "gen_save_parameters" {
-                match parameters.encode_h3(request,generate_loras) {
+                match parameters.encode_h3_text(request,generate_loras,text_key_request,text_key_strength) {
                   ok(value) => {
                     save_parameter_snapshot(session,output_directory,value)
                   },
@@ -8909,7 +8932,7 @@ pub fn main(args: view<str>) -> i32
                     time.monotonic_ns()
                   } else { cast.sat(request.seed) }
                   struct.set(request, cast.sat(actual_seed), field=seed)
-                  running_parameters = match parameters.encode_h3(request,generate_loras) {
+                  running_parameters = match parameters.encode_h3_text(request,generate_loras,text_key_request,text_key_strength) {
                     ok(value) => value,
                     err(message) => { let _ = desk.set_text(session, "status", message)
                       continue },
@@ -8937,6 +8960,13 @@ pub fn main(args: view<str>) -> i32
                   }
                   if guided { generation.enable_guide_video(job,str.view(swap_source_video)) }
                   if pi_h3_request and pi_h3_dwd { generation.enable_pi_dwd(job) }
+                  if text_key_request {
+                    match generation.enable_text_key(job, text_key_strength) {
+                      ok(_) => {},
+                      err(message) => { generation_status(session,str.view(message))
+                        continue },
+                    }
+                  }
                   generation.set_windows(job,v2v_window_frames,v2v_overlap_frames,v2v_short_last,v2v_color_match)
                   if swap and masked and str.len(str.view(swap_motion_reference))!=0 {
                     generation.set_masked_composite_source(job,str.view(vs_part_video))

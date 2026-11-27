@@ -182,6 +182,19 @@ assert pi_h3.get("class") == "GtkCheckButton"
 assert pi_h3.find("property[@name='active']") is None
 assert tree.find(".//object[@id='gen_pi_h3_steps']/property[@name='selected']").text == "0"
 assert 'if pi_h3_request {pi_h3_profile} else {profile_index}' in main
+
+# Text encoder choice of H3 Base text to video: the 32B encoder is the default; the key strength starts at 1.
+text_encoder = tree.find(".//object[@id='gen_text_encoder']")
+assert text_encoder.get("class") == "GtkDropDown"
+assert text_encoder.find("property[@name='selected']").text == "0"
+assert [item.text for item in tree.find(".//object[@id='h3_text_encoder_list']/items")] == ["Qwen3-VL 32B", "Plato's Key"]
+assert tree.find(".//object[@id='gen_text_key_strength_adjustment']/property[@name='value']").text == "1"
+assert tree.find(".//object[@id='gen_text_key_strength']") is not None
+for row in (44, 45):
+    assert tree.find(f".//object[@id='settings_path_{row}']") is not None
+    assert tree.find(f".//object[@id='settings_browse_{row}']") is not None
+assert 'parameters.encode_h3_text(request,generate_loras,text_key_request,text_key_strength)' in main
+assert 'generation.enable_text_key(job, text_key_strength)' in main
 assert 'generation.schedule_of(h3_presets, request.profile)' in main
 
 # Qwen edit must expose the creator-supported ordered 1..10 source path and

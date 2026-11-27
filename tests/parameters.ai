@@ -109,6 +109,16 @@ fn h3_lora_round_trip() -> bool effects {alloc} {
     ok(value) => value,err(_) => { return false },
   }
   if array.len(struct.borrow(old,field=loras)) != 0 { return false }
+  // The text encoder choice: absent in older and plain snapshots (32B encoder, strength 1), kept when chosen.
+  if restored.text_key or restored.text_key_strength != 1.0 or old.text_key { return false }
+  let with_key = match parameters.encode_h3_text(request,loras,true,0.75) {
+    ok(value) => value,err(_) => { return false },
+  }
+  var keyed = match parameters.decode_h3(with_key) {
+    ok(value) => value,err(_) => { return false },
+  }
+  if not keyed.text_key or keyed.text_key_strength != 0.75 { return false }
+  if array.len(struct.borrow(keyed,field=loras)) != 1 { return false }
   let invalid = text.replace(encoded,"eri_with_trigger.safetensors","eri_with_trigger.ckpt")
   match parameters.decode_h3(invalid) {
     ok(_) => { return false },err(_) => {},

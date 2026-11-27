@@ -1139,6 +1139,12 @@ fn decode_loras(document: ref<json.Document>) -> result<array<LoraEntry>,string>
 
 pub fn encode_h3(request: ref<h3.Request>, loras: ref<array<LoraEntry>>)
     -> result<string,string> effects {alloc} {
+  encode_h3_text(request, loras, false, 1.0)
+}
+
+/// encode_h3 with the text encoder choice: `text_key` true writes text_key and text_key_strength.
+pub fn encode_h3_text(request: ref<h3.Request>, loras: ref<array<LoraEntry>>, text_key: bool, text_key_strength: f64)
+    -> result<string,string> effects {alloc} {
   try validate_loras(loras)
   var out: codec.Writer = codec.writer()
   codec.begin_object(out)
@@ -1160,6 +1166,10 @@ pub fn encode_h3(request: ref<h3.Request>, loras: ref<array<LoraEntry>>)
   codec.field_text_array(out, "references", struct.borrow(request, field=references))
   codec.field_text_array(out, "audio_references", struct.borrow(request, field=audio_references))
   codec.field_text(out, "output", struct.borrow(request, field=output))
+  if text_key {
+    codec.field_bool(out, "text_key", true)
+    codec.field_f64(out, "text_key_strength", text_key_strength)
+  }
   codec.key(out,"loras")
   codec.begin_array(out)
   var lora_index: u64 = 0
@@ -1294,7 +1304,10 @@ pub fn decode(source: str) -> result<h3.Request,string> effects {alloc} {
 
 pub type H3Parameters = struct {
   request: h3.Request,
-  loras: array<LoraEntry>
+  loras: array<LoraEntry>,
+  // Text encoder "Plato's Key" and its strength (members text_key / text_key_strength; absent = the 32B encoder).
+  text_key: bool = false,
+  text_key_strength: f64 = 1.0
 }
 
 pub fn decode_h3(source: str) -> result<H3Parameters,string> effects {alloc} {
@@ -1304,7 +1317,15 @@ pub fn decode_h3(source: str) -> result<H3Parameters,string> effects {alloc} {
     err(error) => { return result.err(json.error_message(error)) },
   }
   var loras: array<LoraEntry> = try decode_loras(document)
-  result.ok(H3Parameters {request: request,loras: loras})
+  let text_key: bool = match json.get(document,json.root(),"text_key") {
+    some(node) => match json.as_bool(document,node) { some(value) => value, none => false, },
+    none => false,
+  }
+  let text_key_strength: f64 = match json.get(document,json.root(),"text_key_strength") {
+    some(node) => match json.as_f64(document,node) { some(value) => value, none => 1.0, },
+    none => 1.0,
+  }
+  result.ok(H3Parameters {request: request,loras: loras,text_key: text_key,text_key_strength: text_key_strength})
 }
 
 // What made a result, for the line under the Generate preview: the model and settings on
