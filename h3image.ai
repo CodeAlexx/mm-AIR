@@ -184,6 +184,28 @@ fn device_total()->result<u64,string> effects{alloc,gpu}{
   result.ok(agpu.properties(context).total_memory)
 }
 
+// Pictures to one reference pack file: each picture is encoded once with the image VAE (AIR's
+// session.create_pack; the file is the community RefMod bundle). Returns the file's path.
+pub type PackJob = struct {images:array<string>,output:string}
+
+pub fn make_pack(job:PackJob own)->result<string,string>
+    effects{alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
+  var owned=job
+  if array.len(struct.borrow(owned,field=images))==0{return result.err("Choose at least one picture for the pack")}
+  if str.len(str.view(struct.borrow(owned,field=output)))==0{return result.err("Choose where to save the pack")}
+  let root=try model_root()
+  let scratch=path.join(system.temp_directory(),"mm-air-h3image")
+  let _made=files.mkdirs(str.view(scratch))
+  var opened:hsession.Session=try hsession.open(str.view(root),try deployment())
+  var prepared:references.Intake=try references.prepare(struct.borrow(owned,field=images),str.view(scratch))
+  // the pack's name is the file's name without its ending
+  var name=path.basename(str.view(struct.borrow(owned,field=output)))
+  if text.ends_with(str.view(name),".safetensors"){name=text.replace(str.view(name),".safetensors","")}
+  let count=try hsession.create_pack(opened,prepared,str.view(name),str.view(struct.borrow(owned,field=output)))
+  if count==0{return result.err("The pack has no pictures")}
+  result.ok(string.copy(str.view(struct.borrow(owned,field=output))))
+}
+
 pub fn run(job:H3ImageJob own)->generation.Outcome
     effects{alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,time}{
   var owned=job

@@ -2095,6 +2095,8 @@ pub fn main(args: view<str>) -> i32
   // H3-Image reference pack: the chosen file (empty = none) and its strength
   var generate_pack:string=string.new()
   var generate_pack_strength:f64=1.0
+  // Make from pictures: the pictures chosen for a new pack (the job that writes it is in pack_jobs)
+  var pack_make_images:array<string>=[]
   var generate_recipe:parameters.H3ImageRequest=parameters.h3image_defaults()
   var qwen_edit_recipe:parameters.H3ImageRequest=parameters.h3image_defaults()
   var qwen_edit_match_source:bool=true
@@ -2230,6 +2232,7 @@ pub fn main(args: view<str>) -> i32
     var generations: array<task<generation.Outcome>> = array.new()
     var copies: array<task<result<string, string>>> = array.new()
     var side_jobs: array<task<result<string, string>>> = array.new()
+    var pack_jobs: array<task<result<string, string>>> = array.new()
     var side_by_side_from: string = string.new()
     var prompt_jobs: array<task<prompt_lab.Outcome>> = array.new()
     var auto_mask_jobs:array<task<auto_mask.Outcome>> = array.new()
@@ -3098,6 +3101,23 @@ pub fn main(args: view<str>) -> i32
               none => {},
             }
           }
+          if array.len(pack_jobs) != 0 {
+            match task.wait_any(pack_jobs, 0) {
+              some(_) => {
+                let _=desk.set_bool(session,"gen_h3image_pack_make","sensitive",true)
+                let _=desk.set_bool(session,"generate_action","sensitive",array.len(generations)==0)
+                match task.join(option.unwrap(array.pop(pack_jobs))) {
+                  ok(made) => {
+                    generate_pack=string.copy(str.view(made))
+                    show_pack(session,str.view(generate_pack),generate_pack_strength)
+                    let _=desk.set_text(session,"status","Reference pack saved")
+                  },
+                  err(message) => { let _=desk.set_text(session,"status",message) },
+                }
+              },
+              none => {},
+            }
+          }
           if array.len(side_jobs) != 0 {
             match task.wait_any(side_jobs, 0) {
               some(_) => {
@@ -3948,6 +3968,35 @@ pub fn main(args: view<str>) -> i32
                     show_project_library(session,movie_library_paths,str.view(movie_project_path))
                     let _=desk.set_text(session,"status",text.concat("Imported movie project: ",str.view(selected)))
                   },err(message)=>{let _=desk.set_text(session,"status",message)}
+                }
+                continue
+              }
+              if id == "gen_h3image_pack_pictures" {
+                pack_make_images=desk.dialog_paths(event)
+                if array.len(pack_make_images)!=0{
+                  let folder=if str.len(str.view(generate_pack))==0 {string.new()}
+                    else {path.dirname(str.view(generate_pack))}
+                  let _=desk.dialog(session,"gen_h3image_pack_save","save","Save reference pack as","pack.safetensors",str.view(folder))
+                }
+                continue
+              }
+              if id == "gen_h3image_pack_save" {
+                var target=desk.dialog_paths(event)
+                if array.len(target)!=0 and array.len(pack_make_images)!=0{
+                  var file=string.copy(str.view(array.borrow(target,0)))
+                  if not text.ends_with(str.view(file),".safetensors"){string.append(file,".safetensors")}
+                  var pictures:array<string>=[]
+                  var picture:u64=0
+                  loop{
+                    if picture>=array.len(pack_make_images){break}
+                    array.push(pictures,string.copy(str.view(array.borrow(pack_make_images,picture))))
+                    picture=picture+1
+                  }
+                  var work=h3image.PackJob{images:pictures,output:file}
+                  array.push(pack_jobs,task.spawn(work,fn=h3image.make_pack))
+                  let _=desk.set_bool(session,"gen_h3image_pack_make","sensitive",false)
+                  let _=desk.set_bool(session,"generate_action","sensitive",false)
+                  let _=desk.set_text(session,"status","Making the reference pack")
                 }
                 continue
               }
@@ -6506,6 +6555,14 @@ pub fn main(args: view<str>) -> i32
             if id == "gen_h3image_pack_clear" {
               generate_pack=string.new()
               show_pack(session,"",generate_pack_strength)
+              continue
+            }
+            if id == "gen_h3image_pack_make" {
+              if array.len(generations)!=0 or array.len(pack_jobs)!=0 {
+                let _=desk.set_text(session,"status","Wait for the running job")
+                continue
+              }
+              let _=desk.dialog_multiple(session,"gen_h3image_pack_pictures","Choose pictures for the pack","")
               continue
             }
             if id == "gen_mask_choose" {

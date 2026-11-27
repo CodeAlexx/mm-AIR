@@ -204,6 +204,8 @@ pack_strength = tree.find(".//object[@id='gen_h3image_pack_strength_adjustment']
 assert pack_strength.find("property[@name='lower']").text == "0" and pack_strength.find("property[@name='upper']").text == "1"
 assert pack_strength.find("property[@name='value']").text == "1"
 assert 'struct.set(request,generate_pack_strength,field=pack_strength)' in main
+assert tree.find(".//object[@id='gen_h3image_pack_make']/property[@name='label']").text == "Make from pictures"
+assert 'task.spawn(work,fn=h3image.make_pack)' in main
 assert 'array.push(form.packs,wanted)' in (ROOT / "h3image.ai").read_text()
 assert 'generation.enable_text_key(job, text_key_strength)' in main
 assert 'generation.schedule_of(h3_presets, request.profile)' in main
