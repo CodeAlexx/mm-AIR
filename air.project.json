@@ -150,6 +150,7 @@
       {"name": "guide-edit-generate", "entry": "tests/guide_edit_generate.ai"},
       {"name": "h3-lora-admission", "entry": "tests/h3_lora_admission.ai"},
       {"name": "h3-lora-failure", "entry": "tests/h3_lora_failure.ai"},
+      {"name": "h3-text-key-generate", "entry": "tests/h3_text_key_generate.ai"},
       {"name": "masked-reference-capture", "entry": "tests/masked_reference_capture.ai"},
       {"name": "masked-reference-generate", "entry": "tests/masked_reference_generate.ai"},
       {"name": "movie-continuation-generate", "entry": "tests/movie_continuation_generate.ai"},

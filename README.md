@@ -87,6 +87,16 @@ pi-H3 uses ConvRot INT8 transformer weights and Dense INT8 attention. Reference
 mode, character swap, character sheets, latent windowing and Motion Context use
 their own H3 workflows.
 
+In **Generate → MiniMax H3 Base**, **Text encoder** chooses who reads the prompt of a text-to-video job:
+**Qwen3-VL 32B** (the model's own encoder) or **Plato's Key** (a small Qwen3.5 model plus a key file that maps
+its output into the 32B encoder's space; the 32B encoder is not loaded). **Key strength** is 1 by default. Point
+**Settings → Plato's Key donor folder** (`MM_AIR_H3_TEXT_DONOR`, default `~/models/Qwen3.5-2B`) at the published
+Qwen3.5 model folder and **Plato's Key file** (`MM_AIR_H3_TEXT_KEY`) at the key fitted for it
+(`minimax_h3_32b_pk_ridge_qwen3.5_2b.safetensors`). Any other task with the key is refused with a status line.
+The choice and the strength are saved with the parameters and restored by Reuse. AIR's
+`docs/models/H3_PLATOS_KEY.md` has the method, the checks and the limits.
+Receipt program (GPU): `h3-text-key-generate OUTPUT.mp4 [FRAMES WIDTH HEIGHT EVALUATIONS STRENGTH_PERCENT PROMPT_FILE]`.
+
 **Seeds.** Generate, Image Edit and SeedVR2 restoration have a **New** button to
 pick a displayed seed and a **Random** checkbox for a fresh seed on each run.
 Turn **Random** off to repeat the displayed seed. **Reuse** restores the saved
