@@ -184,6 +184,27 @@ fn result_summaries()->bool effects {alloc,io.write} {
   }
   struct.set(recipe,0,field=steps)
   if result.is_ok(parameters.validate_h3image(recipe)) { return false }
+  // reference pack: saved with its strength, absent in an older file, refused above 1
+  var packed=parameters.h3image_defaults()
+  let _=ref.swap(struct.borrow(packed,field=prompt),string.copy("a mech"))
+  let _=ref.swap(struct.borrow(packed,field=output),string.copy("/tmp/a.png"))
+  if str.len(str.view(struct.borrow(packed,field=pack)))!=0 or packed.pack_strength!=1.0 { return false }
+  let _=ref.swap(struct.borrow(packed,field=pack),string.copy("/packs/hero.safetensors"))
+  struct.set(packed,0.4,field=pack_strength)
+  match parameters.encode_h3image(packed) {
+    ok(saved)=>{ match parameters.decode_h3image(str.view(saved)) {
+      ok(back)=>{ var kept=back
+        if str.view(struct.borrow(kept,field=pack))!="/packs/hero.safetensors" or kept.pack_strength!=0.4 { return false } },
+      err(_)=>{ return false }, } },
+    err(_)=>{ return false },
+  }
+  match parameters.decode_h3image("{\"schema\":\"mm-air.h3image.parameters.v1\",\"request\":{\"prompt\":\"a mech\",\"output\":\"/tmp/a.png\",\"images\":[],\"width\":2048,\"height\":2048,\"seed\":7,\"loras\":[],\"expander\":\"off\"}}") {
+    ok(old)=>{ var kept=old
+      if str.len(str.view(struct.borrow(kept,field=pack)))!=0 or kept.pack_strength!=1.0 { return false } },
+    err(_)=>{ return false },
+  }
+  struct.set(packed,1.5,field=pack_strength)
+  if result.is_ok(parameters.validate_h3image(packed)) { return false }
   if array.len(parameters.result_summary("not json"))!=0 { return false }
   if parameters.retired_flux3_prompt("{\"schema\":\"mm-air.flux3-klein.parameters\",\"prompt\":\"a fox\",\"seed\":5}")!="a fox" { return false }
   match parameters.retired_flux3_seed("{\"schema\":\"mm-air.flux3-klein.parameters\",\"prompt\":\"a fox\",\"seed\":5}") { some(value)=>value==5, none=>false, }

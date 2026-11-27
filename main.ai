@@ -397,6 +397,15 @@ fn expander_name(index:u64)->string effects{alloc}{
 // MiniMax H3-Image sampling fields (preset, sampler, schedule, steps, shift, LCM noise) of Generate ("gen_h3image")
 // and Image Edit ("qwen_edit_h3image"). The values live in a request; `recipe_show` puts them in the fields.
 fn recipe_id(prefix:str,name:str)->string effects{alloc}{text.concat(prefix,name)}
+// The H3-Image reference pack controls: the chosen file's name (None when empty), Clear and Strength usable with a pack.
+fn show_pack(session:ref<desk.Session>,file:str,strength:f64)->unit effects{alloc,net,time}{
+  let chosen:bool=str.len(file)>0
+  let _=desk.set_text(session,"gen_h3image_pack_name",if chosen{path.basename(file)}else{string.copy("None")})
+  let _=desk.set_bool(session,"gen_h3image_pack_clear","sensitive",chosen)
+  let _=desk.set_bool(session,"gen_h3image_pack_strength","sensitive",chosen)
+  let _=desk.set_number(session,"gen_h3image_pack_strength","value",strength)
+}
+
 fn recipe_show(session:ref<desk.Session>,prefix:str,r:ref<parameters.H3ImageRequest>)->unit effects{alloc,net,time}{
   let preset:f64=cast.float(parameters.h3image_recipe_index(str.view(struct.borrow(r,field=recipe))))
   let sampler:f64=cast.float(parameters.h3image_sampler_index(str.view(struct.borrow(r,field=sampler))))
@@ -992,6 +1001,8 @@ fn filter_parameters(session:ref<desk.Session>,query:str,model:u32,swap_mode:u32
     (wanted == "" or text.contains("krea h3 moss fibo qwen lora overlay strength",wanted)))
   let _=desk.set_bool(session,"gen_h3image_group","visible",wide and
     (wanted=="" or text.contains("prompt expand expander rewrite low extra high",wanted)))
+  let _=desk.set_bool(session,"gen_h3image_pack_group","visible",wide and
+    (wanted=="" or text.contains("reference pack strength",wanted)))
   let _=desk.set_bool(session,"gen_h3image_sampling_group","visible",wide and
     (wanted=="" or text.contains("sampling preset sampler schedule steps shift lcm noise euler res er-sde stock",wanted)))
   let _=desk.set_bool(session,"gen_ph3image_group","visible",ph3 and
@@ -2081,6 +2092,9 @@ pub fn main(args: view<str>) -> i32
   var qwen_edit_expander:string=string.copy("off")
   var qwen_edit_lora:array<parameters.LoraEntry>=[]
   var generate_expander:string=string.copy("off")
+  // H3-Image reference pack: the chosen file (empty = none) and its strength
+  var generate_pack:string=string.new()
+  var generate_pack_strength:f64=1.0
   var generate_recipe:parameters.H3ImageRequest=parameters.h3image_defaults()
   var qwen_edit_recipe:parameters.H3ImageRequest=parameters.h3image_defaults()
   var qwen_edit_match_source:bool=true
@@ -2697,6 +2711,9 @@ pub fn main(args: view<str>) -> i32
                     output_media=string.copy(struct.borrow(request,field=output))
                     saved_image_output=string.copy(output_media)
                     generate_expander=string.copy(struct.borrow(request,field=expander))
+                    generate_pack=string.copy(struct.borrow(request,field=pack))
+                    generate_pack_strength=request.pack_strength
+                    show_pack(session,str.view(generate_pack),generate_pack_strength)
                     parameters.h3image_copy_recipe(request,generate_recipe)
                     recipe_show(session,"gen_h3image",generate_recipe)
                     resolution_index=h3.resolution_custom()
@@ -3931,6 +3948,14 @@ pub fn main(args: view<str>) -> i32
                     show_project_library(session,movie_library_paths,str.view(movie_project_path))
                     let _=desk.set_text(session,"status",text.concat("Imported movie project: ",str.view(selected)))
                   },err(message)=>{let _=desk.set_text(session,"status",message)}
+                }
+                continue
+              }
+              if id == "gen_h3image_pack_choose" {
+                var chosen = desk.dialog_paths(event)
+                if array.len(chosen)!=0{
+                  generate_pack=string.copy(str.view(array.borrow(chosen,0)))
+                  show_pack(session,str.view(generate_pack),generate_pack_strength)
                 }
                 continue
               }
@@ -5705,6 +5730,10 @@ pub fn main(args: view<str>) -> i32
               generate_expander=expander_name(cast.sat(desk.number(event,"value")))
               continue
             }
+            if id=="gen_h3image_pack_strength"{
+              generate_pack_strength=desk.number(event,"value")
+              continue
+            }
             if id=="qwen_edit_lora_strength"{
               if array.len(qwen_edit_lora)>0{
                 struct.set(array.borrow(qwen_edit_lora,0),desk.number(event,"value"),field=strength)
@@ -6466,6 +6495,17 @@ pub fn main(args: view<str>) -> i32
                 string.new()
               } else { path.dirname(str.view(swap_source_video)) }
               let _ = desk.dialog(session,id,"open","Choose Character Swap source video","",str.view(folder))
+              continue
+            }
+            if id == "gen_h3image_pack_choose" {
+              let folder=if str.len(str.view(generate_pack))==0 {string.new()}
+                else {path.dirname(str.view(generate_pack))}
+              let _=desk.dialog(session,id,"open","Choose reference pack","",str.view(folder))
+              continue
+            }
+            if id == "gen_h3image_pack_clear" {
+              generate_pack=string.new()
+              show_pack(session,"",generate_pack_strength)
               continue
             }
             if id == "gen_mask_choose" {
@@ -8522,6 +8562,8 @@ pub fn main(args: view<str>) -> i32
                 let _=ref.swap(struct.borrow(request,field=output),string.copy(output_media))
                 let _=ref.swap(struct.borrow(request,field=loras),parameters.clone_loras(generate_loras))
                 let _=ref.swap(struct.borrow(request,field=expander),string.copy(str.view(generate_expander)))
+                let _=ref.swap(struct.borrow(request,field=pack),string.copy(str.view(generate_pack)))
+                struct.set(request,generate_pack_strength,field=pack_strength)
                 parameters.h3image_copy_recipe(generate_recipe,request)
                 struct.set(request,width,field=width)
                 struct.set(request,height,field=height)

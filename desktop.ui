@@ -199,6 +199,7 @@
   <object class="GtkStringList" id="h3_text_encoder_list">
     <items><item>Qwen3-VL 32B</item><item>Plato's Key</item></items>
   </object>
+  <object class="GtkAdjustment" id="gen_h3image_pack_strength_adjustment"><property name="lower">0</property><property name="upper">1</property><property name="step-increment">0.05</property><property name="value">1</property></object>
   <object class="GtkAdjustment" id="gen_text_key_strength_adjustment"><property name="lower">0</property><property name="upper">2</property><property name="step-increment">0.05</property><property name="value">1</property></object>
   <object class="GtkStringList" id="h3_projection_list">
     <items><item>Select projection…</item><item>Exact BF16</item><item>ConvRot INT8</item></items>
@@ -563,6 +564,15 @@
                   </object></child></object></child></object></child>
                   <child><object class="GtkFrame" id="gen_h3image_group"><property name="visible">false</property><style><class name="parameter-group"/></style><child><object class="GtkExpander" id="gen_h3image_group_expander"><property name="label">Prompt expander</property><property name="expanded">true</property><property name="margin-start">12</property><property name="margin-end">12</property><property name="margin-top">11</property><property name="margin-bottom">12</property><style><class name="section-title"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">9</property>
                     <child><object class="GtkDropDown" id="gen_h3image_expander"><property name="model">h3image_expander_list</property><property name="selected">0</property></object></child>
+                  </object></child></object></child></object></child>
+                  <child><object class="GtkFrame" id="gen_h3image_pack_group"><property name="visible">false</property><style><class name="parameter-group"/></style><child><object class="GtkExpander" id="gen_h3image_pack_group_expander"><property name="label">Reference pack</property><property name="expanded">true</property><property name="margin-start">12</property><property name="margin-end">12</property><property name="margin-top">11</property><property name="margin-bottom">12</property><style><class name="section-title"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">9</property>
+                    <child><object class="GtkLabel" id="gen_h3image_pack_name"><property name="label">None</property><property name="xalign">0</property><property name="ellipsize">middle</property></object></child>
+                    <child><object class="GtkBox"><property name="spacing">8</property>
+                      <child><object class="GtkButton" id="gen_h3image_pack_choose"><property name="label">Choose</property></object></child>
+                      <child><object class="GtkButton" id="gen_h3image_pack_clear"><property name="label">Clear</property><property name="sensitive">false</property></object></child>
+                    </object></child>
+                    <child><object class="GtkLabel" id="gen_h3image_pack_strength_label"><property name="label">Strength</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child>
+                    <child><object class="GtkSpinButton" id="gen_h3image_pack_strength"><property name="adjustment">gen_h3image_pack_strength_adjustment</property><property name="digits">2</property><property name="numeric">true</property><property name="sensitive">false</property></object></child>
                   </object></child></object></child></object></child>
                   <child><object class="GtkFrame" id="gen_h3image_sampling_group"><property name="visible">false</property><style><class name="parameter-group"/></style><child><object class="GtkExpander" id="gen_h3image_sampling_group_expander"><property name="label">Sampling</property><property name="expanded">true</property><property name="margin-start">12</property><property name="margin-end">12</property><property name="margin-top">11</property><property name="margin-bottom">12</property><style><class name="section-title"/></style><child><object class="GtkBox"><property name="orientation">vertical</property><property name="spacing">9</property>
                     <child><object class="GtkLabel" id="gen_h3image_recipe_label"><property name="label">Preset</property><property name="xalign">0</property><style><class name="field-label"/></style></object></child>

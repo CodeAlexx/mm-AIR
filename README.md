@@ -1391,6 +1391,12 @@ one LoRA, Prompt expander Off / Low / Extra high / Qwen3-VL 8B. It runs in this 
 `MM_AIR_H3IMAGE_AIR_ROOT`, `MM_AIR_H3IMAGE_PE_ROOT` (defaults under `~/models`). If files are missing the screen says so
 in one line.
 
+**Reference pack (2026-11-26).** Generate → MiniMax H3-Image has a **Reference pack** group: **Choose** a pack file
+(saved reference latents of one or more pictures), **Clear**, and **Strength** (0 to 1). The model takes the pack's
+references directly; no picture goes to the text encoder and the prompt needs no `<Picture n>`. A pack is made from
+pictures with AIR's `h3image-refpack-create`; packs written by the community RefMod nodes load as well. Details:
+AIR `docs/models/H3_IMAGE.md`, "Reference packs".
+
 **Text-to-image prompt expansion.** Low and Extra high use the same GPU weight
 placement and prefetch path. One controlled Low run on an RTX 5080 took **143 s**
 with the new path versus **272 s** with the previous loader. Both runs produced

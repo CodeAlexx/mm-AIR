@@ -194,6 +194,17 @@ for row in (44, 45):
     assert tree.find(f".//object[@id='settings_path_{row}']") is not None
     assert tree.find(f".//object[@id='settings_browse_{row}']") is not None
 assert 'parameters.encode_h3_text(request,generate_loras,text_key_request,text_key_strength)' in main
+# H3-Image reference pack: no pack chosen at first, strength 1, Clear and Strength unusable until a pack is chosen.
+assert tree.find(".//object[@id='gen_h3image_pack_group_expander']/property[@name='label']").text == "Reference pack"
+assert tree.find(".//object[@id='gen_h3image_pack_name']/property[@name='label']").text == "None"
+assert tree.find(".//object[@id='gen_h3image_pack_choose']/property[@name='label']").text == "Choose"
+assert tree.find(".//object[@id='gen_h3image_pack_clear']/property[@name='sensitive']").text == "false"
+assert tree.find(".//object[@id='gen_h3image_pack_strength']/property[@name='sensitive']").text == "false"
+pack_strength = tree.find(".//object[@id='gen_h3image_pack_strength_adjustment']")
+assert pack_strength.find("property[@name='lower']").text == "0" and pack_strength.find("property[@name='upper']").text == "1"
+assert pack_strength.find("property[@name='value']").text == "1"
+assert 'struct.set(request,generate_pack_strength,field=pack_strength)' in main
+assert 'array.push(form.packs,wanted)' in (ROOT / "h3image.ai").read_text()
 assert 'generation.enable_text_key(job, text_key_strength)' in main
 assert 'generation.schedule_of(h3_presets, request.profile)' in main
 

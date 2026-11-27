@@ -301,7 +301,9 @@ pub type H3ImageRequest = struct {
   prompt:string,output:string,images:array<string>,width:u64,height:u64,seed:u64,
   loras:array<LoraEntry>,expander:string,
   recipe:string="stock",sampler:string="euler",schedule:string="creator",steps:u64=6,shift:f64=0.0,
-  lcm_noise_start:f64=1.0,lcm_noise_end:f64=1.0,lcm_noise_clip:f64=0.0
+  lcm_noise_start:f64=1.0,lcm_noise_end:f64=1.0,lcm_noise_clip:f64=0.0,
+  // a reference pack file (saved reference latents; empty = none) and how strongly to hold to it, 0..1
+  pack:string="",pack_strength:f64=1.0
 } derive codec(strict)
 type H3ImageFile=struct {schema:string,request:H3ImageRequest} derive codec(strict)
 pub fn h3image_schema() -> str effects {} { "mm-air.h3image.parameters.v1" }
@@ -341,6 +343,9 @@ pub fn h3image_is_edit(request:ref<H3ImageRequest>) -> bool effects {} {
   array.len(struct.borrow(request,field=images))>0
 }
 pub fn validate_h3image(request:ref<H3ImageRequest>) -> result<unit,string> effects {alloc} {
+  if not (request.pack_strength>=0.0) or request.pack_strength>1.0 {
+    return result.err("Reference pack strength is between 0 and 1")
+  }
   let edit=h3image_is_edit(request)
   if text.trim(struct.borrow(request,field=prompt))=="" {
     return result.err(if edit{"Write the edit instruction first"}else{"Write a prompt first"})
@@ -397,7 +402,8 @@ pub fn copy_h3image(request:ref<H3ImageRequest>) -> H3ImageRequest effects {allo
     expander:string.copy(struct.borrow(request,field=expander)),
     recipe:string.copy(struct.borrow(request,field=recipe)),sampler:string.copy(struct.borrow(request,field=sampler)),
     schedule:string.copy(struct.borrow(request,field=schedule)),steps:request.steps,shift:request.shift,
-    lcm_noise_start:request.lcm_noise_start,lcm_noise_end:request.lcm_noise_end,lcm_noise_clip:request.lcm_noise_clip}
+    lcm_noise_start:request.lcm_noise_start,lcm_noise_end:request.lcm_noise_end,lcm_noise_clip:request.lcm_noise_clip,
+    pack:string.copy(struct.borrow(request,field=pack)),pack_strength:request.pack_strength}
 }
 // Sampling presets, samplers and schedules in list order.
 pub fn h3image_recipe_name(index:u64) -> str effects {} {

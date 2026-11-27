@@ -262,6 +262,12 @@ fn run_inner(request:ref<parameters.H3ImageRequest>,sender:ref<option<channel.Se
   // The model's own request: no guidance, no negative prompt; 6 Euler steps unless a sampling recipe says otherwise.
   var form:hrequest.Request=hrequest.request(str.view(prompt),width,height,images,str.view(output))
   form.seed=cast.sat(request.seed)
+  // A reference pack: saved reference latents the model takes without showing pictures to the text encoder.
+  if str.len(str.view(struct.borrow(request,field=pack)))>0{
+    var wanted:hrequest.PackUse=hrequest.pack(str.view(struct.borrow(request,field=pack)))
+    wanted.strength=request.pack_strength
+    array.push(form.packs,wanted)
+  }
   // Sampling: a preset, or the request's own fields with "custom".
   if str.view(struct.borrow(request,field=recipe))!="custom"{
     if not hrequest.apply_preset(form,str.view(struct.borrow(request,field=recipe))){return failure(str.view(output),"Unknown preset")}

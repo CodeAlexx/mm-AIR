@@ -5,7 +5,8 @@ import std.channel as channel
 import std.text as text
 
 // One real MM-Air MiniMax H3-Image job through the application's own worker (h3image.run, the code the
-// Generate and Image Edit buttons start): OUTPUT.png PROMPT SEED SIZE(WxH or keep) EXPANDER(off|low|xhigh|qwen) [IMAGE.png | lora=FILE.safetensors ...]
+// Generate and Image Edit buttons start): OUTPUT.png PROMPT SEED SIZE(WxH or keep) EXPANDER(off|low|xhigh|qwen)
+// [IMAGE.png | lora=FILE.safetensors | pack=FILE.safetensors | pack_strength=0..1 ...]
 pub fn main(args:view<str>)->i32
     effects {alloc,env,ffi,fs.meta,fs.read,fs.write,gpu,io.write,net,process,thread,time} {
   if view.len(args)<6 {
@@ -35,6 +36,10 @@ pub fn main(args:view<str>)->i32
     if str.starts_with(argument,"lora=") {
       array.push(struct.borrow(request,field=loras),parameters.LoraEntry{path:string.copy(str.slice(argument,5,str.len(argument))),
         strength:1.0,enabled:true})
+    } else if str.starts_with(argument,"pack=") {
+      let _p=ref.swap(struct.borrow(request,field=pack),string.copy(str.slice(argument,5,str.len(argument))))
+    } else if str.starts_with(argument,"pack_strength=") {
+      struct.set(request,match text.parse_f64(str.slice(argument,14,str.len(argument))){some(v)=>v,none=>1.0},field=pack_strength)
     } else {
       array.push(struct.borrow(request,field=images),string.copy(argument))
     }
