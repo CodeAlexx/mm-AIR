@@ -302,6 +302,8 @@ pub type H3ImageRequest = struct {
   loras:array<LoraEntry>,expander:string,
   recipe:string="stock",sampler:string="euler",schedule:string="creator",steps:u64=6,shift:f64=0.0,
   lcm_noise_start:f64=1.0,lcm_noise_end:f64=1.0,lcm_noise_clip:f64=0.0,
+  // a second pass on the finished picture: steps (0 = off), denoise in (0,1], its noise seed
+  refine_steps:u64=0,refine_denoise:f64=0.4,refine_seed:u64=100000,
   // a reference pack file (saved reference latents; empty = none) and how strongly to hold to it, 0..1
   pack:string="",pack_strength:f64=1.0
 } derive codec(strict)
@@ -379,6 +381,7 @@ pub fn validate_h3image(request:ref<H3ImageRequest>) -> result<unit,string> effe
   if not (request.shift>=0.0) or not (request.lcm_noise_start>=0.0) or not (request.lcm_noise_end>=0.0) or not (request.lcm_noise_clip>=0.0) {
     return result.err("Shift and LCM noise must be 0 or above")
   }
+  if not (request.refine_denoise>0.0) or not (request.refine_denoise<=1.0) {return result.err("Refine denoise must be above 0 and at most 1")}
   if not h3image_expander_valid(struct.borrow(request,field=expander),edit) {
     return result.err("Choose a prompt expander from the list")
   }
@@ -403,14 +406,15 @@ pub fn copy_h3image(request:ref<H3ImageRequest>) -> H3ImageRequest effects {allo
     recipe:string.copy(struct.borrow(request,field=recipe)),sampler:string.copy(struct.borrow(request,field=sampler)),
     schedule:string.copy(struct.borrow(request,field=schedule)),steps:request.steps,shift:request.shift,
     lcm_noise_start:request.lcm_noise_start,lcm_noise_end:request.lcm_noise_end,lcm_noise_clip:request.lcm_noise_clip,
+    refine_steps:request.refine_steps,refine_denoise:request.refine_denoise,refine_seed:request.refine_seed,
     pack:string.copy(struct.borrow(request,field=pack)),pack_strength:request.pack_strength}
 }
 // Sampling presets, samplers and schedules in list order.
 pub fn h3image_recipe_name(index:u64) -> str effects {} {
-  if index==1{"lcm_6"}else if index==2{"lcm_10_lq"}else if index==3{"res_20"}else if index==4{"er_sde_8"}else if index==5{"custom"}else{"stock"}
+  if index==1{"lcm_6"}else if index==2{"lcm_10_lq"}else if index==3{"res_20"}else if index==4{"er_sde_8"}else if index==5{"photoflow"}else if index==6{"custom"}else{"stock"}
 }
 pub fn h3image_recipe_index(name:str) -> u64 effects {} {
-  if name=="lcm_6"{1}else if name=="lcm_10_lq"{2}else if name=="res_20"{3}else if name=="er_sde_8"{4}else if name=="custom"{5}else{0}
+  if name=="lcm_6"{1}else if name=="lcm_10_lq"{2}else if name=="res_20"{3}else if name=="er_sde_8"{4}else if name=="photoflow"{5}else if name=="custom"{6}else{0}
 }
 pub fn h3image_sampler_name(index:u64) -> str effects {} {
   if index==1{"lcm"}else if index==2{"res_multistep"}else if index==3{"er_sde"}else{"euler"}
@@ -434,6 +438,9 @@ pub fn h3image_copy_recipe(from:ref<H3ImageRequest>,to:ref<H3ImageRequest>) -> u
   struct.set(to,from.lcm_noise_start,field=lcm_noise_start)
   struct.set(to,from.lcm_noise_end,field=lcm_noise_end)
   struct.set(to,from.lcm_noise_clip,field=lcm_noise_clip)
+  struct.set(to,from.refine_steps,field=refine_steps)
+  struct.set(to,from.refine_denoise,field=refine_denoise)
+  struct.set(to,from.refine_seed,field=refine_seed)
 }
 // A preset's values in the sampling fields; false for "custom" or an unknown name (the fields stay as they are).
 pub fn h3image_apply_recipe(request:ref<H3ImageRequest>,name:str) -> bool effects {alloc} {
@@ -447,6 +454,9 @@ pub fn h3image_apply_recipe(request:ref<H3ImageRequest>,name:str) -> bool effect
   struct.set(request,form.lcm_noise_start,field=lcm_noise_start)
   struct.set(request,form.lcm_noise_end,field=lcm_noise_end)
   struct.set(request,form.lcm_noise_clip,field=lcm_noise_clip)
+  struct.set(request,form.refine_steps,field=refine_steps)
+  struct.set(request,form.refine_denoise,field=refine_denoise)
+  struct.set(request,cast.sat(form.refine_seed),field=refine_seed)
   true
 }
 pub fn encode_h3image(request:ref<H3ImageRequest>) -> result<string,string> effects {alloc} {

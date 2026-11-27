@@ -303,6 +303,9 @@ fn run_inner(request:ref<parameters.H3ImageRequest>,sender:ref<option<channel.Se
     form.lcm_noise_start=request.lcm_noise_start
     form.lcm_noise_end=request.lcm_noise_end
     form.lcm_noise_clip=request.lcm_noise_clip
+    form.refine_steps=request.refine_steps
+    form.refine_denoise=request.refine_denoise
+    form.refine_seed=cast.sat(request.refine_seed)
   }
   match hrequest.validate(form){
     ok(_)=>{},

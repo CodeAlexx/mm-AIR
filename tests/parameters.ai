@@ -175,6 +175,12 @@ fn result_summaries()->bool effects {alloc,io.write} {
   if str.view(struct.borrow(recipe,field=sampler))!="lcm" or str.view(struct.borrow(recipe,field=schedule))!="linear_quadratic" or recipe.steps!=10
       or recipe.shift!=5.0 or recipe.lcm_noise_start!=0.9 or recipe.lcm_noise_end!=0.95 { return false }
   if parameters.h3image_apply_recipe(recipe,"custom") { return false }
+  var flow=parameters.h3image_defaults()
+  if not parameters.h3image_apply_recipe(flow,"photoflow") { return false }
+  if str.view(struct.borrow(flow,field=sampler))!="lcm" or str.view(struct.borrow(flow,field=schedule))!="simple" or flow.steps!=6
+      or flow.refine_steps!=3 or flow.refine_denoise!=0.4 or flow.refine_seed!=100000 { return false }
+  if parameters.h3image_recipe_index("photoflow")!=5 or parameters.h3image_recipe_name(6)!="custom" { return false }
+  if not parameters.h3image_apply_recipe(flow,"lcm_6") or flow.refine_steps!=0 { return false }
   match parameters.encode_h3image(recipe) {
     ok(saved)=>{ match parameters.decode_h3image(str.view(saved)) {
       ok(back)=>{ var kept=back

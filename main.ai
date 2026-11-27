@@ -418,13 +418,16 @@ fn recipe_show(session:ref<desk.Session>,prefix:str,r:ref<parameters.H3ImageRequ
   let _=desk.set_text(session,str.view(recipe_id(prefix,"_noise_start")),str.view(string.from_float(r.lcm_noise_start)))
   let _=desk.set_text(session,str.view(recipe_id(prefix,"_noise_end")),str.view(string.from_float(r.lcm_noise_end)))
   let _=desk.set_text(session,str.view(recipe_id(prefix,"_noise_clip")),str.view(string.from_float(r.lcm_noise_clip)))
+  let _=desk.set_text(session,str.view(recipe_id(prefix,"_refine_steps")),str.view(string.from_int(cast.sat(r.refine_steps))))
+  let _=desk.set_text(session,str.view(recipe_id(prefix,"_refine_denoise")),str.view(string.from_float(r.refine_denoise)))
+  let _=desk.set_text(session,str.view(recipe_id(prefix,"_refine_seed")),str.view(string.from_int(cast.sat(r.refine_seed))))
   ()
 }
 // A changed sampling field switches the preset to Custom.
 fn recipe_custom(session:ref<desk.Session>,prefix:str,r:ref<parameters.H3ImageRequest>)->unit effects{alloc,net,time}{
   if str.view(struct.borrow(r,field=recipe))!="custom"{
     let _=ref.swap(struct.borrow(r,field=recipe),string.copy("custom"))
-    let _=desk.set_number(session,str.view(recipe_id(prefix,"_recipe")),"selected",5.0)
+    let _=desk.set_number(session,str.view(recipe_id(prefix,"_recipe")),"selected",6.0)
   }
   ()
 }
@@ -461,6 +464,28 @@ fn recipe_event(session:ref<desk.Session>,prefix:str,id:str,event:ref<json.Docum
   if id==str.view(recipe_id(prefix,"_steps")){
     match text.parse_u64(str.view(text.trim(desk.field(event,"value")))){
       some(value)=>{if value!=r.steps and value>=1{struct.set(r,value,field=steps)
+        recipe_custom(session,prefix,r)}},
+      none=>{},
+    }
+    return true
+  }
+  if id==str.view(recipe_id(prefix,"_refine_steps")) or id==str.view(recipe_id(prefix,"_refine_seed")){
+    let seed:bool=id==str.view(recipe_id(prefix,"_refine_seed"))
+    match text.parse_u64(str.view(text.trim(desk.field(event,"value")))){
+      some(value)=>{
+        let current:u64=if seed{r.refine_seed}else{r.refine_steps}
+        if value!=current{
+          if seed{struct.set(r,value,field=refine_seed)}else{struct.set(r,value,field=refine_steps)}
+          recipe_custom(session,prefix,r)
+        }
+      },
+      none=>{},
+    }
+    return true
+  }
+  if id==str.view(recipe_id(prefix,"_refine_denoise")){
+    match text.parse_f64(str.view(text.trim(desk.field(event,"value")))){
+      some(value)=>{if value>0.0 and value<=1.0 and value!=r.refine_denoise{struct.set(r,value,field=refine_denoise)
         recipe_custom(session,prefix,r)}},
       none=>{},
     }
@@ -753,7 +778,9 @@ fn show_edit_model(session:ref<desk.Session>,fibo:bool,fibo_int8:bool,is_h3i:boo
     "qwen_edit_h3image_recipe_label","qwen_edit_h3image_recipe","qwen_edit_h3image_sampler_label","qwen_edit_h3image_sampler",
     "qwen_edit_h3image_schedule_label","qwen_edit_h3image_schedule","qwen_edit_h3image_steps_label","qwen_edit_h3image_steps",
     "qwen_edit_h3image_shift_label","qwen_edit_h3image_shift","qwen_edit_h3image_noise_start_label","qwen_edit_h3image_noise_start",
-    "qwen_edit_h3image_noise_end_label","qwen_edit_h3image_noise_end","qwen_edit_h3image_noise_clip_label","qwen_edit_h3image_noise_clip"]
+    "qwen_edit_h3image_noise_end_label","qwen_edit_h3image_noise_end","qwen_edit_h3image_noise_clip_label","qwen_edit_h3image_noise_clip",
+    "qwen_edit_h3image_refine_steps_label","qwen_edit_h3image_refine_steps","qwen_edit_h3image_refine_denoise_label","qwen_edit_h3image_refine_denoise",
+    "qwen_edit_h3image_refine_seed_label","qwen_edit_h3image_refine_seed"]
   index=0
   loop{if index>=array.len(h3image_only){break}
     let _=desk.set_bool(session,array.borrow(h3image_only,index),"visible",is_h3i)
